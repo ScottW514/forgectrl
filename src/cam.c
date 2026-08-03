@@ -698,6 +698,8 @@ static void *worker(void *arg)
                             "using software encode\n");
                 }
             }
+            static int vpu_hard_fails;
+            int vpu_rc = -1;
             if (vpu) {
                 uint8_t *yp, *up, *vp;
                 int ys, uvs;
@@ -732,17 +734,23 @@ static void *worker(void *arg)
                 }
 #endif
                 now_ts(&e1);
-                if (vpu_jpeg_encode(vpu, &jpg, &len) == 0) {
+                vpu_rc = vpu_jpeg_encode(vpu, &jpg, &len);
+                if (vpu_rc == 0) {
                     via_vpu = 1;
-                } else {
-                    fprintf(stderr, "cam: VPU encode failed, "
+                    vpu_hard_fails = 0;
+                } else if (vpu_rc > 0) {
+                    /* transient errored frame (e.g. bitstream overflow
+                     * on a noise frame): drop it, keep the VPU */
+                    vpu_hard_fails = 0;
+                } else if (++vpu_hard_fails >= 3) {
+                    fprintf(stderr, "cam: repeated VPU encode failures, "
                             "falling back to software\n");
                     vpu_jpeg_close(vpu);
                     vpu = NULL;
                     vpu_disabled = 1;
                 }
             }
-            if (!via_vpu) {
+            if (!via_vpu && vpu_rc < 0) {
                 debayer_bggr_half(raw, rgb_half, CAM_W, CAM_H, HFLIP);
                 now_ts(&e1);
                 if (jpeg_encode_rgb(rgb_half, HALF_W, HALF_H,

@@ -131,6 +131,10 @@ vpu_jpeg_t *vpu_jpeg_open(int w, int h, int quality)
     fc.fmt.pix.width = (unsigned)w;
     fc.fmt.pix.height = (unsigned)h;
     fc.fmt.pix.pixelformat = V4L2_PIX_FMT_JPEG;
+    /* A high-entropy frame (e.g. a CSI noise glitch) can out-size the
+     * driver's ~2 B/px default and trip "JPEG too large for capture
+     * buffer"; ask for 3 B/px of headroom. */
+    fc.fmt.pix.sizeimage = (unsigned)(w * h * 3);
     if (xioctl(v->fd, VIDIOC_S_FMT, &fc) < 0)
         goto fail;
 
@@ -188,6 +192,12 @@ int vpu_jpeg_encode(vpu_jpeg_t *v, uint8_t **jpeg, size_t *len)
     if (xioctl(v->fd, VIDIOC_DQBUF, &cb) < 0)
         return -1;
     xioctl(v->fd, VIDIOC_DQBUF, &ob);
+
+    /* A buffer flagged in error (e.g. bitstream overflow on a noise
+     * frame) is a single bad frame, not a broken encoder: drop it. */
+    if ((cb.flags & V4L2_BUF_FLAG_ERROR) || cb.bytesused == 0 ||
+        cb.bytesused > v->cap_size)
+        return 1;
 
     uint8_t *out = malloc(cb.bytesused);
     if (!out)

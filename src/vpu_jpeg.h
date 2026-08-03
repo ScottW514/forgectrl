@@ -25,7 +25,9 @@ void vpu_jpeg_planes(vpu_jpeg_t *v, uint8_t **y, uint8_t **u, uint8_t **vv,
                      int *y_stride, int *uv_stride);
 
 /* Encode the currently-filled OUTPUT buffer. On success *jpeg is malloc'd
- * (caller frees) and 0 is returned. */
+ * (caller frees) and 0 is returned. Returns 1 for a dropped frame (the
+ * encoder flagged it in error - transient, keep using the VPU) or -1 for
+ * a hard failure. */
 int vpu_jpeg_encode(vpu_jpeg_t *v, uint8_t **jpeg, size_t *len);
 
 void vpu_jpeg_close(vpu_jpeg_t *v);
