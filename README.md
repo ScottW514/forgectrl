@@ -6,9 +6,26 @@ Glowforge lasers.
 forgectrl runs on the factory i.MX6 control board and exposes the machine's
 non-motion functions over HTTP (port 8080). Motion is handled by the separate
 [grblHAL-glowforge](https://github.com/ScottW514/grblHAL-glowforge) controller;
-forgectrl is the control surface around it. Camera service is implemented;
-realtime hardware status/settings, hardware control, and controller-mode
-selection (GRBL / Glowforge cloud) are planned here.
+forgectrl is the control surface around it. Camera service and machine
+settings (homing-method selection) are implemented; realtime hardware
+status, hardware control, and controller-mode selection (GRBL / Glowforge
+cloud) are planned here.
+
+## Machine settings
+
+Settings persist in `/data/forgefirm.conf`, shared with the
+grblHAL-glowforge controller (it re-reads the file on every `$H`, so
+changes apply without a restart).
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /settings` | Current settings as JSON |
+| `POST /settings?homing_mode=` | Set the homing method |
+
+`homing_mode` selects how the controller executes `$H`: `gfcloud` (the
+Glowforge web-service camera homing), `switches` (physical limit
+switches), or `none` (homing rejected). The index page has a selector
+for it.
 
 ## Camera service
 
