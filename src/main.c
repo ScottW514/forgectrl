@@ -11,6 +11,8 @@
  *   GET /cam/stream?cam=lid|head            multipart MJPEG, 1296x972
  *   GET /cam/snapshot?cam=&res=full|half&q= single JPEG (default full res)
  *   GET /cam/status                         JSON engine status
+ *   GET /settings                           JSON machine settings
+ *   POST /settings?homing_mode=             update a machine setting
  *
  * The two cameras share the hardware mux; the newest request wins it. A
  * STREAM request for the other camera preempts the current stream
@@ -25,6 +27,7 @@
  */
 #define _GNU_SOURCE
 #include "cam.h"
+#include "settings.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -223,17 +226,86 @@ static int cb_status(const struct _u_request *req, struct _u_response *res,
     return U_CALLBACK_CONTINUE;
 }
 
+/* ------------------------------------------------------------- settings */
+
+/* Machine settings shared with the grblHAL-glowforge controller through
+ * /data/forgefirm.conf. homing_mode selects how the controller executes
+ * $H: 'gfcloud' = the Glowforge web service homing sequence (cameras),
+ * 'switches' = physical limit switches, 'none' = homing rejected. The
+ * controller re-reads the file on every $H, so changes apply without a
+ * restart. */
+
+static const char *const homing_modes[] = { "none", "gfcloud", "switches" };
+
+static int homing_mode_valid(const char *v)
+{
+    for (size_t i = 0; i < sizeof(homing_modes) / sizeof(*homing_modes); i++)
+        if (!strcmp(v, homing_modes[i]))
+            return 1;
+    return 0;
+}
+
+static int reply_settings(struct _u_response *res)
+{
+    char mode[32];
+    if (settings_get("homing_mode", mode, sizeof(mode)) != 0 ||
+        !homing_mode_valid(mode))
+        snprintf(mode, sizeof(mode), "none");
+    char body[64];
+    snprintf(body, sizeof(body), "{\"homing_mode\":\"%s\"}", mode);
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
+static int cb_settings_get(const struct _u_request *req,
+                           struct _u_response *res, void *user_data)
+{
+    (void)req;
+    (void)user_data;
+    return reply_settings(res);
+}
+
+static int cb_settings_post(const struct _u_request *req,
+                            struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    const char *v = u_map_get(req->map_post_body, "homing_mode");
+    if (!v)
+        v = u_map_get(req->map_url, "homing_mode");
+    if (!v)
+        return reply_error(res, 400, "missing homing_mode");
+    if (!homing_mode_valid(v))
+        return reply_error(res, 400,
+            "homing_mode must be 'none', 'gfcloud' or 'switches'");
+    if (settings_set("homing_mode", v) != 0)
+        return reply_error(res, 500, "cannot write settings file");
+    fprintf(stderr, "forgectrl: homing_mode set to %s\n", v);
+    return reply_settings(res);
+}
+
 /* One stream at a time: the camera toggle swaps the single <img> source
  * (closing the old stream connection) and retries through the server's
  * switch grace. "Head peek" uses the snapshot borrow path, so it works
  * while the lid stream is up. */
 static const char index_html[] =
-    "<!DOCTYPE html><html><head><title>ForgeFIRM camera</title>"
+    "<!DOCTYPE html><html><head><title>ForgeFIRM</title>"
     "<style>body{font-family:sans-serif;background:#111;color:#ddd;"
     "text-align:center}img{max-width:95%;border:1px solid #444;"
     "margin-top:8px}a{color:#8cf}button{margin:0 4px}"
-    "#msg{color:#fc6;min-height:1.2em}</style></head><body>"
-    "<h2>ForgeFIRM camera</h2>"
+    "#msg{color:#fc6;min-height:1.2em}"
+    "fieldset{display:inline-block;border:1px solid #444;margin:8px 0}"
+    "select{margin:0 4px}#hmsg{color:#fc6;min-height:1.2em}"
+    "</style></head><body>"
+    "<h2>ForgeFIRM</h2>"
+    "<fieldset><legend>Homing method</legend>"
+    "<select id=\"homing\">"
+    "<option value=\"none\">Disabled</option>"
+    "<option value=\"gfcloud\">Glowforge web service (cameras)</option>"
+    "<option value=\"switches\">Limit switches</option>"
+    "</select>"
+    "<button onclick=\"saveHoming()\">Save</button>"
+    "<div id=\"hmsg\"></div></fieldset>"
     "<p><button onclick=\"setCam('lid')\">Lid stream</button>"
     "<button onclick=\"setCam('head')\">Head stream</button>"
     "<button onclick=\"peek()\">Head peek</button> &nbsp; "
@@ -246,7 +318,17 @@ static const char index_html[] =
     "<script>"
     "var cam='lid',retries=0;"
     "var v=document.getElementById('v'),p=document.getElementById('p'),"
-    "msg=document.getElementById('msg');"
+    "msg=document.getElementById('msg'),"
+    "hsel=document.getElementById('homing'),"
+    "hmsg=document.getElementById('hmsg');"
+    "fetch('/settings').then(function(r){return r.json();})"
+    ".then(function(s){hsel.value=s.homing_mode;})"
+    ".catch(function(){hmsg.textContent='cannot read settings';});"
+    "function saveHoming(){hmsg.textContent='saving...';"
+    "fetch('/settings?homing_mode='+hsel.value,{method:'POST'})"
+    ".then(function(r){if(!r.ok)throw 0;return r.json();})"
+    ".then(function(s){hmsg.textContent='homing: '+s.homing_mode;})"
+    ".catch(function(){hmsg.textContent='save failed';});}"
     "function setCam(c){cam=c;retries=0;msg.textContent='';"
     "v.src='/cam/stream?cam='+c+'&t='+Date.now();}"
     "function reload(){v.src='/cam/stream?cam='+cam+'&t='+Date.now();}"
@@ -313,6 +395,10 @@ int main(void)
                                &cb_snapshot, NULL);
     ulfius_add_endpoint_by_val(&inst, "GET", "/cam/status", NULL, 0,
                                &cb_status, NULL);
+    ulfius_add_endpoint_by_val(&inst, "GET", "/settings", NULL, 0,
+                               &cb_settings_get, NULL);
+    ulfius_add_endpoint_by_val(&inst, "POST", "/settings", NULL, 0,
+                               &cb_settings_post, NULL);
 
     if (ulfius_start_framework(&inst) != U_OK) {
         fprintf(stderr, "forgectrl: cannot start HTTP on port %u\n", port);

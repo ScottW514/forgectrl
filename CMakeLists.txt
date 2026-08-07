@@ -7,6 +7,7 @@ add_executable(forgectrl
   src/main.c
   src/cam.c
   src/debayer.c
+  src/settings.c
   src/vpu_jpeg.c
 )
 target_compile_options(forgectrl PRIVATE -Wall -Wextra -O2)
