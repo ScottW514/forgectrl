@@ -29,12 +29,15 @@ void cam_engine_init(void);
 void cam_engine_shutdown(void);
 
 /* Blocking snapshot from the live engine. full=1 -> 2592x1944 bilinear,
- * full=0 -> 1296x972. quality 1..100. On success *jpeg is malloc'd (caller
- * frees). If the other camera is streaming, the worker borrows the mux for
- * one frame (the stream freezes for a few seconds) - snapshots do not fail
+ * full=0 -> 1296x972. quality 1..100. lamp overrides the scene lamp for
+ * this shot only (0..1023; -1 = engine default) - a few frames are
+ * drained after the change so the delivered frame is exposed under the
+ * requested lighting. On success *jpeg is malloc'd (caller frees). If
+ * the other camera is streaming, the worker borrows the mux for one
+ * frame (the stream freezes for a few seconds) - snapshots do not fail
  * busy. Returns 0, or -1 with a message in err (pipeline failure,
  * timeout). */
-int cam_snapshot(cam_id_t cam, int full, int quality,
+int cam_snapshot(cam_id_t cam, int full, int quality, int lamp,
                  uint8_t **jpeg, size_t *len, char *err, size_t errlen);
 
 /* Stream client: open makes the engine serve `cam` (starting it, or

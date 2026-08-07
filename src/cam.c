@@ -48,6 +48,8 @@
 #define DQ_TIMEOUT_S    2   /* select() timeout per frame; also the idle tick */
 #define MAX_DQ_TIMEOUTS 3   /* consecutive timeouts -> engine gives up */
 #define IDLE_STOP_S     10  /* no clients/snapshots for this long -> teardown */
+#define LAMP_SKIP_FRAMES 3  /* frames discarded after a lamp change (in-flight
+                             * exposures predate the new scene lighting) */
 #define SNAP_TIMEOUT_S  15
 #define CLIENT_WAIT_S   5
 #define SWITCH_GRACE_S  3   /* wait this long for clients to drain on switch */
@@ -111,6 +113,7 @@ static struct {
     cam_id_t        snap_cam;
     int             snap_full;
     int             snap_quality;
+    int             snap_lamp;      /* per-shot lamp override, -1 = default */
     uint8_t        *snap_jpg;       /* malloc'd result, taken by requester */
     size_t          snap_len;
 
@@ -566,9 +569,11 @@ static void fail_snap(void)
 }
 
 /* Capture one frame from the currently-started pipeline and feed it to
- * deliver_snap. Used by the borrow path. */
+ * deliver_snap. Used by the borrow path. The first `skip` dequeued
+ * frames are requeued unused (frames already in flight predate a
+ * just-changed lamp level). */
 static int grab_one_snap(uint8_t *raw_cached, uint8_t *rgb_half,
-                         uint8_t **prgb_full)
+                         uint8_t **prgb_full, int skip)
 {
     for (int tries = 0; tries < MAX_DQ_TIMEOUTS; tries++) {
         fd_set fds;
@@ -589,6 +594,12 @@ static int grab_one_snap(uint8_t *raw_cached, uint8_t *rgb_half,
             if (errno == EAGAIN || errno == EIO)
                 continue;
             return -1;
+        }
+        if (skip > 0) {
+            skip--;
+            tries--;
+            xioctl(eng.fd, VIDIOC_QBUF, &buf);
+            continue;
         }
         if (eng.cached_bufs) {
             deliver_snap(eng.bufs[buf.index].start, rgb_half, prgb_full);
@@ -619,6 +630,8 @@ static void *worker(void *arg)
            stat_enc_ms = 0;
     unsigned stat_n = 0;
     int dq_timeouts = 0;
+    int lamp_skip = 0;      /* frames left to drain after a lamp override */
+    int lamp_restore = -1;  /* engine lamp level to restore, -1 = none */
     /* FPS cap pacing (eng.fps_cap is set once at init) */
     double cap_period = eng.fps_cap > 0 ? 1.0 / eng.fps_cap : 0;
     double next_due = 0;
@@ -639,6 +652,7 @@ static void *worker(void *arg)
         int clients = eng.clients;
         int snap = eng.snap_pending == 1 && eng.snap_cam == eng.home_cam;
         int borrow = eng.snap_pending == 1 && eng.snap_cam != eng.home_cam;
+        int snap_lamp = eng.snap_lamp;
         cam_id_t borrow_cam = eng.snap_cam;
         cam_id_t orig_cam = eng.home_cam;
         int idle = clients == 0 && !snap && !borrow &&
@@ -648,6 +662,18 @@ static void *worker(void *arg)
         if (stop || idle)
             break;
 
+        /* Same-camera snapshot with a lamp override: relight, then let
+         * the in-flight frames drain before delivering; the engine level
+         * is restored after delivery (or if the requester gives up). */
+        if (snap && snap_lamp >= 0 && lamp_restore < 0) {
+            sysfs_write_int(camdefs[orig_cam].lamp, snap_lamp);
+            lamp_restore = eng.lamp_level;
+            lamp_skip = LAMP_SKIP_FRAMES;
+        } else if (!snap && lamp_restore >= 0) {
+            sysfs_write_int(camdefs[orig_cam].lamp, lamp_restore);
+            lamp_restore = -1;
+        }
+
         /* Cross-camera snapshot: borrow the mux - pause the stream,
          * switch, grab one frame, switch back. Stream clients just see
          * the frame gap (a few seconds). */
@@ -655,7 +681,12 @@ static void *worker(void *arg)
             char berr[128];
             release_capture();
             if (start_capture(borrow_cam, berr, sizeof(berr)) == 0) {
-                if (grab_one_snap(raw_cached, rgb_half, &rgb_full))
+                int skip = 0;
+                if (snap_lamp >= 0) {
+                    sysfs_write_int(camdefs[borrow_cam].lamp, snap_lamp);
+                    skip = LAMP_SKIP_FRAMES;
+                }
+                if (grab_one_snap(raw_cached, rgb_half, &rgb_full, skip))
                     fail_snap();
                 release_capture();
             } else {
@@ -730,9 +761,19 @@ static void *worker(void *arg)
                    (size_t)CAM_W * CAM_H);
         now_ts(&c2);
 
-        /* Snapshot request rides on the same raw frame */
-        if (snap)
-            deliver_snap(raw, rgb_half, &rgb_full);
+        /* Snapshot request rides on the same raw frame (after any
+         * lamp-change drain) */
+        if (snap) {
+            if (lamp_skip > 0) {
+                lamp_skip--;
+            } else {
+                deliver_snap(raw, rgb_half, &rgb_full);
+                if (lamp_restore >= 0) {
+                    sysfs_write_int(camdefs[orig_cam].lamp, lamp_restore);
+                    lamp_restore = -1;
+                }
+            }
+        }
 
         /* Stream frame: demosaic + encode, VPU first, libjpeg fallback */
         if (encode) {
@@ -1004,7 +1045,7 @@ void cam_engine_shutdown(void)
 
 /* ------------------------------------------------------------ snapshots */
 
-int cam_snapshot(cam_id_t cam, int full, int quality,
+int cam_snapshot(cam_id_t cam, int full, int quality, int lamp,
                  uint8_t **jpeg, size_t *len, char *err, size_t errlen)
 {
     pthread_mutex_lock(&eng.ctl);
@@ -1027,6 +1068,7 @@ int cam_snapshot(cam_id_t cam, int full, int quality,
     eng.snap_cam = cam;
     eng.snap_full = full;
     eng.snap_quality = quality;
+    eng.snap_lamp = lamp;
     now_ts(&eng.last_activity);
 
     struct timespec deadline;

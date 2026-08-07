@@ -9,7 +9,8 @@
  *   GET /?action=stream          mjpg-streamer-compatible stream (lid)
  *   GET /?action=snapshot        mjpg-streamer-compatible snapshot (lid)
  *   GET /cam/stream?cam=lid|head            multipart MJPEG, 1296x972
- *   GET /cam/snapshot?cam=&res=full|half&q= single JPEG (default full res)
+ *   GET /cam/snapshot?cam=&res=full|half&q=&lamp=  single JPEG (full res;
+ *                                lamp overrides the scene lamp for the shot)
  *   GET /cam/status                         JSON engine status
  *   GET /settings                           JSON machine settings
  *   POST /settings?homing_mode=             update a machine setting
@@ -149,13 +150,13 @@ static int do_stream(cam_id_t cam, struct _u_response *res)
     return U_CALLBACK_CONTINUE;
 }
 
-static int do_snapshot(cam_id_t cam, int full, int quality,
+static int do_snapshot(cam_id_t cam, int full, int quality, int lamp,
                        struct _u_response *res)
 {
     uint8_t *jpg = NULL;
     size_t len = 0;
     char err[256];
-    if (cam_snapshot(cam, full, quality, &jpg, &len, err, sizeof(err)))
+    if (cam_snapshot(cam, full, quality, lamp, &jpg, &len, err, sizeof(err)))
         return reply_error(res, strstr(err, "busy") ? 409 : 503, err);
     ulfius_set_binary_body_response(res, 200, (const char *)jpg, len);
     ulfius_add_header_to_response(res, "Content-Type", "image/jpeg");
@@ -200,7 +201,13 @@ static int cb_snapshot(const struct _u_request *req, struct _u_response *res,
         if (quality < 1 || quality > 100)
             return reply_error(res, 400, "q must be 1..100");
     }
-    return do_snapshot(cam, full, quality, res);
+    int lamp = -1;
+    if ((v = u_map_get(req->map_url, "lamp")) != NULL) {
+        lamp = atoi(v);
+        if (lamp < 0 || lamp > 1023)
+            return reply_error(res, 400, "lamp must be 0..1023");
+    }
+    return do_snapshot(cam, full, quality, lamp, res);
 }
 
 static int cb_status(const struct _u_request *req, struct _u_response *res,
@@ -360,7 +367,7 @@ static int cb_root(const struct _u_request *req, struct _u_response *res,
         if (!strcmp(action, "stream"))
             return do_stream(CAM_LID, res);
         if (!strcmp(action, "snapshot"))
-            return do_snapshot(CAM_LID, 1, SNAP_Q_DEF, res);
+            return do_snapshot(CAM_LID, 1, SNAP_Q_DEF, -1, res);
         return reply_error(res, 400, "unknown action");
     }
     ulfius_set_string_body_response(res, 200, index_html);
