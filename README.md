@@ -20,13 +20,18 @@ pipeline:
 | `GET /` | Index page: stream toggle, head peek, snapshots, status |
 | `GET /cam/stream?cam=lid\|head` | Multipart MJPEG, 1296×972 |
 | `GET /cam/snapshot?cam=lid\|head&res=full\|half&q=1..100` | Single JPEG, default full 2592×1944 |
-| `GET /cam/status` | JSON: running/cam/clients/frames/fps/encoder |
+| `GET /cam/status` | JSON: running/cam/clients/frames/fps/fps_cap/encoder/buffers |
 | `GET /?action=stream` / `/?action=snapshot` | mjpg-streamer-compatible aliases (lid) |
 
 The stream demosaics each 2×2 BGGR quad to one pixel (NEON kernel) straight
 into planar YUV420 and encodes on the i.MX6 CODA960 VPU JPEG encoder —
 15 fps at 1296×972 on a Glowforge (sensor-limited). Snapshots use a bilinear
 demosaic and libjpeg, which is also the automatic fallback encoder.
+
+Capture buffers are requested non-coherent (CPU-cached) so the demosaic can
+read frames in place; on kernels whose capture queue lacks cache-hint
+support the daemon falls back to uncached buffers with a bounce copy
+(`/cam/status` reports which as `"buffers"`).
 
 The cameras share the hardware video-mux; the newest request wins it:
 
@@ -45,9 +50,11 @@ illumination LED is raised during capture and restored on idle.
 |---|---|---|
 | `FORGECTRL_PORT` | 8080 | HTTP port |
 | `FORGECTRL_STREAM_Q` | 75 | Stream JPEG quality (1–100) |
+| `FORGECTRL_STREAM_FPS` | unset | Stream frame-rate ceiling (frames/s); unset or 0 = sensor max |
 | `FORGECTRL_LAMP` | 132 | Illumination level during capture (0–1023) |
 | `FORGECTRL_NO_VPU` | unset | Force the libjpeg software encoder |
 | `FORGECTRL_NO_NEON` | unset | Force the scalar demosaic |
+| `FORGECTRL_NO_CACHED_BUFS` | unset | Force uncached capture buffers + bounce copy |
 | `FORGECTRL_NEON_CHECK` | unset | One-shot NEON/scalar equivalence check (logged) |
 
 ## Building

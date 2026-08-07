@@ -18,7 +18,7 @@
  * and switches. A SNAPSHOT of the other camera does not switch: the
  * engine borrows the mux for one frame and the stream freezes briefly.
  * Environment: FORGECTRL_PORT (8080), FORGECTRL_STREAM_Q (75),
- * FORGECTRL_LAMP (132).
+ * FORGECTRL_LAMP (132), FORGECTRL_STREAM_FPS (0 = sensor max).
  *
  * ulfius runs libmicrohttpd in thread-per-connection mode, so each stream
  * callback may block waiting for the next frame.
@@ -207,15 +207,17 @@ static int cb_status(const struct _u_request *req, struct _u_response *res,
     (void)user_data;
     struct cam_status st;
     cam_get_status(&st);
-    char body[256];
+    char body[320];
     snprintf(body, sizeof(body),
              "{\"running\":%s,\"cam\":\"%s\",\"clients\":%d,"
-             "\"frames\":%llu,\"fps\":%.1f,\"encoder\":\"%s\","
+             "\"frames\":%llu,\"fps\":%.1f,\"fps_cap\":%.1f,"
+             "\"encoder\":\"%s\",\"buffers\":\"%s\","
              "\"stream\":{\"width\":1296,\"height\":972},"
              "\"snapshot\":{\"width\":2592,\"height\":1944}}",
              st.running ? "true" : "false", cam_name(st.cam), st.clients,
-             (unsigned long long)st.seq, st.fps,
-             st.vpu ? "vpu" : "software");
+             (unsigned long long)st.seq, st.fps, st.fps_cap,
+             st.vpu ? "vpu" : "software",
+             st.cached ? "cached" : "uncached");
     ulfius_set_string_body_response(res, 200, body);
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
     return U_CALLBACK_CONTINUE;

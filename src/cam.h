@@ -21,7 +21,8 @@ typedef enum {
     CAM_HEAD = 1,
 } cam_id_t;
 
-/* Read once at startup (env overrides): stream JPEG quality and lamp level. */
+/* Read once at startup (env overrides): stream JPEG quality, lamp level,
+ * stream FPS cap, and the encoder/buffer fallback switches. */
 void cam_engine_init(void);
 
 /* Stop the engine (if running) and release everything. */
@@ -57,7 +58,9 @@ struct cam_status {
     int      clients;
     uint64_t seq;
     double   fps;
+    double   fps_cap;   /* configured stream ceiling; 0 = sensor max */
     int      vpu;       /* stream frames are VPU-encoded */
+    int      cached;    /* capture buffers are CPU-cached (non-coherent) */
 };
 void cam_get_status(struct cam_status *st);
 

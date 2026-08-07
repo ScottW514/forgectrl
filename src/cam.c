@@ -120,10 +120,13 @@ static struct {
     int             n_bufs;
     int             streaming;
     int             lamp_prev;      /* -1 = unknown, restore to 0 */
+    int             cached_bufs;    /* capture mmaps are CPU-cached
+                                     * (non-coherent); no bounce copy */
 
     /* config */
     int             stream_quality;
     int             lamp_level;
+    double          fps_cap;        /* stream frames/s ceiling; 0 = sensor max */
     int             vpu_active;     /* last stream frame went through the VPU */
 } eng = {
     .ctl = PTHREAD_MUTEX_INITIALIZER,
@@ -145,6 +148,10 @@ const char *cam_name(cam_id_t cam)
  * fallback (and the snapshot path). Worker-thread use only. */
 static vpu_jpeg_t *vpu;
 static int vpu_disabled;
+
+/* FORGECTRL_NO_CACHED_BUFS: never request non-coherent capture buffers
+ * (forces the uncached-mmap + bounce-copy path). */
+static int cached_disabled;
 
 /* ------------------------------------------------------------------ util */
 
@@ -442,11 +449,25 @@ static int start_capture(cam_id_t cam, char *err, size_t errlen)
     req.count = N_BUFS;
     req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     req.memory = V4L2_MEMORY_MMAP;
+    /* Ask for non-coherent = CPU-cached mappings: the CSI DMA-writes the
+     * frames either way, but a cached mapping lets the demosaic read them
+     * at cached speed (vb2 invalidates the CPU cache during DQBUF). A
+     * capture queue without cache-hint support ignores the flag and omits
+     * the MMAP_CACHE_HINTS capability; the bounce-copy path covers that. */
+    if (!cached_disabled)
+        req.flags = V4L2_MEMORY_FLAG_NON_COHERENT;
     if (xioctl(eng.fd, VIDIOC_REQBUFS, &req) < 0 || req.count < 2) {
         snprintf(err, errlen, "REQBUFS: %s (device busy?)", strerror(errno));
         release_capture();
         return -1;
     }
+    int cached = !cached_disabled &&
+        (req.capabilities & V4L2_BUF_CAP_SUPPORTS_MMAP_CACHE_HINTS) != 0;
+    pthread_mutex_lock(&eng.lock);
+    eng.cached_bufs = cached;
+    pthread_mutex_unlock(&eng.lock);
+    fprintf(stderr, "cam: capture buffers %s\n",
+            cached ? "cached (non-coherent)" : "uncached (bounce copy)");
 
     for (eng.n_bufs = 0; eng.n_bufs < (int)req.count; eng.n_bufs++) {
         struct v4l2_buffer buf = {0};
@@ -569,9 +590,13 @@ static int grab_one_snap(uint8_t *raw_cached, uint8_t *rgb_half,
                 continue;
             return -1;
         }
-        memcpy(raw_cached, eng.bufs[buf.index].start,
-               (size_t)CAM_W * CAM_H);
-        deliver_snap(raw_cached, rgb_half, prgb_full);
+        if (eng.cached_bufs) {
+            deliver_snap(eng.bufs[buf.index].start, rgb_half, prgb_full);
+        } else {
+            memcpy(raw_cached, eng.bufs[buf.index].start,
+                   (size_t)CAM_W * CAM_H);
+            deliver_snap(raw_cached, rgb_half, prgb_full);
+        }
         xioctl(eng.fd, VIDIOC_QBUF, &buf);
         return 0;
     }
@@ -583,15 +608,20 @@ static void *worker(void *arg)
     (void)arg;
     uint8_t *rgb_half = malloc((size_t)HALF_W * HALF_H * 3);
     uint8_t *rgb_full = NULL;   /* allocated on first full-res snapshot */
-    /* The V4L2 MMAP capture buffers are DMA-coherent = UNCACHED: byte
-     * reads from them cost a bus transaction each and demosaicing
-     * straight out of one measures ~340 ms/frame. One bulk memcpy into
-     * this cached bounce buffer first makes the demosaic run at cached
-     * speed. */
+    /* Bounce buffer for the uncached-capture fallback: coherent V4L2 MMAP
+     * buffers are uncached, and byte reads from one cost a bus transaction
+     * each (demosaicing in place measures ~340 ms/frame), so the frame is
+     * bulk-copied here first to be read at cached speed. With non-coherent
+     * (cached) capture buffers the demosaic reads the capture buffer
+     * directly and this buffer sits idle. */
     uint8_t *raw_cached = malloc((size_t)CAM_W * CAM_H);
-    double stat_copy_ms = 0, stat_conv_ms = 0, stat_enc_ms = 0;
+    double stat_dq_ms = 0, stat_copy_ms = 0, stat_conv_ms = 0,
+           stat_enc_ms = 0;
     unsigned stat_n = 0;
     int dq_timeouts = 0;
+    /* FPS cap pacing (eng.fps_cap is set once at init) */
+    double cap_period = eng.fps_cap > 0 ? 1.0 / eng.fps_cap : 0;
+    double next_due = 0;
     struct timespec fps_t0;
     now_ts(&fps_t0);
     uint64_t fps_frames = 0;
@@ -664,26 +694,48 @@ static void *worker(void *arg)
         struct v4l2_buffer buf = {0};
         buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory = V4L2_MEMORY_MMAP;
+        struct timespec c0, c1, c2;
+        now_ts(&c0);    /* select() said readable: DQBUF time is not frame
+                         * wait but the cache invalidate on cached buffers */
         if (xioctl(eng.fd, VIDIOC_DQBUF, &buf) < 0) {
             if (errno == EAGAIN || errno == EIO)
                 continue;
             fprintf(stderr, "cam: DQBUF: %s\n", strerror(errno));
             break;
         }
-        dq_timeouts = 0;
-        struct timespec c0, c1;
-        now_ts(&c0);
-        memcpy(raw_cached, eng.bufs[buf.index].start,
-               (size_t)CAM_W * CAM_H);
         now_ts(&c1);
-        const uint8_t *raw = raw_cached;
+        dq_timeouts = 0;
+
+        /* FPS cap: a frame arriving before the next due time is requeued
+         * without demosaic/encode (a pending snapshot still rides on it;
+         * the sensor keeps its own pace). */
+        int encode = clients > 0;
+        if (encode && cap_period > 0) {
+            double t = (double)c1.tv_sec + (double)c1.tv_nsec / 1e9;
+            if (t < next_due) {
+                encode = 0;
+            } else {
+                next_due += cap_period;
+                if (next_due <= t)      /* first frame or fell behind */
+                    next_due = t + cap_period;
+            }
+        }
+
+        const uint8_t *raw = NULL;
+        if (snap || encode)
+            raw = eng.cached_bufs ? (const uint8_t *)eng.bufs[buf.index].start
+                                  : raw_cached;
+        if (raw == raw_cached)
+            memcpy(raw_cached, eng.bufs[buf.index].start,
+                   (size_t)CAM_W * CAM_H);
+        now_ts(&c2);
 
         /* Snapshot request rides on the same raw frame */
         if (snap)
             deliver_snap(raw, rgb_half, &rgb_full);
 
         /* Stream frame: demosaic + encode, VPU first, libjpeg fallback */
-        if (clients > 0) {
+        if (encode) {
             uint8_t *jpg = NULL;
             size_t len = 0;
             int via_vpu = 0;
@@ -760,16 +812,20 @@ static void *worker(void *arg)
             now_ts(&e2);
 
             if (jpg) {
-                stat_copy_ms += ts_diff(&c1, &c0) * 1e3;
+                stat_dq_ms += ts_diff(&c1, &c0) * 1e3;
+                stat_copy_ms += ts_diff(&c2, &c1) * 1e3;
                 stat_conv_ms += ts_diff(&e1, &e0) * 1e3;
                 stat_enc_ms += ts_diff(&e2, &e1) * 1e3;
                 if (++stat_n >= 100) {
-                    fprintf(stderr, "cam: stream stats: copy %.0f ms, "
-                            "convert %.0f ms, encode %.0f ms avg (%s)\n",
-                            stat_copy_ms / stat_n, stat_conv_ms / stat_n,
-                            stat_enc_ms / stat_n,
-                            via_vpu ? "vpu" : "software");
-                    stat_copy_ms = stat_conv_ms = stat_enc_ms = 0;
+                    fprintf(stderr, "cam: stream stats: dqbuf %.0f ms, "
+                            "copy %.0f ms, convert %.0f ms, encode %.0f ms "
+                            "avg (%s, %s)\n",
+                            stat_dq_ms / stat_n, stat_copy_ms / stat_n,
+                            stat_conv_ms / stat_n, stat_enc_ms / stat_n,
+                            via_vpu ? "vpu" : "software",
+                            eng.cached_bufs ? "cached" : "uncached");
+                    stat_dq_ms = stat_copy_ms = stat_conv_ms = 0;
+                    stat_enc_ms = 0;
                     stat_n = 0;
                 }
                 pthread_mutex_lock(&eng.lock);
@@ -915,8 +971,15 @@ void cam_engine_init(void)
         if (l >= 0 && l <= 1023)
             eng.lamp_level = l;
     }
+    if ((v = getenv("FORGECTRL_STREAM_FPS")) != NULL) {
+        double f = atof(v);
+        if (f > 0 && f <= 60)
+            eng.fps_cap = f;
+    }
     if (getenv("FORGECTRL_NO_VPU"))
         vpu_disabled = 1;
+    if (getenv("FORGECTRL_NO_CACHED_BUFS"))
+        cached_disabled = 1;
 }
 
 void cam_engine_shutdown(void)
@@ -1084,6 +1147,8 @@ void cam_get_status(struct cam_status *st)
     st->clients = eng.clients;
     st->seq = eng.seq;
     st->fps = eng.fps;
+    st->fps_cap = eng.fps_cap;
     st->vpu = eng.vpu_active;
+    st->cached = eng.cached_bufs;
     pthread_mutex_unlock(&eng.lock);
 }
