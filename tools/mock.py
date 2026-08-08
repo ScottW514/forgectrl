@@ -37,7 +37,7 @@ settings = {
     'cool_flow_check_s': '', 'cool_recheck_s': '', 'cool_confirm_max_s': '',
     'cool_temp_max': '', 'cool_temp_resume': '', 'cool_cooldown_s': '',
     'cool_cooldown_max_s': '',
-    'version': 'mock', 'machine_id': 'XXX-XXX',
+    'version': 'mock', 'machine_id': 'ABC-123',
 }
 
 status = {
@@ -92,7 +92,7 @@ class H(BaseHTTPRequestHandler):
         elif p.path == '/diag/status':
             self._json(diag)
         elif p.path == '/fuse-identity':
-            self._json({'serial': '123456789', 'hostname': 'XXX-XXX',
+            self._json({'serial': '123456789', 'hostname': 'ABC-123',
                         'password': '0123456789abcdef' * 4})
         else:
             self.send_response(404)
