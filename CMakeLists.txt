@@ -11,6 +11,7 @@ add_executable(forgectrl
   src/settings.c
   src/status.c
   src/ui.c
+  src/update.c
   src/vpu_jpeg.c
 )
 target_compile_options(forgectrl PRIVATE -Wall -Wextra -O2)

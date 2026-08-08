@@ -34,6 +34,7 @@
 #include "settings.h"
 #include "status.h"
 #include "ui.h"
+#include "update.h"
 
 #include <ctype.h>
 #include <signal.h>
@@ -668,6 +669,7 @@ int main(void)
 
     cam_engine_init();
     diag_init();
+    update_init();
 
     struct _u_instance inst;
     if (ulfius_init_instance(&inst, port, NULL, NULL) != U_OK) {
@@ -697,6 +699,26 @@ int main(void)
                                &cb_diag_abort, NULL);
     ulfius_add_endpoint_by_val(&inst, "GET", "/diag/status", NULL, 0,
                                &cb_diag_status, NULL);
+    ulfius_add_endpoint_by_val(&inst, "GET", "/slots", NULL, 0,
+                               &cb_slots, NULL);
+    ulfius_add_endpoint_by_val(&inst, "POST", "/boot", NULL, 0,
+                               &cb_boot_select, NULL);
+    ulfius_add_endpoint_by_val(&inst, "POST", "/system/reboot", NULL, 0,
+                               &cb_system_reboot, NULL);
+    ulfius_add_endpoint_by_val(&inst, "POST", "/update/check", NULL, 0,
+                               &cb_update_check, NULL);
+    ulfius_add_endpoint_by_val(&inst, "POST", "/update/download", NULL, 0,
+                               &cb_update_download, NULL);
+    ulfius_add_endpoint_by_val(&inst, "POST", "/update/apply", NULL, 0,
+                               &cb_update_apply, NULL);
+    ulfius_add_endpoint_by_val(&inst, "POST", "/update/upload", NULL, 0,
+                               &cb_update_upload, NULL);
+    ulfius_add_endpoint_by_val(&inst, "POST", "/restore/factory", NULL, 0,
+                               &cb_restore_factory, NULL);
+    ulfius_add_endpoint_by_val(&inst, "GET", "/update/status", NULL, 0,
+                               &cb_update_status, NULL);
+    ulfius_set_upload_file_callback_function(&inst, &update_upload_sink,
+                                             NULL);
 
     if (ulfius_start_framework(&inst) != U_OK) {
         fprintf(stderr, "forgectrl: cannot start HTTP on port %u\n", port);
