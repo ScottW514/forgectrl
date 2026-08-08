@@ -400,16 +400,28 @@ int cb_slots(const struct _u_request *req, struct _u_response *res,
     off += (size_t)snprintf(body + off, sizeof(body) - off,
                             "{\"booted\":\"%s\",\"env\":{%s},\"slots\":{",
                             booted_root(), env_json);
+    /* Always show the two firmware slots (a/b). Only surface sd and the
+     * legacy partition when they actually exist: on a normal install the
+     * legacy partition was reclaimed at first boot, so a "legacy: not
+     * present" line is just noise - it should appear only if for some
+     * reason it could not be removed. */
+    int emitted = 0;
     for (size_t t = 0; t < N_TARGETS; t++) {
+        int present = si[t].present[0] && !strcmp(si[t].present, "yes");
+        int always = !strcmp(targets[t].name, "a") ||
+                     !strcmp(targets[t].name, "b");
+        if (!always && !present)
+            continue;
         off += (size_t)snprintf(body + off, sizeof(body) - off,
             "%s\"%s\":{\"device\":\"%s\",\"present\":\"%s\","
             "\"state\":\"%s\",\"type\":\"%s\",\"version\":\"%s\","
             "\"kernel\":\"%s\",\"booted\":%s,\"next\":%s}",
-            t ? "," : "", targets[t].name, targets[t].dev,
+            emitted ? "," : "", targets[t].name, targets[t].dev,
             si[t].present[0] ? si[t].present : "no",
             si[t].state, si[t].type, si[t].version, si[t].kernel,
             si[t].booted ? "true" : "false",
             si[t].next ? "true" : "false");
+        emitted = 1;
     }
     off += (size_t)snprintf(body + off, sizeof(body) - off,
                             "},\"archives\":[");
