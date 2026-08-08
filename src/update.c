@@ -172,6 +172,24 @@ static const struct slot_target *find_target(const char *name)
     return NULL;
 }
 
+/* A write target must be the factory 200 MiB slot geometry (409600
+ * 512-byte sectors) - the same check the installer makes. This refuses
+ * a repartitioned or absent slot before a raw image write, so it cannot
+ * overflow the partition or land on an unexpected layout. */
+static int slot_geometry_ok(const struct slot_target *t)
+{
+    const char *base = strrchr(t->dev, '/');
+    base = base ? base + 1 : t->dev;
+    char path[64], buf[24];
+    snprintf(path, sizeof(path), "/sys/class/block/%s/size", base);
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 0;
+    int ok = fgets(buf, sizeof(buf), f) && atol(buf) == 409600;
+    fclose(f);
+    return ok;
+}
+
 static const char *param(const struct _u_request *req, const char *key)
 {
     const char *v = u_map_get(req->map_post_body, key);
@@ -768,6 +786,9 @@ int cb_update_apply(const struct _u_request *req, struct _u_response *res,
     if (!strcmp(t->dev, booted_root()))
         return reply_err(res, 409,
                          "refusing to write the booted root slot");
+    if (!slot_geometry_ok(t))
+        return reply_err(res, 409,
+                         "target slot is not the 200 MiB factory geometry");
 
     const char *file = param(req, "file");
     const char *path = NULL;
@@ -973,6 +994,9 @@ int cb_restore_factory(const struct _u_request *req,
     if (!strcmp(t->dev, booted_root()))
         return reply_err(res, 409,
                          "refusing to write the booted root slot");
+    if (!slot_geometry_ok(t))
+        return reply_err(res, 409,
+                         "target slot is not the 200 MiB factory geometry");
 
     const char *file = param(req, "file");
     if (!file || strchr(file, '/') || strstr(file, "..") ||

@@ -516,12 +516,17 @@ const char index_html[] =
 "function setMode(m){post({controller_mode:m},'msg-mode')}"
 
 /* hash-routed tabs */
-"var TABS=['status','machine','gfcloud','grbl','diag','system'];"
+"var TABS=['status','machine','gfcloud','grbl','diag','system'],"
+"sysChecked=false;"
 "function tab(){var h=location.hash.replace('#','');"
 "if(TABS.indexOf(h)<0)h='status';"
 "for(var i=0;i<TABS.length;i++){var t=TABS[i];"
 "$('s-'+t).className=t===h?'on':'';"
-"$('t-'+t).className=t===h?'on':''}}"
+"$('t-'+t).className=t===h?'on':''}"
+/* auto-check for a ForgeFIRM update the first time the System tab is
+ * opened - once per page load, so the GitHub endpoint is not hit on a
+ * timer from every machine */
+"if(h==='system'&&!sysChecked){sysChecked=true;checkUpd()}}"
 "window.onhashchange=tab;"
 
 /* camera: scaled snapshot by default, live stream on demand */
