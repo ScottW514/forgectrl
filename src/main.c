@@ -15,6 +15,7 @@
  *   GET /status                             JSON machine operational status
  *   GET /settings                           JSON machine settings
  *   POST /settings?key=value                update machine settings
+ *   GET /fuse-identity                      burned-in identity (on demand)
  *
  * The two cameras share the hardware mux; the newest request wins it. A
  * STREAM request for the other camera preempts the current stream
@@ -354,24 +355,73 @@ static const struct {
  * characters, split XXX-YYY. The GUI always identifies the machine by
  * this fuse identity - the gf_serial setting overrides only what is
  * sent to the Glowforge cloud. */
-static void machine_id(char *buf, size_t len)
+static unsigned long fuse_serial(void)
 {
-    static char cached[16];
-    if (!cached[0]) {
-        unsigned long serial = 0;
+    static unsigned long cached;
+    static int tried;
+    if (!tried) {
+        tried = 1;
         FILE *f = fopen("/sys/bus/nvmem/devices/imx-ocotp0/nvmem", "rb");
         if (f) {
             unsigned char w[4];
             if (fseek(f, 136, SEEK_SET) == 0 && fread(w, 1, 4, f) == 4)
-                serial = (unsigned long)w[0] | ((unsigned long)w[1] << 8) |
+                cached = (unsigned long)w[0] | ((unsigned long)w[1] << 8) |
                          ((unsigned long)w[2] << 16) |
                          ((unsigned long)w[3] << 24);
             fclose(f);
         } else if ((f = fopen("/sys/fsl_otp/HW_OCOTP_MAC0", "r")) != NULL) {
-            if (fscanf(f, "%lx", &serial) != 1)
-                serial = 0;
+            if (fscanf(f, "%lx", &cached) != 1)
+                cached = 0;
             fclose(f);
         }
+    }
+    return cached;
+}
+
+/* Fuse password: the eight SRK words (nvmem bank 3 words 0-7, byte
+ * offset 96) as 64 hex digits - what the machine signs in to the
+ * Glowforge service with. Read on demand only (the fuse-identity
+ * viewer), never included in routine polls. */
+static int fuse_password(char *buf, size_t len)
+{
+    buf[0] = '\0';
+    if (len < 65)
+        return -1;
+    FILE *f = fopen("/sys/bus/nvmem/devices/imx-ocotp0/nvmem", "rb");
+    if (f) {
+        unsigned char w[32];
+        int ok = fseek(f, 96, SEEK_SET) == 0 && fread(w, 1, 32, f) == 32;
+        fclose(f);
+        if (!ok)
+            return -1;
+        for (int i = 0; i < 8; i++)
+            snprintf(buf + i * 8, 9, "%08lx",
+                     (unsigned long)w[i * 4] |
+                     ((unsigned long)w[i * 4 + 1] << 8) |
+                     ((unsigned long)w[i * 4 + 2] << 16) |
+                     ((unsigned long)w[i * 4 + 3] << 24));
+        return 0;
+    }
+    for (int i = 0; i < 8; i++) {
+        char path[48];
+        unsigned long v;
+        snprintf(path, sizeof(path), "/sys/fsl_otp/HW_OCOTP_SRK%d", i);
+        if ((f = fopen(path, "r")) == NULL)
+            return -1;
+        int ok = fscanf(f, "%lx", &v) == 1;
+        fclose(f);
+        if (!ok)
+            return -1;
+        snprintf(buf + i * 8, 9, "%08lx", v);
+    }
+    return 0;
+}
+
+static void machine_id(char *buf, size_t len)
+{
+    static char cached[16];
+    if (!cached[0]) {
+        unsigned long serial = fuse_serial();
         if (serial) {
             static const char alpha[] = "BCDFGHJKMQRTVWXY2346789";
             char enc[8];
@@ -515,6 +565,31 @@ static int cb_settings_post(const struct _u_request *req,
     return reply_settings(res);
 }
 
+/* The burned-in identity, on demand for the GF Cloud tab's viewer.
+ * The values are irrevocable (fuses), so they are fetched only when
+ * the operator explicitly asks to see them. */
+static int cb_fuse_identity(const struct _u_request *req,
+                            struct _u_response *res, void *user_data)
+{
+    (void)req;
+    (void)user_data;
+    char body[192], mid[16], pw[65];
+    unsigned long serial = fuse_serial();
+    machine_id(mid, sizeof(mid));
+    fuse_password(pw, sizeof(pw));
+    if (serial)
+        snprintf(body, sizeof(body),
+                 "{\"serial\":\"%lu\",\"hostname\":\"%s\","
+                 "\"password\":\"%s\"}", serial, mid, pw);
+    else
+        snprintf(body, sizeof(body),
+                 "{\"serial\":\"\",\"hostname\":\"\",\"password\":\"\"}");
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    return U_CALLBACK_CONTINUE;
+}
+
 /* --------------------------------------------------------- diagnostics */
 
 static int cb_diag_start(const struct _u_request *req,
@@ -612,6 +687,8 @@ int main(void)
                                &cb_settings_post, NULL);
     ulfius_add_endpoint_by_val(&inst, "GET", "/status", NULL, 0,
                                &cb_machine_status, NULL);
+    ulfius_add_endpoint_by_val(&inst, "GET", "/fuse-identity", NULL, 0,
+                               &cb_fuse_identity, NULL);
     ulfius_add_endpoint_by_val(&inst, "POST", "/diag/flow-verify", NULL, 0,
                                &cb_diag_start, "flow-verify");
     ulfius_add_endpoint_by_val(&inst, "POST", "/diag/flow-calibrate", NULL,

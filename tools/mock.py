@@ -91,6 +91,9 @@ class H(BaseHTTPRequestHandler):
                         'encoder': 'vpu', 'buffers': 'cached'})
         elif p.path == '/diag/status':
             self._json(diag)
+        elif p.path == '/fuse-identity':
+            self._json({'serial': '123456789', 'hostname': 'XXX-XXX',
+                        'password': '0123456789abcdef' * 4})
         else:
             self.send_response(404)
             self.end_headers()

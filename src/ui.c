@@ -17,6 +17,7 @@
  *   #machine  shared machine settings (display units, homing method +
  *             calibration, cooling tunables)
  *   #gfcloud  Glowforge cloud overrides (identity, homing session)
+ *             plus the fuse-identity viewer (modal, on demand)
  *   #grbl     GRBL-mode settings (controller info; tunables land here
  *             as the driver exposes them)
  *   #diag     diagnostics - tools that take the hardware over (the
@@ -113,6 +114,19 @@ const char index_html[] =
 ".b-bad{color:var(--red);font-weight:600}"
 ".b-dim{color:var(--dim)}"
 ".b-warn{color:var(--warn);font-weight:600}"
+"#fusewrap{display:none;position:fixed;left:0;top:0;right:0;bottom:0;"
+"background:rgba(20,22,30,.55);z-index:50;align-items:center;"
+"justify-content:center}"
+"#fusewrap.on{display:flex}"
+".fusebox{background:var(--card);border:1px solid var(--line);"
+"border-radius:10px;padding:18px 22px;max-width:560px;width:92%;"
+"box-shadow:0 8px 30px rgba(0,0,0,.25)}"
+".fusebox h2{font-size:12.5px;margin:0 0 10px;color:var(--navy);"
+"font-weight:700;text-transform:uppercase;letter-spacing:.9px}"
+".brk{word-break:break-all}"
+".fwarn{background:#fdf3e3;border:1px solid #eccb90;color:#7a5a12;"
+"border-radius:6px;padding:8px 12px;font-size:12.5px;margin:12px 0 0;"
+"line-height:1.5}"
 "#diaglog{background:#23252b;color:#cfd3da;border-radius:6px;"
 "padding:10px 12px;font-family:ui-monospace,Consolas,monospace;"
 "font-size:12px;line-height:1.6;max-height:220px;overflow-y:auto;"
@@ -293,6 +307,8 @@ const char index_html[] =
 "<div class='btns'>"
 "<button class='pri' onclick='saveIdentity()'>Save</button>"
 "<button onclick='clearIdentity()'>Use factory identity</button>"
+"<button data-nolock='1' onclick='showFuse()'>View fuse identity"
+"</button>"
 "<span class='msg' id='msg-i'></span></div>"
 "</div>"
 "<div class='card'><h2>Homing session</h2>"
@@ -349,6 +365,20 @@ const char index_html[] =
 "</div>"
 "</section>"
 "</main>"
+
+/* fuse-identity viewer: modal, fetched on demand, outside <main> so
+ * the settings lock never touches it (viewing is read-only) */
+"<div id='fusewrap'>"
+"<div class='fusebox'>"
+"<h2>Fuse identity</h2>"
+"<div id='fusekv'></div>"
+"<p class='fwarn'>Burned into the machine at the factory and "
+"unchangeable. Keep these secret &mdash; a leaked identity cannot "
+"be rotated, only abandoned.</p>"
+"<div class='btns'><button class='pri' onclick='hideFuse()'>Close"
+"</button></div>"
+"</div></div>"
+
 "<footer>ForgeFIRM is an <a href='https://community.openglow.org'>"
 "OpenGlow</a> project</footer>"
 
@@ -560,6 +590,21 @@ const char index_html[] =
 "if(!pick(p,['gfcloud_home_timeout_s'])){"
 "$('msg-s').textContent='no changes';return}"
 "post(p,'msg-s')}"
+
+/* fuse-identity viewer (backdrop click or Close dismisses) */
+"function showFuse(){fetch('/fuse-identity')"
+".then(function(r){return r.json()}).then(function(f){var g='';"
+"g+=kv('Serial',\"<span class='mono'>\"+esc(f.serial||'?')+'</span>');"
+"g+=kv('Hostname',\"<span class='mono'>\"+esc(f.hostname||'?')+"
+"'</span>');"
+"g+=kv('Password',\"<span class='mono brk'>\"+esc(f.password||'?')+"
+"'</span>');"
+"$('fusekv').innerHTML=g;$('fusewrap').className='on'})"
+".catch(function(){$('msg-i').textContent='cannot read fuses'})}"
+"function hideFuse(){$('fusewrap').className='';"
+"$('fusekv').innerHTML=''}"
+"$('fusewrap').onclick=function(e){"
+"if(e.target===this)hideFuse()};"
 
 /* diagnostics endpoints, 2.5 s poll */
 "function startDiag(t){$('msg-d').textContent='starting\\u2026';"
