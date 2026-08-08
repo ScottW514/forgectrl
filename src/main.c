@@ -29,6 +29,7 @@
  */
 #define _GNU_SOURCE
 #include "cam.h"
+#include "diag.h"
 #include "settings.h"
 #include "status.h"
 #include "ui.h"
@@ -306,6 +307,25 @@ static int valid_hostname(const char *v)
     return 1;
 }
 
+/* Cooling tunables (consumed by the controller per flood start). The
+ * ranges are wide on purpose - these exist for per-machine calibration
+ * (pump wear, replacement coolant) - but still bounded to values the
+ * hardware can mean something by. */
+static int valid_range(const char *v, double lo, double hi)
+{
+    char *end;
+    double f = strtod(v, &end);
+    return end != v && *end == '\0' && f >= lo && f <= hi;
+}
+
+static int valid_rise_c(const char *v)     { return valid_range(v, 1, 30); }
+static int valid_heater_pct(const char *v) { return valid_range(v, 0, 100); }
+static int valid_check_s(const char *v)    { return valid_range(v, 0, 300); }
+static int valid_recheck_s(const char *v)  { return valid_range(v, 0, 3600); }
+static int valid_confirm_s(const char *v)  { return valid_range(v, 60, 3600); }
+static int valid_temp_c(const char *v)     { return valid_range(v, 5, 45); }
+static int valid_cool_s(const char *v)     { return valid_range(v, 0, 1800); }
+
 static const struct {
     const char *key;
     int (*valid)(const char *);
@@ -320,6 +340,15 @@ static const struct {
     { "gf_serial",              valid_serial,      0 },
     { "gf_password",            valid_password,    1 },
     { "gf_hostname",            valid_hostname,    0 },
+    { "cool_flow_rise",         valid_rise_c,      0 },
+    { "cool_flow_heater_pct",   valid_heater_pct,  0 },
+    { "cool_flow_check_s",      valid_check_s,     0 },
+    { "cool_recheck_s",         valid_recheck_s,   0 },
+    { "cool_confirm_max_s",     valid_confirm_s,   0 },
+    { "cool_temp_max",          valid_temp_c,      0 },
+    { "cool_temp_resume",       valid_temp_c,      0 },
+    { "cool_cooldown_s",        valid_cool_s,      0 },
+    { "cool_cooldown_max_s",    valid_cool_s,      0 },
 };
 #define N_SETTINGS (sizeof(setting_defs) / sizeof(*setting_defs))
 
@@ -345,7 +374,7 @@ static void read_fw_version(char *buf, size_t len)
 
 static int reply_settings(struct _u_response *res)
 {
-    char body[1024], val[128], host[64] = "", fwver[48];
+    char body[2048], val[128], host[64] = "", fwver[48];
     size_t off = 0;
 
     read_fw_version(fwver, sizeof(fwver));
@@ -408,7 +437,11 @@ static int cb_settings_post(const struct _u_request *req,
     int present = 0;
 
     /* Settings are locked whenever the machine is not idle: the
-     * controller and the homing runner both read this file mid-run. */
+     * controller and the homing runner both read this file mid-run.
+     * A running diagnostic owns the hardware and locks them too. */
+    if (diag_running())
+        return reply_error(res, 409,
+            "a diagnostic is running - settings are locked");
     if (!machine_is_idle())
         return reply_error(res, 409,
             "machine is not idle - settings are locked");
@@ -440,6 +473,50 @@ static int cb_settings_post(const struct _u_request *req,
                 setting_defs[i].secret ? "set" : v);
     }
     return reply_settings(res);
+}
+
+/* --------------------------------------------------------- diagnostics */
+
+static int cb_diag_start(const struct _u_request *req,
+                         struct _u_response *res, void *user_data)
+{
+    (void)req;
+    switch (diag_start((const char *)user_data)) {
+    case 0:
+        ulfius_set_string_body_response(res, 202, "{\"started\":true}");
+        ulfius_add_header_to_response(res, "Content-Type",
+                                      "application/json");
+        return U_CALLBACK_CONTINUE;
+    case -1:
+        return reply_error(res, 409, "a diagnostic is already running");
+    case -2:
+        return reply_error(res, 409, "machine is not idle");
+    default:
+        return reply_error(res, 400, "unknown diagnostic");
+    }
+}
+
+static int cb_diag_abort(const struct _u_request *req,
+                         struct _u_response *res, void *user_data)
+{
+    (void)req;
+    (void)user_data;
+    diag_abort();
+    ulfius_set_string_body_response(res, 200, "{\"aborting\":true}");
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
+static int cb_diag_status(const struct _u_request *req,
+                          struct _u_response *res, void *user_data)
+{
+    (void)req;
+    (void)user_data;
+    char body[4096];
+    diag_status_json(body, sizeof(body));
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
 }
 
 /* "/" serves the UI (ui.c), plus the mjpg-streamer-compatible
@@ -475,6 +552,7 @@ int main(void)
     (void)nice(5);
 
     cam_engine_init();
+    diag_init();
 
     struct _u_instance inst;
     if (ulfius_init_instance(&inst, port, NULL, NULL) != U_OK) {
@@ -494,6 +572,14 @@ int main(void)
                                &cb_settings_post, NULL);
     ulfius_add_endpoint_by_val(&inst, "GET", "/status", NULL, 0,
                                &cb_machine_status, NULL);
+    ulfius_add_endpoint_by_val(&inst, "POST", "/diag/flow-verify", NULL, 0,
+                               &cb_diag_start, "flow-verify");
+    ulfius_add_endpoint_by_val(&inst, "POST", "/diag/flow-calibrate", NULL,
+                               0, &cb_diag_start, "flow-calibrate");
+    ulfius_add_endpoint_by_val(&inst, "POST", "/diag/abort", NULL, 0,
+                               &cb_diag_abort, NULL);
+    ulfius_add_endpoint_by_val(&inst, "GET", "/diag/status", NULL, 0,
+                               &cb_diag_status, NULL);
 
     if (ulfius_start_framework(&inst) != U_OK) {
         fprintf(stderr, "forgectrl: cannot start HTTP on port %u\n", port);

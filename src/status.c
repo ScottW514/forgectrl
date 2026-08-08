@@ -17,6 +17,7 @@
  */
 #define _GNU_SOURCE
 #include "status.h"
+#include "diag.h"
 
 #include <fcntl.h>
 #include <linux/input.h>
@@ -67,7 +68,7 @@ static long rd_attr_long(const char *attr, long fallback)
  * divider and 1.3 gain, 10-bit ADC) - the curve recovered from the
  * factory firmware and verified against this machine's cloud coolant
  * setpoints and a thermometer. */
-static double thermistor_c(long raw)
+double coolant_degc(long raw)
 {
     static const double adc_f = 1024.0 * 1.3;
     if (raw <= 0 || (double)raw >= adc_f)
@@ -172,8 +173,9 @@ int machine_status_json(char *buf, size_t len)
 
     size_t off = 0;
     off += (size_t)snprintf(buf + off, len - off,
-        "{\"state\":\"%s\",\"homed\":%s,", state[0] ? state : "unknown",
-        homed ? "true" : "false");
+        "{\"state\":\"%s\",\"homed\":%s,\"diag\":%s,",
+        state[0] ? state : "unknown", homed ? "true" : "false",
+        diag_running() ? "true" : "false");
     if (homed)
         off += (size_t)snprintf(buf + off, len - off,
             "\"pos\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f},", x, y, z);
@@ -189,7 +191,7 @@ int machine_status_json(char *buf, size_t len)
         fan_rpm(rd_attr_long("thermal/tach_intake_2", 0)));
     off += (size_t)snprintf(buf + off, len - off,
         "\"coolant\":{\"down_c\":%.1f,\"up_c\":%.1f,\"pump\":%s,\"tec\":%s},",
-        thermistor_c(t1), thermistor_c(t2),
+        coolant_degc(t1), coolant_degc(t2),
         rd_attr_long("thermal/water_pump_on", 0) ? "true" : "false",
         rd_attr_long("thermal/tec_on", 0) ? "true" : "false");
     snprintf(buf + off, len - off,

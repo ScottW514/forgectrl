@@ -7,6 +7,7 @@ add_executable(forgectrl
   src/main.c
   src/cam.c
   src/debayer.c
+  src/diag.c
   src/settings.c
   src/status.c
   src/ui.c

@@ -17,4 +17,9 @@ int machine_status_json(char *buf, size_t len);
  * driver). Settings changes are only allowed while idle. */
 int machine_is_idle(void);
 
+/* Factory coolant-thermistor conversion (shared with the diagnostics
+ * runner). Raw 10-bit ADC count -> degrees C; out-of-range input maps
+ * to -273.15. */
+double coolant_degc(long raw);
+
 #endif
