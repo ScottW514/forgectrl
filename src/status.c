@@ -130,7 +130,12 @@ static int read_position(double *x, double *y, double *z)
 }
 
 /* EV_SW bits per the device tree: 0/1 door1/door2, 2 button, 3 doors
- * (combined), 4 estop, 5 interlock, 6 interlock_latch, 7 head. */
+ * (combined), 4 estop, 5 interlock, 6 interlock_latch, 7 head.
+ * The interlock sense is inverted: the remote-interlock connector (the
+ * regulatory 2-pin lockout loop) reads ACTIVE only when the loop is
+ * open. Basic/Plus machines ship it factory-jumpered, so the bit stays
+ * inactive there = satisfied; Pro brings the connector out for an
+ * external lockout chain. */
 static unsigned long read_switches(void)
 {
     unsigned long bits = 0;
@@ -180,11 +185,11 @@ int machine_status_json(char *buf, size_t len)
         rd_attr_long("thermal/water_pump_on", 0) ? "true" : "false",
         rd_attr_long("thermal/tec_on", 0) ? "true" : "false");
     snprintf(buf + off, len - off,
-        "\"switches\":{\"lid\":%s,\"button\":%s,\"interlock\":%s,"
+        "\"switches\":{\"lid\":%s,\"button\":%s,\"interlock_ok\":%s,"
         "\"head\":%s,\"estop\":%s}}",
         (sw & (1u << 3)) ? "true" : "false",
         (sw & (1u << 2)) ? "true" : "false",
-        (sw & (1u << 5)) ? "true" : "false",
+        (sw & (1u << 5)) ? "false" : "true",
         (sw & (1u << 7)) ? "true" : "false",
         (sw & (1u << 4)) ? "true" : "false");
     return 0;
