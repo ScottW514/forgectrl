@@ -363,7 +363,7 @@ static const struct {
  * setting changes. The stored region (unset = "00", the world domain)
  * goes to cfg80211 as the user regulatory hint; power save is pinned
  * off - on a mains-powered machine it only adds latency. */
-static void apply_wifi(void)
+static void apply_wifi(int set_region)
 {
     char cc[8], cmd[48];
     if (settings_get("wifi_country", cc, sizeof(cc)) != 0 ||
@@ -373,9 +373,14 @@ static void apply_wifi(void)
      * rootfs was mounted, its boot-time regulatory.db load failed and
      * stays failed until an explicit reload. */
     system("iw reg reload >/dev/null 2>&1");
-    snprintf(cmd, sizeof(cmd), "iw reg set %s >/dev/null 2>&1", cc);
-    if (system(cmd) != 0)
-        fprintf(stderr, "forgectrl: iw reg set %s failed\n", cc);
+    /* The kernel already defaults to the world domain; hinting 00 on
+     * top of it only produces a cosmetic "country 98" intersection.
+     * 00 is set only to revert from a previously applied region. */
+    if (set_region || strcmp(cc, "00")) {
+        snprintf(cmd, sizeof(cmd), "iw reg set %s >/dev/null 2>&1", cc);
+        if (system(cmd) != 0)
+            fprintf(stderr, "forgectrl: iw reg set %s failed\n", cc);
+    }
     if (system("iw dev wlan0 set power_save off >/dev/null 2>&1") != 0)
         fprintf(stderr, "forgectrl: wifi power_save off failed\n");
 }
@@ -596,7 +601,7 @@ static int cb_settings_post(const struct _u_request *req,
                 setting_defs[i].secret ? "set" : v);
     }
     if (setting_param(req, "wifi_country"))
-        apply_wifi();
+        apply_wifi(1);
     return reply_settings(res);
 }
 
@@ -704,7 +709,7 @@ int main(void)
     cam_engine_init();
     diag_init();
     update_init();
-    apply_wifi();
+    apply_wifi(0);
 
     struct _u_instance inst;
     if (ulfius_init_instance(&inst, port, NULL, NULL) != U_OK) {
