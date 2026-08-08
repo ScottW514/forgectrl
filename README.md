@@ -32,7 +32,8 @@ OpenGlow visual identity, tabbed:
   controller is stopped for the duration): cooling system verification
   and calibration.
 - **System** — firmware slots (A/B boot selection), ForgeFIRM updates,
-  image install/restore, the WiFi regulatory region, reboot.
+  image install/restore, the WiFi regulatory region (power save is
+  kept off), reboot.
 
 The design intent: every machine tunable — shared, cloud-override, and
 GRBL-mode — gets a home in one of these tabs as it appears.

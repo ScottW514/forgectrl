@@ -359,10 +359,11 @@ static const struct {
 };
 #define N_SETTINGS (sizeof(setting_defs) / sizeof(*setting_defs))
 
-/* Hand the stored WiFi region to cfg80211 as the user regulatory hint
- * (iw reg set), at startup and whenever the setting changes. Unset
- * falls back to "00", the world domain the kernel starts in. */
-static void apply_wifi_country(void)
+/* WiFi radio policy, applied at startup and whenever the wifi_country
+ * setting changes. The stored region (unset = "00", the world domain)
+ * goes to cfg80211 as the user regulatory hint; power save is pinned
+ * off - on a mains-powered machine it only adds latency. */
+static void apply_wifi(void)
 {
     char cc[8], cmd[48];
     if (settings_get("wifi_country", cc, sizeof(cc)) != 0 ||
@@ -375,6 +376,8 @@ static void apply_wifi_country(void)
     snprintf(cmd, sizeof(cmd), "iw reg set %s >/dev/null 2>&1", cc);
     if (system(cmd) != 0)
         fprintf(stderr, "forgectrl: iw reg set %s failed\n", cc);
+    if (system("iw dev wlan0 set power_save off >/dev/null 2>&1") != 0)
+        fprintf(stderr, "forgectrl: wifi power_save off failed\n");
 }
 
 /* Machine identity, derived from the i.MX6 OCOTP fuses exactly like
@@ -593,7 +596,7 @@ static int cb_settings_post(const struct _u_request *req,
                 setting_defs[i].secret ? "set" : v);
     }
     if (setting_param(req, "wifi_country"))
-        apply_wifi_country();
+        apply_wifi();
     return reply_settings(res);
 }
 
@@ -701,7 +704,7 @@ int main(void)
     cam_engine_init();
     diag_init();
     update_init();
-    apply_wifi_country();
+    apply_wifi();
 
     struct _u_instance inst;
     if (ulfius_init_instance(&inst, port, NULL, NULL) != U_OK) {
