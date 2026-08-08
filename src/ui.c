@@ -116,6 +116,9 @@ const char index_html[] =
 ".b-bad{color:var(--red);font-weight:600}"
 ".b-dim{color:var(--dim)}"
 ".b-warn{color:var(--warn);font-weight:600}"
+".banner{background:#fff6e6;border:1px solid var(--warn);color:#7a4a06;"
+"border-radius:8px;padding:10px 12px;margin:0 0 12px;font-size:13px}"
+".banner a{color:var(--navy);font-weight:600}"
 "#fusewrap{display:none;position:fixed;left:0;top:0;right:0;bottom:0;"
 "background:rgba(20,22,30,.55);z-index:50;align-items:center;"
 "justify-content:center}"
@@ -176,6 +179,7 @@ const char index_html[] =
 
 /* ------------------------------------------------------ status tab */
 "<section id='s-status'>"
+"<div id='gfsvc-banner' class='banner' style='display:none'></div>"
 "<div class='card'><h2>Controller mode</h2>"
 "<div class='seg'>"
 "<button class='segbtn segon' id='mode-grbl' "
@@ -944,10 +948,23 @@ const char index_html[] =
 "t.getAttribute('data-ver'))});"
 
 /* boot + polling */
+/* Cloud-mode compatibility banner: the Glowforge service has moved past
+ * the firmware this ForgeFIRM release was tested against, so cloud mode
+ * may misbehave. Shown whenever the two versions differ - independent of
+ * whether a newer ForgeFIRM exists (being current does not mean it has
+ * caught up to Glowforge's newest service). */
+"function renderGfSvc(){var b=$('gfsvc-banner'),g=M.gfsvc;"
+"if(g&&g.latest&&g.tested&&g.latest!==g.tested){"
+"b.innerHTML=\"\\u26A0 Cloud mode: Glowforge firmware is now \"+g.latest+"
+"\"; this ForgeFIRM release was tested against \"+g.tested+"
+"\". Cloud mode may not work correctly. \"+"
+"\"<a href='#system'>Check for a ForgeFIRM update</a>\";"
+"b.style.display=''}else{b.style.display='none'}}"
 "function loadMach(){fetch('/status').then(function(r)"
 "{return r.json()}).then(function(m){M=m;"
 "locked=!!(M.state&&M.state!=='idle')||!!M.diag;lockApply();"
-"renderMotion();renderCooling();renderSwitches()}).catch(function(){})}"
+"renderMotion();renderCooling();renderSwitches();renderGfSvc()})"
+".catch(function(){})}"
 "function loadCam(){fetch('/cam/status').then(function(r)"
 "{return r.json()}).then(function(s){CS=s;renderStat()})"
 ".catch(function(){})}"

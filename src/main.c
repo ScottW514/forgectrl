@@ -547,7 +547,7 @@ static int cb_machine_status(const struct _u_request *req,
 {
     (void)req;
     (void)user_data;
-    char body[640];
+    char body[768];
     machine_status_json(body, sizeof(body));
     ulfius_set_string_body_response(res, 200, body);
     ulfius_add_header_to_response(res, "Content-Type", "application/json");

@@ -30,9 +30,14 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
-#define GF_SYSFS     "/sys/glowforge/"
-#define HOMED_ANCHOR "/run/grblhal.homed"
-#define SWITCH_DEV   "/dev/input/event0"
+#define GF_SYSFS       "/sys/glowforge/"
+#define HOMED_ANCHOR   "/run/grblhal.homed"
+#define SWITCH_DEV     "/dev/input/event0"
+/* The Glowforge web-service version summary the cloud client (gfcloud /
+ * gfhome) records on connect: the latest factory firmware the service
+ * advertises and the version this ForgeFIRM release was tested against.
+ * Same path as FACTORY_FIRMWARE.STATUS_FILE in gfhome.conf. */
+#define GF_LATEST_FILE "/data/forgefirm/gf-latest.json"
 
 /* Kernel step counters -> millimeters (factory-derived constants: 0.15 mm
  * per full step X/Y at the live microstep mode; Z counts half-steps at
@@ -155,6 +160,45 @@ static unsigned long read_switches(void)
     return bits;
 }
 
+/* Pull one "key":"value" string out of the small gf-latest.json the
+ * web-service client writes. Fills out (empty on absence). */
+static void gf_json_str(const char *json, const char *key, char *out, size_t len)
+{
+    char pat[48];
+    out[0] = '\0';
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char *p = strstr(json, pat);
+    if (!p)
+        return;
+    p = strchr(p + strlen(pat), ':');
+    if (!p)
+        return;
+    for (p++; *p == ' ' || *p == '\t'; p++)
+        ;
+    if (*p != '"')
+        return;
+    size_t i = 0;
+    for (p++; *p && *p != '"' && i < len - 1; p++)
+        out[i++] = *p;
+    out[i] = '\0';
+}
+
+/* Read the factory web-service version summary. Fills latest/tested; both
+ * empty when the file is absent or unparseable. */
+static void read_gf_latest(char *latest, size_t ll, char *tested, size_t tl)
+{
+    latest[0] = tested[0] = '\0';
+    FILE *f = fopen(GF_LATEST_FILE, "r");
+    if (!f)
+        return;
+    char json[256];
+    size_t n = fread(json, 1, sizeof(json) - 1, f);
+    fclose(f);
+    json[n] = '\0';
+    gf_json_str(json, "latest_gf_version", latest, ll);
+    gf_json_str(json, "tested_against_gf", tested, tl);
+}
+
 int machine_is_idle(void)
 {
     char st[24];
@@ -200,6 +244,12 @@ int machine_status_json(char *buf, size_t len)
         coolant_degc(t1), coolant_degc(t2),
         rd_attr_long("thermal/water_pump_on", 0) ? "true" : "false",
         rd_attr_long("thermal/tec_on", 0) ? "true" : "false");
+    char gf_latest[32], gf_tested[32];
+    read_gf_latest(gf_latest, sizeof(gf_latest), gf_tested, sizeof(gf_tested));
+    if (gf_latest[0] && gf_tested[0])
+        off += (size_t)snprintf(buf + off, len - off,
+            "\"gfsvc\":{\"latest\":\"%s\",\"tested\":\"%s\"},",
+            gf_latest, gf_tested);
     snprintf(buf + off, len - off,
         "\"switches\":{\"lid\":%s,\"button\":%s,\"interlock_ok\":%s,"
         "\"head\":%s,\"estop\":%s}}",
