@@ -323,10 +323,32 @@ static const struct {
 };
 #define N_SETTINGS (sizeof(setting_defs) / sizeof(*setting_defs))
 
+/* /etc/forgefirm-version: written by the image build (release version,
+ * or build timestamp + dev tag). Sanitized for direct JSON embedding. */
+static void read_fw_version(char *buf, size_t len)
+{
+    buf[0] = '\0';
+    FILE *f = fopen("/etc/forgefirm-version", "r");
+    if (!f)
+        return;
+    if (!fgets(buf, (int)len, f))
+        buf[0] = '\0';
+    fclose(f);
+    size_t o = 0;
+    for (size_t i = 0; buf[i]; i++)
+        if (buf[i] >= ' ' && buf[i] != '"' && buf[i] != '\\')
+            buf[o++] = buf[i];
+    while (o > 0 && buf[o - 1] == ' ')
+        o--;
+    buf[o] = '\0';
+}
+
 static int reply_settings(struct _u_response *res)
 {
-    char body[1024], val[128], host[64] = "";
+    char body[1024], val[128], host[64] = "", fwver[48];
     size_t off = 0;
+
+    read_fw_version(fwver, sizeof(fwver));
 
     off += (size_t)snprintf(body + off, sizeof(body) - off, "{");
     for (size_t i = 0; i < N_SETTINGS; i++) {
@@ -345,7 +367,8 @@ static int reply_settings(struct _u_response *res)
                                     have ? val : "");
     }
     gethostname(host, sizeof(host) - 1);
-    snprintf(body + off, sizeof(body) - off, "\"hostname\":\"%s\"}", host);
+    snprintf(body + off, sizeof(body) - off,
+             "\"version\":\"%s\",\"hostname\":\"%s\"}", fwver, host);
     ulfius_set_string_body_response(res, 200, body);
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
     return U_CALLBACK_CONTINUE;

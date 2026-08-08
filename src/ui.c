@@ -347,6 +347,7 @@ const char index_html[] =
 "g+=sw('estop','E-stop sense','ok','low','b-ok','b-dim');"
 "$('switches').innerHTML=g}"
 "function renderStat(){var g='';"
+"g+=txt('Firmware',S.version||'\\u2014');"
 "g+=txt('Homing',modeName(S.homing_mode));"
 "g+=txt('Identity',S.gf_serial?'Override (S'+S.gf_serial+')':"
 "'Factory fuses');"
@@ -379,7 +380,8 @@ const char index_html[] =
 "$('gf_password').value='';"
 "$('gf_password').placeholder=S.gf_password_set?"
 "'(override set \\u2014 blank keeps it)':'(factory fuses)';"
-"$('host').textContent=S.hostname||'';"
+"$('host').textContent=(S.hostname||'')+"
+"(S.version?' \\u00b7 '+S.version:'');"
 "renderStat()}"
 /* settings go in the query string: empty values (= clear the key)
  * are dropped from form bodies by the HTTP stack */

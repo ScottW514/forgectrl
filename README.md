@@ -42,7 +42,7 @@ restarts.
 | Endpoint | Purpose |
 |---|---|
 | `GET /status` | Machine operational status as JSON (state, position when homed, fans, coolant, switches) |
-| `GET /settings` | Current settings as JSON (plus the system hostname) |
+| `GET /settings` | Current settings as JSON (plus the system hostname and firmware version) |
 | `POST /settings?key=value&...` | Set any subset of known keys |
 
 Position comes from the kernel step counters anchored at the last
