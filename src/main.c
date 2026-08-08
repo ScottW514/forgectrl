@@ -259,8 +259,11 @@ static int valid_homing_mode(const char *v)
 
 static int valid_controller_mode(const char *v)
 {
-    /* 'cloud' (the factory web-service stack) joins once implemented */
-    return !strcmp(v, "grbl");
+    /* grbl = grblHAL over TCP:23; cloud = the Glowforge web-service stack
+     * (gfcloud daemon). The two are mutually exclusive; the boot-time init
+     * scripts dispatch on this key, so a change applies on the next
+     * controller restart. */
+    return !strcmp(v, "grbl") || !strcmp(v, "cloud");
 }
 
 static int valid_mm(const char *v)
