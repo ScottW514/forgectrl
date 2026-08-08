@@ -254,6 +254,12 @@ static int valid_homing_mode(const char *v)
            !strcmp(v, "switches");
 }
 
+static int valid_controller_mode(const char *v)
+{
+    /* 'cloud' (the factory web-service stack) joins once implemented */
+    return !strcmp(v, "grbl");
+}
+
 static int valid_mm(const char *v)
 {
     char *end;
@@ -305,6 +311,7 @@ static const struct {
     int (*valid)(const char *);
     int secret;
 } setting_defs[] = {
+    { "controller_mode",        valid_controller_mode, 0 },
     { "homing_mode",            valid_homing_mode, 0 },
     { "gfcloud_home_x",         valid_mm,          0 },
     { "gfcloud_home_y",         valid_mm,          0 },
@@ -376,6 +383,12 @@ static int cb_settings_post(const struct _u_request *req,
 {
     (void)user_data;
     int present = 0;
+
+    /* Settings are locked whenever the machine is not idle: the
+     * controller and the homing runner both read this file mid-run. */
+    if (!machine_is_idle())
+        return reply_error(res, 409,
+            "machine is not idle - settings are locked");
 
     /* Validate the whole request before writing anything. */
     for (size_t i = 0; i < N_SETTINGS; i++) {

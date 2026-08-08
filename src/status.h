@@ -13,4 +13,8 @@
  * omitted or defaulted. Needs ~512 bytes. */
 int machine_status_json(char *buf, size_t len);
 
+/* True when the motion driver reports the idle state (or there is no
+ * driver). Settings changes are only allowed while idle. */
+int machine_is_idle(void);
+
 #endif

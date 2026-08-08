@@ -149,6 +149,14 @@ static unsigned long read_switches(void)
     return bits;
 }
 
+int machine_is_idle(void)
+{
+    char st[24];
+    if (rd_attr("cnc/state", st, sizeof(st)))
+        return 1;   /* no motion driver = nothing can be running */
+    return strcmp(st, "idle") == 0;
+}
+
 int machine_status_json(char *buf, size_t len)
 {
     char state[24] = "";

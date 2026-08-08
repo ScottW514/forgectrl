@@ -16,10 +16,11 @@ controller-mode selection (GRBL / Glowforge cloud) are planned here.
 A self-contained single page (no external assets) carrying the
 OpenGlow visual identity, tabbed:
 
-- **Status** — live operational status (motion state and position,
-  coolant temperatures and fan tachometers, safety-switch states,
-  system summary) plus a scaled lid-camera snapshot that switches to
-  the live MJPEG stream on demand.
+- **Status** — the controller-mode selector (GRBL today; factory cloud
+  once implemented), live operational status (motion state and
+  position, coolant temperatures and fan tachometers, safety-switch
+  states, system summary), plus a scaled lid-camera snapshot that
+  switches to the live MJPEG stream on demand.
 - **Machine** — shared settings: homing method and the post-homing
   position calibration.
 - **GF Cloud** — Glowforge web-service overrides: machine identity
@@ -50,10 +51,13 @@ the Grbl TCP socket is never queried, since a connection there would
 displace the sender's session.
 
 An empty value clears a key back to its built-in default (send clears as
-query parameters). Known keys:
+query parameters). Writes are refused (409) unless the machine is idle —
+the controller and the homing runner both read this file mid-run. Known
+keys:
 
 | Key | Meaning |
 |---|---|
+| `controller_mode` | `grbl` (factory `cloud` mode joins once implemented) |
 | `homing_mode` | `$H` behavior: `gfcloud`, `switches`, or `none` |
 | `gfcloud_home_x/y/z` | Machine coordinates after a completed homing (mm) |
 | `gfcloud_home_timeout_s` | Web-service homing session budget (30–3600 s) |
