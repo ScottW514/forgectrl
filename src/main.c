@@ -368,6 +368,10 @@ static void apply_wifi_country(void)
     if (settings_get("wifi_country", cc, sizeof(cc)) != 0 ||
         !valid_country(cc))
         snprintf(cc, sizeof(cc), "00");
+    /* Reload the database first: when cfg80211 initialized before the
+     * rootfs was mounted, its boot-time regulatory.db load failed and
+     * stays failed until an explicit reload. */
+    system("iw reg reload >/dev/null 2>&1");
     snprintf(cmd, sizeof(cmd), "iw reg set %s >/dev/null 2>&1", cc);
     if (system(cmd) != 0)
         fprintf(stderr, "forgectrl: iw reg set %s failed\n", cc);
