@@ -13,10 +13,13 @@ controller-mode selection (GRBL / Glowforge cloud) are planned here.
 
 ## The control panel (`GET /`)
 
-A self-contained single page (no external assets), tabbed:
+A self-contained single page (no external assets) carrying the
+OpenGlow visual identity, tabbed:
 
-- **Status** — machine summary plus a scaled lid-camera snapshot that
-  switches to the live MJPEG stream on demand.
+- **Status** — live operational status (motion state and position,
+  coolant temperatures and fan tachometers, safety-switch states,
+  system summary) plus a scaled lid-camera snapshot that switches to
+  the live MJPEG stream on demand.
 - **Machine** — shared settings: homing method and the post-homing
   position calibration.
 - **GF Cloud** — Glowforge web-service overrides: machine identity
@@ -37,8 +40,14 @@ restarts.
 
 | Endpoint | Purpose |
 |---|---|
+| `GET /status` | Machine operational status as JSON (state, position when homed, fans, coolant, switches) |
 | `GET /settings` | Current settings as JSON (plus the system hostname) |
 | `POST /settings?key=value&...` | Set any subset of known keys |
+
+Position comes from the kernel step counters anchored at the last
+completed homing (`/run/grblhal.homed`, written by the controller) —
+the Grbl TCP socket is never queried, since a connection there would
+displace the sender's session.
 
 An empty value clears a key back to its built-in default (send clears as
 query parameters). Known keys:

@@ -8,6 +8,7 @@ add_executable(forgectrl
   src/cam.c
   src/debayer.c
   src/settings.c
+  src/status.c
   src/ui.c
   src/vpu_jpeg.c
 )

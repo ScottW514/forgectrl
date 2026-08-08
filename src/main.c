@@ -12,8 +12,9 @@
  *   GET /cam/snapshot?cam=&res=full|half&q=&lamp=  single JPEG (full res;
  *                                lamp overrides the scene lamp for the shot)
  *   GET /cam/status                         JSON engine status
+ *   GET /status                             JSON machine operational status
  *   GET /settings                           JSON machine settings
- *   POST /settings?homing_mode=             update a machine setting
+ *   POST /settings?key=value                update machine settings
  *
  * The two cameras share the hardware mux; the newest request wins it. A
  * STREAM request for the other camera preempts the current stream
@@ -29,6 +30,7 @@
 #define _GNU_SOURCE
 #include "cam.h"
 #include "settings.h"
+#include "status.h"
 #include "ui.h"
 
 #include <ctype.h>
@@ -350,6 +352,18 @@ static int cb_settings_get(const struct _u_request *req,
     return reply_settings(res);
 }
 
+static int cb_machine_status(const struct _u_request *req,
+                             struct _u_response *res, void *user_data)
+{
+    (void)req;
+    (void)user_data;
+    char body[640];
+    machine_status_json(body, sizeof(body));
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
 static const char *setting_param(const struct _u_request *req,
                                  const char *key)
 {
@@ -442,6 +456,8 @@ int main(void)
                                &cb_settings_get, NULL);
     ulfius_add_endpoint_by_val(&inst, "POST", "/settings", NULL, 0,
                                &cb_settings_post, NULL);
+    ulfius_add_endpoint_by_val(&inst, "GET", "/status", NULL, 0,
+                               &cb_machine_status, NULL);
 
     if (ulfius_start_framework(&inst) != U_OK) {
         fprintf(stderr, "forgectrl: cannot start HTTP on port %u\n", port);
