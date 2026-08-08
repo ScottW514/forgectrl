@@ -13,7 +13,7 @@
 int settings_get(const char *key, char *val, size_t len);
 
 /* Set a key, preserving comments and unrelated keys; atomic replace.
- * Returns 0 on success. */
+ * An empty value removes the key. Returns 0 on success. */
 int settings_set(const char *key, const char *val);
 
 #endif

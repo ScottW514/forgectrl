@@ -5,7 +5,7 @@
  *
  * HTTP service (ulfius) exposing the Glowforge cameras as MJPEG:
  *
- *   GET /                        index page with a live view
+ *   GET /                        the machine control panel (ui.c)
  *   GET /?action=stream          mjpg-streamer-compatible stream (lid)
  *   GET /?action=snapshot        mjpg-streamer-compatible snapshot (lid)
  *   GET /cam/stream?cam=lid|head            multipart MJPEG, 1296x972
@@ -29,7 +29,9 @@
 #define _GNU_SOURCE
 #include "cam.h"
 #include "settings.h"
+#include "ui.h"
 
+#include <ctype.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -235,31 +237,106 @@ static int cb_status(const struct _u_request *req, struct _u_response *res,
 
 /* ------------------------------------------------------------- settings */
 
-/* Machine settings shared with the grblHAL-glowforge controller through
- * /data/forgefirm.conf. homing_mode selects how the controller executes
- * $H: 'gfcloud' = the Glowforge web service homing sequence (cameras),
- * 'switches' = physical limit switches, 'none' = homing rejected. The
- * controller re-reads the file on every $H, so changes apply without a
- * restart. */
+/* Machine settings shared with the grblHAL-glowforge controller and the
+ * gfhome homing runner through /data/forgefirm.conf. The controller
+ * re-reads the file on every $H and the runner at every session start,
+ * so changes apply without restarts. Every key is validated here; an
+ * empty value removes the key (back to the built-in default) and must
+ * arrive as a query parameter - zero-length form-body values never
+ * reach the body map. Secret keys are write-only: GET reports
+ * "<key>_set" instead of the value. */
 
-static const char *const homing_modes[] = { "none", "gfcloud", "switches" };
-
-static int homing_mode_valid(const char *v)
+static int valid_homing_mode(const char *v)
 {
-    for (size_t i = 0; i < sizeof(homing_modes) / sizeof(*homing_modes); i++)
-        if (!strcmp(v, homing_modes[i]))
-            return 1;
-    return 0;
+    return !strcmp(v, "none") || !strcmp(v, "gfcloud") ||
+           !strcmp(v, "switches");
 }
+
+static int valid_mm(const char *v)
+{
+    char *end;
+    double f = strtod(v, &end);
+    return end != v && *end == '\0' && f >= -1000.0 && f <= 1000.0;
+}
+
+static int valid_timeout(const char *v)
+{
+    char *end;
+    long t = strtol(v, &end, 10);
+    return end != v && *end == '\0' && t >= 30 && t <= 3600;
+}
+
+static int valid_serial(const char *v)
+{
+    size_t n = strlen(v);
+    if (n < 1 || n > 12)
+        return 0;
+    for (size_t i = 0; i < n; i++)
+        if (v[i] < '0' || v[i] > '9')
+            return 0;
+    return 1;
+}
+
+static int valid_password(const char *v)
+{
+    if (strlen(v) != 64)
+        return 0;
+    for (int i = 0; i < 64; i++)
+        if (!isxdigit((unsigned char)v[i]))
+            return 0;
+    return 1;
+}
+
+static int valid_hostname(const char *v)
+{
+    size_t n = strlen(v);
+    if (n < 1 || n > 32)
+        return 0;
+    for (size_t i = 0; i < n; i++)
+        if (!isalnum((unsigned char)v[i]) && v[i] != '-')
+            return 0;
+    return 1;
+}
+
+static const struct {
+    const char *key;
+    int (*valid)(const char *);
+    int secret;
+} setting_defs[] = {
+    { "homing_mode",            valid_homing_mode, 0 },
+    { "gfcloud_home_x",         valid_mm,          0 },
+    { "gfcloud_home_y",         valid_mm,          0 },
+    { "gfcloud_home_z",         valid_mm,          0 },
+    { "gfcloud_home_timeout_s", valid_timeout,     0 },
+    { "gf_serial",              valid_serial,      0 },
+    { "gf_password",            valid_password,    1 },
+    { "gf_hostname",            valid_hostname,    0 },
+};
+#define N_SETTINGS (sizeof(setting_defs) / sizeof(*setting_defs))
 
 static int reply_settings(struct _u_response *res)
 {
-    char mode[32];
-    if (settings_get("homing_mode", mode, sizeof(mode)) != 0 ||
-        !homing_mode_valid(mode))
-        snprintf(mode, sizeof(mode), "none");
-    char body[64];
-    snprintf(body, sizeof(body), "{\"homing_mode\":\"%s\"}", mode);
+    char body[1024], val[128], host[64] = "";
+    size_t off = 0;
+
+    off += (size_t)snprintf(body + off, sizeof(body) - off, "{");
+    for (size_t i = 0; i < N_SETTINGS; i++) {
+        /* A value that fails its own validator (hand-edited file) is
+         * reported as unset rather than leaking arbitrary bytes into
+         * the JSON. */
+        int have = settings_get(setting_defs[i].key, val, sizeof(val)) == 0 &&
+                   setting_defs[i].valid(val);
+        if (setting_defs[i].secret)
+            off += (size_t)snprintf(body + off, sizeof(body) - off,
+                                    "\"%s_set\":%s,", setting_defs[i].key,
+                                    have ? "true" : "false");
+        else
+            off += (size_t)snprintf(body + off, sizeof(body) - off,
+                                    "\"%s\":\"%s\",", setting_defs[i].key,
+                                    have ? val : "");
+    }
+    gethostname(host, sizeof(host) - 1);
+    snprintf(body + off, sizeof(body) - off, "\"hostname\":\"%s\"}", host);
     ulfius_set_string_body_response(res, 200, body);
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
     return U_CALLBACK_CONTINUE;
@@ -273,90 +350,49 @@ static int cb_settings_get(const struct _u_request *req,
     return reply_settings(res);
 }
 
+static const char *setting_param(const struct _u_request *req,
+                                 const char *key)
+{
+    const char *v = u_map_get(req->map_post_body, key);
+    return v ? v : u_map_get(req->map_url, key);
+}
+
 static int cb_settings_post(const struct _u_request *req,
                             struct _u_response *res, void *user_data)
 {
     (void)user_data;
-    const char *v = u_map_get(req->map_post_body, "homing_mode");
-    if (!v)
-        v = u_map_get(req->map_url, "homing_mode");
-    if (!v)
-        return reply_error(res, 400, "missing homing_mode");
-    if (!homing_mode_valid(v))
-        return reply_error(res, 400,
-            "homing_mode must be 'none', 'gfcloud' or 'switches'");
-    if (settings_set("homing_mode", v) != 0)
-        return reply_error(res, 500, "cannot write settings file");
-    fprintf(stderr, "forgectrl: homing_mode set to %s\n", v);
+    int present = 0;
+
+    /* Validate the whole request before writing anything. */
+    for (size_t i = 0; i < N_SETTINGS; i++) {
+        const char *v = setting_param(req, setting_defs[i].key);
+        if (!v)
+            continue;
+        present++;
+        if (v[0] && !setting_defs[i].valid(v)) {
+            char err[96];
+            snprintf(err, sizeof(err), "invalid value for %s",
+                     setting_defs[i].key);
+            return reply_error(res, 400, err);
+        }
+    }
+    if (!present)
+        return reply_error(res, 400, "no known setting in request");
+
+    for (size_t i = 0; i < N_SETTINGS; i++) {
+        const char *v = setting_param(req, setting_defs[i].key);
+        if (!v)
+            continue;
+        if (settings_set(setting_defs[i].key, v) != 0)
+            return reply_error(res, 500, "cannot write settings file");
+        fprintf(stderr, "forgectrl: %s %s\n", setting_defs[i].key,
+                !v[0] ? "cleared" :
+                setting_defs[i].secret ? "set" : v);
+    }
     return reply_settings(res);
 }
 
-/* One stream at a time: the camera toggle swaps the single <img> source
- * (closing the old stream connection) and retries through the server's
- * switch grace. "Head peek" uses the snapshot borrow path, so it works
- * while the lid stream is up. */
-static const char index_html[] =
-    "<!DOCTYPE html><html><head><title>ForgeFIRM</title>"
-    "<style>body{font-family:sans-serif;background:#111;color:#ddd;"
-    "text-align:center}img{max-width:95%;border:1px solid #444;"
-    "margin-top:8px}a{color:#8cf}button{margin:0 4px}"
-    "#msg{color:#fc6;min-height:1.2em}"
-    "fieldset{display:inline-block;border:1px solid #444;margin:8px 0}"
-    "select{margin:0 4px}#hmsg{color:#fc6;min-height:1.2em}"
-    "</style></head><body>"
-    "<h2>ForgeFIRM</h2>"
-    "<fieldset><legend>Homing method</legend>"
-    "<select id=\"homing\">"
-    "<option value=\"none\">Disabled</option>"
-    "<option value=\"gfcloud\">Glowforge web service (cameras)</option>"
-    "<option value=\"switches\">Limit switches</option>"
-    "</select>"
-    "<button onclick=\"saveHoming()\">Save</button>"
-    "<div id=\"hmsg\"></div></fieldset>"
-    "<p><button onclick=\"setCam('lid')\">Lid stream</button>"
-    "<button onclick=\"setCam('head')\">Head stream</button>"
-    "<button onclick=\"peek()\">Head peek</button> &nbsp; "
-    "<a href=\"/cam/snapshot?cam=lid\">lid full</a> | "
-    "<a href=\"/cam/snapshot?cam=head\">head full</a> | "
-    "<a href=\"/cam/status\">status</a></p>"
-    "<div id=\"msg\"></div>"
-    "<img id=\"v\" alt=\"camera stream\">"
-    "<img id=\"p\" alt=\"\" style=\"display:none\">"
-    "<script>"
-    "var cam='lid',retries=0;"
-    "var v=document.getElementById('v'),p=document.getElementById('p'),"
-    "msg=document.getElementById('msg'),"
-    "hsel=document.getElementById('homing'),"
-    "hmsg=document.getElementById('hmsg');"
-    "fetch('/settings').then(function(r){return r.json();})"
-    ".then(function(s){hsel.value=s.homing_mode;})"
-    ".catch(function(){hmsg.textContent='cannot read settings';});"
-    "function saveHoming(){hmsg.textContent='saving...';"
-    "fetch('/settings?homing_mode='+hsel.value,{method:'POST'})"
-    ".then(function(r){if(!r.ok)throw 0;return r.json();})"
-    ".then(function(s){hmsg.textContent='homing: '+s.homing_mode;})"
-    ".catch(function(){hmsg.textContent='save failed';});}"
-    "function setCam(c){cam=c;retries=0;msg.textContent='';"
-    "v.src='/cam/stream?cam='+c+'&t='+Date.now();}"
-    "function reload(){v.src='/cam/stream?cam='+cam+'&t='+Date.now();}"
-    /* Retry only when the engine still serves our camera - if another
-     * viewer preempted it, retrying would steal it right back. */
-    "v.onerror=function(){fetch('/cam/status').then(function(r){"
-    "return r.json();}).then(function(s){"
-    "if(s.cam===cam&&retries++<5){msg.textContent='stream retrying...';"
-    "setTimeout(reload,700);}else if(s.cam!==cam){msg.textContent="
-    "'stream taken by another viewer ('+s.cam+') - press a button to resume';}"
-    "else{msg.textContent='stream error - press a stream button to retry';}"
-    "}).catch(function(){msg.textContent="
-    "'service unreachable';});};"
-    "function peek(){"
-    "msg.textContent='head peek (stream pauses a few seconds)...';"
-    "p.style.display='inline';p.onload=function(){msg.textContent='';};"
-    "p.src='/cam/snapshot?cam=head&res=half&t='+Date.now();}"
-    "setCam('lid');"
-    "</script></body></html>";
-
-/* "/" serves the index, plus the mjpg-streamer-compatible
+/* "/" serves the UI (ui.c), plus the mjpg-streamer-compatible
  * ?action=stream / ?action=snapshot aliases many clients expect. */
 static int cb_root(const struct _u_request *req, struct _u_response *res,
                    void *user_data)

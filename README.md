@@ -6,26 +6,51 @@ Glowforge lasers.
 forgectrl runs on the factory i.MX6 control board and exposes the machine's
 non-motion functions over HTTP (port 8080). Motion is handled by the separate
 [grblHAL-glowforge](https://github.com/ScottW514/grblHAL-glowforge) controller;
-forgectrl is the control surface around it. Camera service and machine
-settings (homing-method selection) are implemented; realtime hardware
-status, hardware control, and controller-mode selection (GRBL / Glowforge
-cloud) are planned here.
+forgectrl is the control surface around it: a web control panel, the camera
+service, and the persisted machine settings shared with the controller and
+the gfhome homing runner. Realtime hardware status/control and
+controller-mode selection (GRBL / Glowforge cloud) are planned here.
+
+## The control panel (`GET /`)
+
+A self-contained single page (no external assets), tabbed:
+
+- **Status** — machine summary plus a scaled lid-camera snapshot that
+  switches to the live MJPEG stream on demand.
+- **Machine** — shared settings: homing method and the post-homing
+  position calibration.
+- **GF Cloud** — Glowforge web-service overrides: machine identity
+  (serial / password / hostname; blank = the factory fuse identity) and
+  the homing-session timeout.
+- **GRBL** — controller connection info; GRBL-mode tunables land here as
+  the controller exposes them.
+
+The design intent: every machine tunable — shared, cloud-override, and
+GRBL-mode — gets a home in one of these tabs as it appears.
 
 ## Machine settings
 
 Settings persist in `/data/forgefirm.conf`, shared with the
-grblHAL-glowforge controller (it re-reads the file on every `$H`, so
-changes apply without a restart).
+grblHAL-glowforge controller (re-read on every `$H`) and the gfhome
+homing runner (read at session start), so changes apply without
+restarts.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /settings` | Current settings as JSON |
-| `POST /settings?homing_mode=` | Set the homing method |
+| `GET /settings` | Current settings as JSON (plus the system hostname) |
+| `POST /settings?key=value&...` | Set any subset of known keys |
 
-`homing_mode` selects how the controller executes `$H`: `gfcloud` (the
-Glowforge web-service camera homing), `switches` (physical limit
-switches), or `none` (homing rejected). The index page has a selector
-for it.
+An empty value clears a key back to its built-in default (send clears as
+query parameters). Known keys:
+
+| Key | Meaning |
+|---|---|
+| `homing_mode` | `$H` behavior: `gfcloud`, `switches`, or `none` |
+| `gfcloud_home_x/y/z` | Machine coordinates after a completed homing (mm) |
+| `gfcloud_home_timeout_s` | Web-service homing session budget (30–3600 s) |
+| `gf_serial` | Cloud sign-in serial override (digits) |
+| `gf_password` | Cloud sign-in password override (64 hex; write-only — `GET` reports `gf_password_set`) |
+| `gf_hostname` | Reported hostname override |
 
 ## Camera service
 

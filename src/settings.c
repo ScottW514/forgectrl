@@ -81,6 +81,7 @@ int settings_get(const char *key, char *val, size_t len)
 int settings_set(const char *key, const char *val)
 {
     const char *path = settings_path();
+    int drop = val[0] == '\0';   /* empty value = remove the key */
 
     /* Read existing lines so unknown keys and comments survive. */
     char *lines[FILE_MAX_LINES];
@@ -93,8 +94,8 @@ int settings_set(const char *key, const char *val)
             char probe[LINE_MAX_LEN], *k, *v;
             snprintf(probe, sizeof(probe), "%s", line);
             if (parse_line(probe, &k, &v) == 0 && !strcmp(k, key)) {
-                if (replaced)
-                    continue;        /* collapse duplicate keys */
+                if (drop || replaced)
+                    continue;        /* drop, or collapse duplicates */
                 snprintf(line, sizeof(line), "%s = %s\n", key, val);
                 replaced = 1;
             }
@@ -104,6 +105,8 @@ int settings_set(const char *key, const char *val)
             n++;
         }
         fclose(f);
+    } else if (drop) {
+        return 0;                    /* nothing to remove */
     }
 
     char tmp[300];
@@ -119,7 +122,7 @@ int settings_set(const char *key, const char *val)
         fputs(lines[i], f);
         free(lines[i]);
     }
-    if (!replaced)
+    if (!replaced && !drop)
         fprintf(f, "%s = %s\n", key, val);
     int bad = ferror(f);
     if (fclose(f) != 0 || bad || rename(tmp, path) != 0) {
