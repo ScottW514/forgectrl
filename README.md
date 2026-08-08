@@ -71,7 +71,7 @@ keys:
 | `gf_password` | Cloud sign-in password override (64 hex; write-only — `GET` reports `gf_password_set`) |
 | `ui_units` | Panel display units: `metric` or `imperial` (values are stored and exchanged in metric) |
 | `cool_*` | Coolant-loop protection tunables (flow-check bands, temperature ceiling/resume, cooldown) — see the Machine tab hints |
-| `wifi_country` | WiFi regulatory region, ISO 3166-1 alpha-2 (`00` = world, the default); applied via `iw reg set` at startup and on change |
+| `wifi_country` | WiFi regulatory region, ISO 3166-1 alpha-2; unset = automatic (the AP's 802.11d country, else world). Applied via `iw reg reload`/`iw reg set` at startup and on change; power save is pinned off in the same pass |
 
 ## Camera service
 
