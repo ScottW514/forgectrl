@@ -13,7 +13,8 @@
  * Position: the controller zeroes the kernel step counters when a
  * homing cycle completes and writes the home coordinates to
  * /run/grblhal.homed, so anchor + counters = machine position. Without
- * the anchor the machine is unreferenced and no position is reported.
+ * the anchor the position is counters-only - relative to wherever the
+ * head was when counting started - and flagged unreferenced.
  */
 #define _GNU_SOURCE
 #include "status.h"
@@ -92,18 +93,22 @@ static long fan_rpm(long period_ns)
     return period_ns > 0 ? (long)(60e9 / ((double)period_ns * 2.0)) : 0;
 }
 
-/* Machine position: home anchor + kernel step counters. Returns 0 with
- * xyz filled, or -1 when the machine is unreferenced. */
-static int read_position(double *x, double *y, double *z)
+/* Machine position: home anchor + kernel step counters. Without an
+ * anchor the machine is unreferenced but still movable - position is
+ * then counters-only, i.e. relative to wherever the head was when
+ * counting started (the UI paints it red). Returns 0 with xyz and
+ * homed filled, or -1 when the counters themselves are unreadable. */
+static int read_position(double *x, double *y, double *z, int *homed)
 {
-    double hx, hy, hz;
+    double hx = 0, hy = 0, hz = 0;
     FILE *f = fopen(HOMED_ANCHOR, "r");
-    if (!f)
-        return -1;
-    int ok = fscanf(f, "%lf %lf %lf", &hx, &hy, &hz) == 3;
-    fclose(f);
-    if (!ok)
-        return -1;
+    *homed = 0;
+    if (f) {
+        *homed = fscanf(f, "%lf %lf %lf", &hx, &hy, &hz) == 3;
+        fclose(f);
+        if (!*homed)
+            hx = hy = hz = 0;
+    }
 
     uint8_t raw[32];
     int fd = open(GF_SYSFS "cnc/position", O_RDONLY);
@@ -164,7 +169,8 @@ int machine_status_json(char *buf, size_t len)
     rd_attr("cnc/state", state, sizeof(state));
 
     double x, y, z;
-    int homed = read_position(&x, &y, &z) == 0;
+    int homed = 0;
+    int have_pos = read_position(&x, &y, &z, &homed) == 0;
 
     long t1 = rd_attr_long("pic/water_temp_1", -1);
     long t2 = rd_attr_long("pic/water_temp_2", -1);
@@ -176,7 +182,7 @@ int machine_status_json(char *buf, size_t len)
         "{\"state\":\"%s\",\"homed\":%s,\"diag\":%s,",
         state[0] ? state : "unknown", homed ? "true" : "false",
         diag_running() ? "true" : "false");
-    if (homed)
+    if (have_pos)
         off += (size_t)snprintf(buf + off, len - off,
             "\"pos\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f},", x, y, z);
     if (ilk >= 0)

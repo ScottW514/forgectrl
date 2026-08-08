@@ -296,15 +296,9 @@ static int valid_password(const char *v)
     return 1;
 }
 
-static int valid_hostname(const char *v)
+static int valid_units(const char *v)
 {
-    size_t n = strlen(v);
-    if (n < 1 || n > 32)
-        return 0;
-    for (size_t i = 0; i < n; i++)
-        if (!isalnum((unsigned char)v[i]) && v[i] != '-')
-            return 0;
-    return 1;
+    return !strcmp(v, "metric") || !strcmp(v, "imperial");
 }
 
 /* Cooling tunables (consumed by the controller per flood start). The
@@ -339,7 +333,7 @@ static const struct {
     { "gfcloud_home_timeout_s", valid_timeout,     0 },
     { "gf_serial",              valid_serial,      0 },
     { "gf_password",            valid_password,    1 },
-    { "gf_hostname",            valid_hostname,    0 },
+    { "ui_units",               valid_units,       0 },
     { "cool_flow_rise",         valid_rise_c,      0 },
     { "cool_flow_heater_pct",   valid_heater_pct,  0 },
     { "cool_flow_check_s",      valid_check_s,     0 },
@@ -351,6 +345,52 @@ static const struct {
     { "cool_cooldown_max_s",    valid_cool_s,      0 },
 };
 #define N_SETTINGS (sizeof(setting_defs) / sizeof(*setting_defs))
+
+/* Machine identity, derived from the i.MX6 OCOTP fuses exactly like
+ * the factory firmware: the serial is fuse word HW_OCOTP_MAC0 (nvmem
+ * word 34 on the mainline imx-ocotp driver; hex text on the legacy
+ * fsl_otp path), and the factory hostname is that serial encoded
+ * base-23 over the alphabet BCDFGHJKMQRTVWXY2346789, up to six
+ * characters, split XXX-YYY. The GUI always identifies the machine by
+ * this fuse identity - the gf_serial setting overrides only what is
+ * sent to the Glowforge cloud. */
+static void machine_id(char *buf, size_t len)
+{
+    static char cached[16];
+    if (!cached[0]) {
+        unsigned long serial = 0;
+        FILE *f = fopen("/sys/bus/nvmem/devices/imx-ocotp0/nvmem", "rb");
+        if (f) {
+            unsigned char w[4];
+            if (fseek(f, 136, SEEK_SET) == 0 && fread(w, 1, 4, f) == 4)
+                serial = (unsigned long)w[0] | ((unsigned long)w[1] << 8) |
+                         ((unsigned long)w[2] << 16) |
+                         ((unsigned long)w[3] << 24);
+            fclose(f);
+        } else if ((f = fopen("/sys/fsl_otp/HW_OCOTP_MAC0", "r")) != NULL) {
+            if (fscanf(f, "%lx", &serial) != 1)
+                serial = 0;
+            fclose(f);
+        }
+        if (serial) {
+            static const char alpha[] = "BCDFGHJKMQRTVWXY2346789";
+            char enc[8];
+            int n = 0;
+            while (serial > 0 && n < 6) {
+                enc[n++] = alpha[serial % 23];
+                serial /= 23;
+            }
+            int o = 0;
+            for (int i = n - 1; i >= 0; i--) {
+                cached[o++] = enc[i];
+                if (i == n - 3 && i > 0)
+                    cached[o++] = '-';
+            }
+            cached[o] = '\0';
+        }
+    }
+    snprintf(buf, len, "%s", cached);
+}
 
 /* /etc/forgefirm-version: written by the image build (release version,
  * or build timestamp + dev tag). Sanitized for direct JSON embedding. */
@@ -374,10 +414,11 @@ static void read_fw_version(char *buf, size_t len)
 
 static int reply_settings(struct _u_response *res)
 {
-    char body[2048], val[128], host[64] = "", fwver[48];
+    char body[2048], val[128], mid[16], fwver[48];
     size_t off = 0;
 
     read_fw_version(fwver, sizeof(fwver));
+    machine_id(mid, sizeof(mid));
 
     off += (size_t)snprintf(body + off, sizeof(body) - off, "{");
     for (size_t i = 0; i < N_SETTINGS; i++) {
@@ -395,9 +436,8 @@ static int reply_settings(struct _u_response *res)
                                     "\"%s\":\"%s\",", setting_defs[i].key,
                                     have ? val : "");
     }
-    gethostname(host, sizeof(host) - 1);
     snprintf(body + off, sizeof(body) - off,
-             "\"version\":\"%s\",\"hostname\":\"%s\"}", fwver, host);
+             "\"version\":\"%s\",\"machine_id\":\"%s\"}", fwver, mid);
     ulfius_set_string_body_response(res, 200, body);
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
     return U_CALLBACK_CONTINUE;
