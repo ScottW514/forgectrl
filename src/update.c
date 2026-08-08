@@ -220,6 +220,37 @@ static int fw_classify(const char *file)
     return run_cmd(NULL, 0, cmd) == 0 ? 0 : -1;
 }
 
+/* Semantic version an archive was recorded with, from the manifest's
+ * "ver=<semantic>" field. Empty if the archive is not in the manifest,
+ * has no ver= (older installer), or ver=unknown. */
+static void archive_manifest_version(const char *file, char *out, size_t len)
+{
+    out[0] = '\0';
+    FILE *f = fopen(ARCHIVE_DIR "/manifest", "r");
+    if (!f)
+        return;
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        if (!strstr(line, file))
+            continue;
+        char *v = strstr(line, "ver=");
+        if (v) {
+            v += 4;
+            char raw[48];
+            size_t o = 0;
+            while (v[o] && v[o] != ' ' && v[o] != '\n' && o + 1 < sizeof(raw)) {
+                raw[o] = v[o];
+                o++;
+            }
+            raw[o] = '\0';
+            if (strcmp(raw, "unknown") != 0)
+                jsan(out, len, raw);
+        }
+        break;
+    }
+    fclose(f);
+}
+
 /* ------------------------------------------------------ job machinery */
 
 int update_job_running(void)
@@ -426,25 +457,36 @@ int cb_slots(const struct _u_request *req, struct _u_response *res,
     off += (size_t)snprintf(body + off, sizeof(body) - off,
                             "},\"archives\":[");
 
+    /* Only factory-rootfs archives are user-restorable; recovery-boot
+     * blobs are a Phase-5 concern and would only confuse the restore
+     * list, so they are omitted here. The semantic version comes from
+     * the manifest's ver= field (written by the installer); without it
+     * (older archives) the display falls back to the build date parsed
+     * from the filename. */
     DIR *d = opendir(ARCHIVE_DIR);
     int first = 1;
     if (d) {
         struct dirent *e;
-        while ((e = readdir(d)) != NULL && off + 256 < sizeof(body)) {
-            if (strncmp(e->d_name, "factory-rootfs-", 15) &&
-                strncmp(e->d_name, "recovery-boot", 13))
+        while ((e = readdir(d)) != NULL && off + 320 < sizeof(body)) {
+            if (strncmp(e->d_name, "factory-rootfs-", 15))
                 continue;
             char path[512];
             struct stat st;
             snprintf(path, sizeof(path), ARCHIVE_DIR "/%s", e->d_name);
             if (stat(path, &st) != 0)
                 continue;
-            char name[160];
+            char name[160], ver[48] = "", date[24] = "";
             jsan(name, sizeof(name), e->d_name);
+            archive_manifest_version(e->d_name, ver, sizeof(ver));
+            /* filename is factory-rootfs-<YYYYMMDDHHMMSS>.img.gz */
+            const char *ds = e->d_name + 15;
+            if (strlen(ds) >= 8)
+                snprintf(date, sizeof(date), "%.4s-%.2s-%.2s",
+                         ds, ds + 4, ds + 6);
             off += (size_t)snprintf(body + off, sizeof(body) - off,
-                                    "%s{\"file\":\"%s\",\"bytes\":%ld}",
-                                    first ? "" : ",", name,
-                                    (long)st.st_size);
+                "%s{\"file\":\"%s\",\"bytes\":%ld,\"version\":\"%s\","
+                "\"date\":\"%s\"}",
+                first ? "" : ",", name, (long)st.st_size, ver, date);
             first = 0;
         }
         closedir(d);
@@ -566,11 +608,17 @@ int cb_update_check(const struct _u_request *req, struct _u_response *res,
         ver[o] = '\0';
     }
     char body[256];
-    if (http != 200 || !ver[0])
+    if (http != 200 || !ver[0]) {
+        /* 404 = no published release with a forgefirm.fw asset (the
+         * expected state before the first release), distinct from a
+         * transport/proxy error. */
+        const char *detail = (http == 404 || http == 0)
+            ? "no published release found"
+            : "release server error";
         snprintf(body, sizeof(body),
                  "{\"available\":false,\"current\":\"%s\","
-                 "\"detail\":\"no release asset (HTTP %d)\"}", cur, http);
-    else
+                 "\"detail\":\"%s (HTTP %d)\"}", cur, detail, http);
+    } else
         snprintf(body, sizeof(body),
                  "{\"available\":true,\"version\":\"%s\","
                  "\"current\":\"%s\",\"new\":%s}",
