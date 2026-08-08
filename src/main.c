@@ -303,6 +303,16 @@ static int valid_units(const char *v)
     return !strcmp(v, "metric") || !strcmp(v, "imperial");
 }
 
+/* WiFi regulatory region: ISO 3166-1 alpha-2, or "00" for the world
+ * domain */
+static int valid_country(const char *v)
+{
+    if (!strcmp(v, "00"))
+        return 1;
+    return strlen(v) == 2 &&
+           v[0] >= 'A' && v[0] <= 'Z' && v[1] >= 'A' && v[1] <= 'Z';
+}
+
 /* Cooling tunables (consumed by the controller per flood start). The
  * ranges are wide on purpose - these exist for per-machine calibration
  * (pump wear, replacement coolant) - but still bounded to values the
@@ -336,6 +346,7 @@ static const struct {
     { "gf_serial",              valid_serial,      0 },
     { "gf_password",            valid_password,    1 },
     { "ui_units",               valid_units,       0 },
+    { "wifi_country",           valid_country,     0 },
     { "cool_flow_rise",         valid_rise_c,      0 },
     { "cool_flow_heater_pct",   valid_heater_pct,  0 },
     { "cool_flow_check_s",      valid_check_s,     0 },
@@ -347,6 +358,20 @@ static const struct {
     { "cool_cooldown_max_s",    valid_cool_s,      0 },
 };
 #define N_SETTINGS (sizeof(setting_defs) / sizeof(*setting_defs))
+
+/* Hand the stored WiFi region to cfg80211 as the user regulatory hint
+ * (iw reg set), at startup and whenever the setting changes. Unset
+ * falls back to "00", the world domain the kernel starts in. */
+static void apply_wifi_country(void)
+{
+    char cc[8], cmd[48];
+    if (settings_get("wifi_country", cc, sizeof(cc)) != 0 ||
+        !valid_country(cc))
+        snprintf(cc, sizeof(cc), "00");
+    snprintf(cmd, sizeof(cmd), "iw reg set %s >/dev/null 2>&1", cc);
+    if (system(cmd) != 0)
+        fprintf(stderr, "forgectrl: iw reg set %s failed\n", cc);
+}
 
 /* Machine identity, derived from the i.MX6 OCOTP fuses exactly like
  * the factory firmware: the serial is fuse word HW_OCOTP_MAC0 (nvmem
@@ -563,6 +588,8 @@ static int cb_settings_post(const struct _u_request *req,
                 !v[0] ? "cleared" :
                 setting_defs[i].secret ? "set" : v);
     }
+    if (setting_param(req, "wifi_country"))
+        apply_wifi_country();
     return reply_settings(res);
 }
 
@@ -670,6 +697,7 @@ int main(void)
     cam_engine_init();
     diag_init();
     update_init();
+    apply_wifi_country();
 
     struct _u_instance inst;
     if (ulfius_init_instance(&inst, port, NULL, NULL) != U_OK) {

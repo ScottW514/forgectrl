@@ -36,7 +36,7 @@ settings = {
     'ui_units': '', 'cool_flow_rise': '', 'cool_flow_heater_pct': '',
     'cool_flow_check_s': '', 'cool_recheck_s': '', 'cool_confirm_max_s': '',
     'cool_temp_max': '', 'cool_temp_resume': '', 'cool_cooldown_s': '',
-    'cool_cooldown_max_s': '',
+    'cool_cooldown_max_s': '', 'wifi_country': '',
     'version': 'mock', 'machine_id': 'ABC-123',
 }
 

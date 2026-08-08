@@ -21,13 +21,18 @@ OpenGlow visual identity, tabbed:
   position, coolant temperatures and fan tachometers, safety-switch
   states, system summary), plus a scaled lid-camera snapshot that
   switches to the live MJPEG stream on demand.
-- **Machine** — shared settings: homing method and the post-homing
-  position calibration.
+- **Machine** — shared settings: display units, homing method and the
+  post-homing position calibration, cooling tunables.
 - **GF Cloud** — Glowforge web-service overrides: machine identity
-  (serial / password / hostname; blank = the factory fuse identity) and
-  the homing-session timeout.
+  (serial / password; blank = the factory fuse identity) and the
+  homing-session timeout.
 - **GRBL** — controller connection info; GRBL-mode tunables land here as
   the controller exposes them.
+- **Diagnostics** — tools that take the hardware over (the motion
+  controller is stopped for the duration): cooling system verification
+  and calibration.
+- **System** — firmware slots (A/B boot selection), ForgeFIRM updates,
+  image install/restore, the WiFi regulatory region, reboot.
 
 The design intent: every machine tunable — shared, cloud-override, and
 GRBL-mode — gets a home in one of these tabs as it appears.
@@ -63,7 +68,9 @@ keys:
 | `gfcloud_home_timeout_s` | Web-service homing session budget (30–3600 s) |
 | `gf_serial` | Cloud sign-in serial override (digits) |
 | `gf_password` | Cloud sign-in password override (64 hex; write-only — `GET` reports `gf_password_set`) |
-| `gf_hostname` | Reported hostname override |
+| `ui_units` | Panel display units: `metric` or `imperial` (values are stored and exchanged in metric) |
+| `cool_*` | Coolant-loop protection tunables (flow-check bands, temperature ceiling/resume, cooldown) — see the Machine tab hints |
+| `wifi_country` | WiFi regulatory region, ISO 3166-1 alpha-2 (`00` = world, the default); applied via `iw reg set` at startup and on change |
 
 ## Camera service
 

@@ -23,6 +23,8 @@
  *   #diag     diagnostics - tools that take the hardware over (the
  *             motion controller is stopped for the duration): cooling
  *             system verification and calibration
+ *   #system   firmware slots (A/B boot selection), ForgeFIRM updates,
+ *             image install/restore, wireless regulatory region, reboot
  *
  * State flows through GET/POST /settings, GET /status (machine
  * telemetry) and GET /cam/status. The design intent: every machine
@@ -420,6 +422,17 @@ const char index_html[] =
 "</div>"
 "<div class='card'><h2>Update job</h2><div id='jobpanel' "
 "class='kv'>no job running</div></div>"
+"<div class='card'><h2>Wireless</h2>"
+"<div class='row'><label for='wifi_country'>Regulatory region</label>"
+"<select id='wifi_country'></select></div>"
+"<p class='hint'>Region rules set the WiFi radio's allowed channels "
+"and transmit power. World is the most restrictive set and legal "
+"everywhere; selecting your country unlocks what it permits "
+"(2.4&nbsp;GHz channels 12&ndash;13, 5&nbsp;GHz bands). Applied "
+"immediately and at every boot.</p>"
+"<div class='btns'><button class='pri' onclick='saveWifi()'>Save"
+"</button><span class='msg' id='msg-w'></span></div>"
+"</div>"
 "</section>"
 "</main>"
 
@@ -605,6 +618,7 @@ const char index_html[] =
 "setF('gfcloud_home_z',S.gfcloud_home_z);"
 "setF('gfcloud_home_timeout_s',S.gfcloud_home_timeout_s);"
 "for(var ci=0;ci<CK.length;ci++)setF(CK[ci],S[CK[ci]]);"
+"setF('wifi_country',S.wifi_country||'00');"
 "setF('gf_serial',S.gf_serial);"
 "$('gf_password').value='';"
 "$('gf_password').placeholder=S.gf_password_set?"
@@ -647,6 +661,62 @@ const char index_html[] =
 "if(!pick(p,['gfcloud_home_timeout_s'])){"
 "$('msg-s').textContent='no changes';return}"
 "post(p,'msg-s')}"
+
+/* wireless regulatory region: ISO 3166-1 alpha-2 codes with
+ * ASCII-folded English names, sorted by name; 00 is the kernel's
+ * built-in world domain (the default when the key is unset) */
+"var RG=\"AF Afghanistan;AX Aland Islands;AL Albania;DZ Algeria;AS American"
+" Samoa;AD Andorra;AO Angola;AI Anguilla;AG Antigua & Barbuda;AR Argentina;"
+"AM Armenia;AW Aruba;AU Australia;AT Austria;AZ Azerbaijan;BS Bahamas;BH Ba"
+"hrain;BD Bangladesh;BB Barbados;BY Belarus;BE Belgium;BZ Belize;BJ Benin;B"
+"M Bermuda;BT Bhutan;BO Bolivia;BQ Bonaire, Sint Eustatius and Saba;BA Bosn"
+"ia and Herzegovina;BW Botswana;BR Brazil;IO British Indian Ocean Territory"
+";VG British Virgin Islands;BN Brunei;BG Bulgaria;BF Burkina Faso;BI Burund"
+"i;CV Cabo Verde;KH Cambodia;CM Cameroon;CA Canada;KY Cayman Islands;CF Cen"
+"tral African Republic;TD Chad;CL Chile;CN China;CX Christmas Island;CC Coc"
+"os (Keeling) Islands;CO Colombia;KM Comoros;CG Congo;CD Congo (DRC);CK Coo"
+"k Islands;CR Costa Rica;CI Cote d'Ivoire;HR Croatia;CU Cuba;CW Curacao;CY "
+"Cyprus;CZ Czechia;DK Denmark;DJ Djibouti;DM Dominica;DO Dominican Republic"
+";EC Ecuador;EG Egypt;SV El Salvador;GQ Equatorial Guinea;ER Eritrea;EE Est"
+"onia;SZ Eswatini;ET Ethiopia;FK Falkland Islands;FO Faroe Islands;FJ Fiji;"
+"FI Finland;FR France;GF French Guiana;PF French Polynesia;GA Gabon;GM Gamb"
+"ia;GE Georgia;DE Germany;GH Ghana;GI Gibraltar;GR Greece;GL Greenland;GD G"
+"renada;GP Guadeloupe;GU Guam;GT Guatemala;GG Guernsey;GN Guinea;GW Guinea-"
+"Bissau;GY Guyana;HT Haiti;HN Honduras;HK Hong Kong SAR;HU Hungary;IS Icela"
+"nd;IN India;ID Indonesia;IR Iran;IQ Iraq;IE Ireland;IM Isle of Man;IL Isra"
+"el;IT Italy;JM Jamaica;JP Japan;JE Jersey;JO Jordan;KZ Kazakhstan;KE Kenya"
+";KI Kiribati;KR Korea;XK Kosovo;KW Kuwait;KG Kyrgyzstan;LA Laos;LV Latvia;"
+"LB Lebanon;LS Lesotho;LR Liberia;LY Libya;LI Liechtenstein;LT Lithuania;LU"
+" Luxembourg;MO Macao SAR;MG Madagascar;MW Malawi;MY Malaysia;MV Maldives;M"
+"L Mali;MT Malta;MH Marshall Islands;MQ Martinique;MR Mauritania;MU Mauriti"
+"us;YT Mayotte;MX Mexico;FM Micronesia;MD Moldova;MC Monaco;MN Mongolia;ME "
+"Montenegro;MS Montserrat;MA Morocco;MZ Mozambique;MM Myanmar;NA Namibia;NR"
+" Nauru;NP Nepal;NL Netherlands;NC New Caledonia;NZ New Zealand;NI Nicaragu"
+"a;NE Niger;NG Nigeria;NU Niue;NF Norfolk Island;KP North Korea;MK North Ma"
+"cedonia;MP Northern Mariana Islands;NO Norway;OM Oman;PK Pakistan;PW Palau"
+";PS Palestinian Authority;PA Panama;PG Papua New Guinea;PY Paraguay;PE Per"
+"u;PH Philippines;PN Pitcairn Islands;PL Poland;PT Portugal;PR Puerto Rico;"
+"QA Qatar;RE Reunion;RO Romania;RU Russia;RW Rwanda;WS Samoa;SM San Marino;"
+"ST Sao Tome & Principe;SA Saudi Arabia;SN Senegal;RS Serbia;SC Seychelles;"
+"SL Sierra Leone;SG Singapore;SX Sint Maarten;SK Slovakia;SI Slovenia;SB So"
+"lomon Islands;SO Somalia;ZA South Africa;SS South Sudan;ES Spain;LK Sri La"
+"nka;SH St Helena, Ascension, Tristan da Cunha;BL St. Barthelemy;KN St. Kit"
+"ts & Nevis;LC St. Lucia;MF St. Martin;PM St. Pierre & Miquelon;VC St. Vinc"
+"ent & Grenadines;SD Sudan;SR Suriname;SJ Svalbard & Jan Mayen;SE Sweden;CH"
+" Switzerland;SY Syria;TW Taiwan;TJ Tajikistan;TZ Tanzania;TH Thailand;TL T"
+"imor-Leste;TG Togo;TK Tokelau;TO Tonga;TT Trinidad & Tobago;TN Tunisia;TR "
+"Turkiye;TM Turkmenistan;TC Turks & Caicos Islands;TV Tuvalu;UM U.S. Outlyi"
+"ng Islands;VI U.S. Virgin Islands;UG Uganda;UA Ukraine;AE United Arab Emir"
+"ates;GB United Kingdom;US United States;UY Uruguay;UZ Uzbekistan;VU Vanuat"
+"u;VA Vatican City;VE Venezuela;VN Vietnam;WF Wallis & Futuna;YE Yemen;ZM Z"
+"ambia;ZW Zimbabwe\";"
+"(function(){var s=$('wifi_country'),a=RG.split(';'),i;"
+"s.add(new Option('World \\u2014 most restrictive (00)','00'));"
+"for(i=0;i<a.length;i++)s.add(new Option(a[i].slice(3)+' ('+"
+"a[i].slice(0,2)+')',a[i].slice(0,2)))})();"
+"function saveWifi(){var p={};if(!pick(p,['wifi_country'])){"
+"$('msg-w').textContent='no changes';return}"
+"post(p,'msg-w')}"
 
 /* fuse-identity viewer (backdrop click or Close dismisses) */
 "function showFuse(){fetch('/fuse-identity')"
