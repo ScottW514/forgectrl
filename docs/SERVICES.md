@@ -157,33 +157,38 @@ pushed state (`/run` anchor files, and the cooling reports below).
 
 ---
 
-## Cooling service [contract]
+## Cooling service [implemented: engine + channels; controllers migrating]
 
 The cooling engine — fan/pump/TEC/heater profiles, coolant-flow verification,
-over-temp policy — is moving into forgectrl as the single owner of the thermal
-hardware, serving both controller modes. The engine currently lives in the GRBL
-controller (`glowforge_cooling.c`); this section is the interface it moves
-behind. Tunables remain the `cool_*` keys in the shared machine settings.
+over-temp policy — lives in forgectrl (`src/cool.c`) as the single owner of the
+thermal hardware, serving both controller modes. Tunables are the `cool_*` keys
+in the shared machine settings (re-read at every run start) with `GFCOOL_*` env
+overrides. `GET /cool/status` reports the engine state for the UI and bench
+tooling. Until a controller migrates to the channels below, its in-process
+engine keeps writing the thermal attrs; the forgectrl engine writes hardware
+only on its own state transitions, so the two coexist during bring-up.
 
 ### Job-state reports (controller → forgectrl)
 
-`POST /cool/state`, JSON body:
+`POST /cool/state`, query or form parameters:
 
-```json
-{ "mode": "idle" | "run" | "cooldown",
-  "armed": false,
-  "profile": { "air_assist": 1023, "exhaust": 65535, "intake": 43278 } }
+```
+mode=idle|run|cooldown & armed=0|1
+    [ & air_assist=0..1023 & exhaust=0..65535 & intake=0..65535 ]
 ```
 
 - **Level-triggered, repeated at ~1 Hz** while the controller runs — not
   edge-triggered events. A lost report self-heals on the next one.
 - `armed` = the laser is armed (fire possible). The engine forces the run fan
   profile and flow interrogation whenever `armed` is true, whatever `mode` says.
-- `profile` is optional (cloud mode passes the factory pulse-header duties;
-  GRBL mode omits it → configured/factory defaults).
-- Silence: if the active controller stops reporting past a timeout, the engine
-  reverts to the idle profile (pump on, fans idle, heater off) and publishes
-  `fire_ok=false`.
+- The duty parameters are the optional per-job run fan profile (cloud mode
+  passes the factory pulse-header duties; GRBL mode omits them →
+  configured/factory defaults). Out-of-range values fall back to defaults.
+- Silence: if the active controller stops reporting past a timeout (5 s), the
+  engine publishes `fire_ok=false` immediately and stands down through the
+  normal cooldown path (smoke clear is the right physical behavior for a job
+  that died mid-cut), ending at the idle profile (pump on, fans idle, heater
+  off).
 
 ### Verdict file (forgectrl → controllers)
 
@@ -207,6 +212,11 @@ rename) at ~1 Hz and on every verdict change:
   must survive losing. The channel is not fast enough for anything
   safety-critical — the hardware AND-gate is the safety boundary; this is
   equipment protection.
+- `fire_ok` additionally requires a fresh job-state report: an armed window
+  the engine cannot see never reads `fire_ok=true`. A controller about to
+  fire is, by this contract, reporting at 1 Hz.
+- While a diagnostic owns the hardware the engine suspends its writes and
+  publishes `fire_ok=false, hold=true` until the diagnostic finishes.
 - **Emergency fallback:** if the verdict goes stale while the laser is armed,
   the controller (besides gating fire and holding) writes the run fan duties
   directly once — compiled-in factory values, no config dependency — then

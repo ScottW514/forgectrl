@@ -30,6 +30,7 @@
  */
 #define _GNU_SOURCE
 #include "cam.h"
+#include "cool.h"
 #include "diag.h"
 #include "settings.h"
 #include "status.h"
@@ -633,6 +634,46 @@ static int cb_fuse_identity(const struct _u_request *req,
     return U_CALLBACK_CONTINUE;
 }
 
+/* ------------------------------------------------------------- cooling */
+
+/* Level-triggered job-state report from the active controller (~1 Hz).
+ * Query/form parameters: mode=idle|run|cooldown, armed=0|1, and an
+ * optional per-job run fan profile (air_assist, exhaust, intake). */
+static int cb_cool_state(const struct _u_request *req,
+                         struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    const char *mode = setting_param(req, "mode");
+    if (!mode)
+        return reply_error(res, 400, "mode is required");
+
+    const char *v = setting_param(req, "armed");
+    int armed = v && atoi(v) != 0;
+    long duty[3] = {-1, -1, -1};
+    static const char *duty_key[3] = {"air_assist", "exhaust", "intake"};
+    for (int i = 0; i < 3; i++)
+        if ((v = setting_param(req, duty_key[i])) != NULL)
+            duty[i] = atol(v);
+
+    if (cool_state_report(mode, armed, duty[0], duty[1], duty[2]) != 0)
+        return reply_error(res, 400, "mode must be idle, run or cooldown");
+    ulfius_set_string_body_response(res, 200, "{\"ok\":true}");
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
+static int cb_cool_status(const struct _u_request *req,
+                          struct _u_response *res, void *user_data)
+{
+    (void)req;
+    (void)user_data;
+    char body[512];
+    cool_status_json(body, sizeof(body));
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
 /* --------------------------------------------------------- diagnostics */
 
 static int cb_diag_start(const struct _u_request *req,
@@ -711,6 +752,7 @@ int main(void)
 
     cam_engine_init();
     diag_init();
+    cool_init();
     update_init();
     apply_wifi(0);
 
@@ -734,6 +776,10 @@ int main(void)
                                &cb_machine_status, NULL);
     ulfius_add_endpoint_by_val(&inst, "GET", "/fuse-identity", NULL, 0,
                                &cb_fuse_identity, NULL);
+    ulfius_add_endpoint_by_val(&inst, "POST", "/cool/state", NULL, 0,
+                               &cb_cool_state, NULL);
+    ulfius_add_endpoint_by_val(&inst, "GET", "/cool/status", NULL, 0,
+                               &cb_cool_status, NULL);
     ulfius_add_endpoint_by_val(&inst, "POST", "/diag/flow-verify", NULL, 0,
                                &cb_diag_start, "flow-verify");
     ulfius_add_endpoint_by_val(&inst, "POST", "/diag/flow-calibrate", NULL,
@@ -779,6 +825,7 @@ int main(void)
     fprintf(stderr, "forgectrl: shutting down\n");
     ulfius_stop_framework(&inst);
     ulfius_clean_instance(&inst);
+    cool_shutdown();
     cam_engine_shutdown();
     return 0;
 }
