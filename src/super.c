@@ -376,16 +376,19 @@ int super_mode_switch(const char *mode, char *err, size_t elen)
         usleep(100 * 1000);
         pthread_mutex_lock(&mu);
     }
+    double t_spawn = spawned_at;
     pthread_mutex_unlock(&mu);
 
-    /* Wait for the controller to report in to the cooling engine. The
-     * cloud client signs into the web service first, so give it time;
-     * a slow first report is a warning, not a failure - but a child
-     * that keeps dying (bad binary, immediate crash) is one. */
+    /* Wait for the controller to report in to the cooling engine - a
+     * report NEWER than the spawn, so the previous controller's last
+     * report cannot satisfy the wait. The cloud client signs into the
+     * web service first, so give it time; a slow first report is a
+     * warning, not a failure - but a child that keeps dying (bad
+     * binary, immediate crash) is one. */
     double deadline = wall_s() + REPORT_WAIT_S;
     while (wall_s() < deadline) {
         double age = cool_report_age();
-        if (age >= 0.0 && age < 3.0)
+        if (age >= 0.0 && age < wall_s() - t_spawn)
             return 0;
         pthread_mutex_lock(&mu);
         int dead = child_pid == 0 || child_ctl != target;
