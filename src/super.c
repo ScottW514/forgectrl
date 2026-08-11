@@ -32,6 +32,7 @@
 #define _GNU_SOURCE
 #include "cool.h"
 #include "diag.h"
+#include "liveness.h"
 #include "settings.h"
 #include "status.h"
 #include "super.h"
@@ -77,6 +78,10 @@ static double respawn_at = 0.0;    /* not before this time */
 static unsigned generation = 0;    /* bumped on every state change */
 
 static int broker_fd = -1;         /* /dev/glowforge, held for our lifetime */
+static int probed = 0;             /* liveness verified since broker open */
+static int motion_fault = 0;       /* probe failed after recovery - no spawn */
+
+static void wr_attr(const char *attr, const char *val);
 
 static double wall_s(void)
 {
@@ -110,7 +115,41 @@ static void broker_open_locked(void)
     }
     if (flock(broker_fd, LOCK_EX) != 0)
         fprintf(stderr, "forgectrl: super: flock on " PULSE_DEV " failed\n");
+    probed = 0;     /* a fresh hold means unverified motion */
     fprintf(stderr, "forgectrl: super: holding " PULSE_DEV " (broker)\n");
+}
+
+/* Motion-liveness gate, run with mu NOT held (takes seconds; the
+ * recovery ladder takes a minute). The DRV8825 drivers can come out of
+ * a rail power-up unserviceable; each recovery attempt gives them a
+ * longer true power-off before re-probing. Returns 1 ok, 0 fault. */
+static int probe_sequence(int fd)
+{
+    static const int ladder_s[] = { 0, 5, 15, 30 };
+    char detail[96];
+
+    for (size_t i = 0; i < sizeof(ladder_s) / sizeof(ladder_s[0]); i++) {
+        if (ladder_s[i] > 0) {
+            fprintf(stderr, "forgectrl: super: motion dead - rail off %d s "
+                            "and re-probing (%zu/3)\n", ladder_s[i], i);
+            wr_attr("cnc/disable", "1");
+            sleep((unsigned)ladder_s[i]);
+        }
+        wr_attr("cnc/enable", "1");
+        sleep(1);
+        int rc = liveness_probe(fd, detail, sizeof(detail));
+        fprintf(stderr, "forgectrl: super: liveness probe: %s - %s\n",
+                rc == 1 ? "MOTION OK" : rc == 0 ? "NO MOTION" : "ERROR",
+                detail);
+        if (rc == 1)
+            return 1;
+        if (rc < 0)
+            return 1;   /* cannot probe (no accel?): do not block the machine */
+    }
+    fprintf(stderr, "forgectrl: super: MOTION FAULT - the stepper drivers "
+                    "did not recover; a full power cycle may be required. "
+                    "Controllers stay down (retry via POST /mode).\n");
+    return 0;
 }
 
 static void wr_attr(const char *attr, const char *val)
@@ -264,12 +303,23 @@ static void *super_main(void *arg)
             if (r == pid)
                 reap_locked(status);
         }
-        /* Converge on the wanted state. */
+        /* Converge on the wanted state. The first spawn after taking
+         * the broker passes the motion-liveness gate first (unlocked -
+         * the probe and its recovery ladder take a while). */
         if (child_pid > 0 && (suspended || child_ctl != want)) {
             stop_locked();
-        } else if (child_pid == 0 && !suspended && want != Ctl_None
-                   && wall_s() >= respawn_at) {
-            spawn_locked(want);
+        } else if (child_pid == 0 && !suspended && !motion_fault
+                   && want != Ctl_None && wall_s() >= respawn_at) {
+            broker_open_locked();
+            if (broker_fd >= 0 && !probed) {
+                int fd = broker_fd;
+                pthread_mutex_unlock(&mu);
+                int ok = probe_sequence(fd);
+                pthread_mutex_lock(&mu);
+                probed = ok;
+                motion_fault = !ok;
+            } else
+                spawn_locked(want);
         }
         pthread_mutex_unlock(&mu);
         usleep(200 * 1000);
@@ -410,9 +460,11 @@ int super_mode_switch(const char *mode, char *err, size_t elen)
     pthread_mutex_lock(&mu);
     want = target;
     suspended = 0;
+    motion_fault = 0;   /* a switch is also the retry lever after a fault */
     /* The thread stops the old controller and starts the new one; wait
-     * until the running child IS the target. */
-    double sw_deadline = wall_s() + 20.0;
+     * until the running child IS the target. A pending liveness
+     * (re-)probe runs first, so allow for it. */
+    double sw_deadline = wall_s() + 90.0;
     while (!(child_pid > 0 && child_ctl == target)) {
         if (wall_s() > sw_deadline) {
             pthread_mutex_unlock(&mu);
@@ -465,6 +517,7 @@ void super_controller_start(void)
 {
     pthread_mutex_lock(&mu);
     suspended = 0;
+    motion_fault = 0;
     respawn_at = 0.0;
     backoff_s = RESPAWN_MIN_S;
     pthread_mutex_unlock(&mu);
@@ -474,10 +527,14 @@ int super_status_json(char *buf, size_t len)
 {
     pthread_mutex_lock(&mu);
     snprintf(buf, len,
-             "{\"mode\":\"%s\",\"controller\":\"%s\",\"pid\":%d}",
+             "{\"mode\":\"%s\",\"controller\":\"%s\",\"pid\":%d,"
+             "\"motion\":\"%s\"}",
              ctl_name(want),
-             child_pid > 0 ? "running" : suspended ? "standby" : "stopped",
-             (int)child_pid);
+             child_pid > 0 ? "running"
+                 : motion_fault ? "motion-fault"
+                 : suspended ? "standby" : "stopped",
+             (int)child_pid,
+             motion_fault ? "fault" : probed ? "verified" : "unverified");
     pthread_mutex_unlock(&mu);
     return 0;
 }

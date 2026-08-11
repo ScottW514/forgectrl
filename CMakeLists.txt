@@ -9,6 +9,7 @@ add_executable(forgectrl
   src/cool.c
   src/debayer.c
   src/diag.c
+  src/liveness.c
   src/settings.c
   src/status.c
   src/super.c
