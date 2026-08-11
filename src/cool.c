@@ -85,13 +85,14 @@
  * gone (fire blocked, stand-down through cooldown). */
 #define REPORT_TIMEOUT_S 5.0
 
-/* Factory fan values (pulse-header ground truth). */
+/* Factory fan values (pulse-header ground truth; run duties shared via
+ * cool.h). */
 #define AIR_ASSIST_IDLE 204
-#define AIR_ASSIST_RUN  1023
+#define AIR_ASSIST_RUN  COOL_AIR_ASSIST_RUN
 #define EXHAUST_IDLE    0
-#define EXHAUST_RUN     65535
+#define EXHAUST_RUN     COOL_EXHAUST_RUN
 #define INTAKE_IDLE     0
-#define INTAKE_RUN      43278
+#define INTAKE_RUN      COOL_INTAKE_RUN
 /* Thermal-cooldown duty: half the run airflow - enough to keep pulling
  * heat out of the loop without the full-run roar. */
 #define EXHAUST_COOL    32768
@@ -123,8 +124,8 @@
  * dead-pump cases look healthier than a working pump. At 40% the heat
  * input outruns convection and the signature becomes decisive and
  * repeatable (design matrix: forgefirm scripts/bench/flow_matrix.py). */
-#define FLOW_HEATER_PCT    40
-#define FLOW_CHECK_S       50      /* 0 disables the check entirely */
+#define FLOW_HEATER_PCT    COOL_FLOW_HEATER_PCT
+#define FLOW_CHECK_S       COOL_FLOW_CHECK_S    /* 0 disables the check */
 #define FLOW_ESTABLISH_S   30      /* delta plateaus by here (reporting only) */
 /* Re-check cadence while a job runs. A stopped pump CANNOT be seen any
  * other way: absolute temperature only tracks a circulating loop, and a
@@ -152,9 +153,9 @@
  * to catch drift sits below the noise floor and the gate never opens.
  * Averaging each half cuts that to 0.11 C typical / 0.21 C worst, while
  * a real cooling transient (~2 C per 15 s) still shows ~1.5 C. */
-#define FLOW_SETTLE_DT_C    1.5f    /* |downstream - upstream| */
-#define FLOW_SETTLE_DRIFT_C 0.4f    /* split-half mean difference */
-#define FLOW_SETTLE_WIN     15      /* 1 Hz samples */
+#define FLOW_SETTLE_DT_C    COOL_SETTLE_DT_C
+#define FLOW_SETTLE_DRIFT_C COOL_SETTLE_DRIFT_C
+#define FLOW_SETTLE_WIN     COOL_SETTLE_WIN     /* 1 Hz samples */
 #define FLOW_SETTLE_WARN_S  180
 
 /* The DISCRIMINATOR is how far the downstream sensor climbs during the
@@ -172,7 +173,7 @@
  * pump-stopped observations the smallest was 16.04 C. 14.4 sits ~1.6 C
  * from either edge. All baselines were 19-23 C; the warm-loop end of
  * the range is NOT yet validated. GFCOOL_FLOW_RISE overrides. */
-#define FLOW_FAULT_RISE_C  14.4f
+#define FLOW_FAULT_RISE_C  COOL_FLOW_RISE_C
 
 /* A suspicion must resolve. With flow, the check's own heat sheds in
  * under a minute and the confirming verdict lands 2-4 min after the

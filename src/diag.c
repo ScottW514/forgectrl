@@ -26,9 +26,11 @@
  *                   trust - raise the heater duty instead).
  *
  * Both run at the machine's configured heater duty and window so the
- * verdict applies to the check the driver will actually run.
+ * verdict applies to the check the cooling engine (cool.c) actually
+ * runs; the engine suspends its own writes for the duration.
  */
 #define _GNU_SOURCE
+#include "cool.h"
 #include "diag.h"
 #include "settings.h"
 #include "status.h"
@@ -46,19 +48,19 @@
 #define MARKER     "/run/forgefirm-diag.active"
 #define INIT_GRBL  "/etc/init.d/grblhal"
 
-/* Compiled defaults mirror the driver (glowforge_cooling.c); the
- * configured cool_* keys override so the tools test the check the
- * driver will actually run. */
-#define DEF_RISE_C     14.4
-#define DEF_HEATER_PCT 40.0
-#define DEF_CHECK_S    50.0
+/* Check parameters come from cool.h - the same compiled defaults the
+ * engine runs - and the configured cool_* keys override both, so the
+ * tools always test the check the engine actually runs. */
+#define DEF_RISE_C     ((double)COOL_FLOW_RISE_C)
+#define DEF_HEATER_PCT ((double)COOL_FLOW_HEATER_PCT)
+#define DEF_CHECK_S    ((double)COOL_FLOW_CHECK_S)
 
-/* Settle gate, mirroring the driver: baseline capture only from a
- * stationary loop (split-half mean drift over a 15-sample window) with
- * the sensors in agreement. */
-#define SETTLE_WIN       15
-#define SETTLE_DRIFT_C   0.4
-#define SETTLE_DT_C      1.5
+/* Settle gate (engine-equivalent): baseline capture only from a
+ * stationary loop (split-half mean drift over the window) with the
+ * sensors in agreement. */
+#define SETTLE_WIN       COOL_SETTLE_WIN
+#define SETTLE_DRIFT_C   ((double)COOL_SETTLE_DRIFT_C)
+#define SETTLE_DT_C      ((double)COOL_SETTLE_DT_C)
 #define SETTLE_TIMEOUT_S 420
 
 /* Safety rails for the pump-off trials: the downstream sensor sits at
@@ -147,13 +149,16 @@ static void pump(int on)
 }
 
 /* Cut-profile chassis fans during a trial - the condition the bands
- * were characterized under and the one the driver's in-job check runs
- * in. Idle values on stand-down; the controller reapplies its own fan
- * policy at start. */
+ * were characterized under and the one the engine's in-job check runs
+ * in. Idle values on stand-down; the engine reapplies its own fan
+ * policy when it takes back over. */
 static void fans_run(void)
 {
-    wr_attr("thermal/exhaust_pwm", "65535");
-    wr_attr("thermal/intake_pwm", "43278");
+    char v[16];
+    snprintf(v, sizeof(v), "%d", COOL_EXHAUST_RUN);
+    wr_attr("thermal/exhaust_pwm", v);
+    snprintf(v, sizeof(v), "%d", COOL_INTAKE_RUN);
+    wr_attr("thermal/intake_pwm", v);
 }
 
 static void fans_idle(void)

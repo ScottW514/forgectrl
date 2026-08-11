@@ -8,6 +8,25 @@
 
 #include <stddef.h>
 
+/* Flow-check parameters, shared between the engine (cool.c) and the
+ * diagnostics runner (diag.c) so the tools always test the check the
+ * engine actually runs. The measured rationale for every value is in
+ * cool.c. Configured cool_* keys override the defaults at run time in
+ * both consumers. */
+#define COOL_FLOW_RISE_C     14.4f  /* fault threshold: downstream rise */
+#define COOL_FLOW_HEATER_PCT 40     /* check heater duty */
+#define COOL_FLOW_CHECK_S    50     /* check window; 0 disables */
+/* Settle gate: baseline capture only from a stationary loop. */
+#define COOL_SETTLE_DT_C     1.5f   /* |downstream - upstream| */
+#define COOL_SETTLE_DRIFT_C  0.4f   /* split-half mean difference */
+#define COOL_SETTLE_WIN      15     /* 1 Hz samples */
+/* Factory run fan duties (pulse-header ground truth; also the
+ * controllers' compiled-in emergency-fallback values per the
+ * contract). */
+#define COOL_AIR_ASSIST_RUN  1023
+#define COOL_EXHAUST_RUN     65535
+#define COOL_INTAKE_RUN      43278
+
 /* Start the engine: resolve tunables (GFCOOL_* env > cool_* settings >
  * compiled defaults), take the idle posture (pump on, TEC off, purge
  * on, heater off, fans idle), and launch the 1 Hz policy thread that
