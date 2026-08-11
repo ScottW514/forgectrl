@@ -191,8 +191,9 @@ const char index_html[] =
 "<p class='hint'>GRBL serves standard Grbl senders on port 23. "
 "Factory cloud runs the machine against the "
 "Glowforge web service like stock firmware. The two are "
-"mutually exclusive; a mode change takes effect on the next "
-"reboot.</p></div>"
+"mutually exclusive; switching stops one controller and starts "
+"the other (machine must be idle) and persists across "
+"reboots.</p></div>"
 "<div class='card'><h2>Motion</h2><div id='motion'></div></div>"
 "<div class='card camwrap'><h2>Lid camera</h2>"
 "<img id='cam' alt='lid camera'>"
@@ -519,7 +520,17 @@ const char index_html[] =
 "completes.':"
 "'Settings are locked while the machine is busy (state: '+"
 "(M.state||'unknown')+').'}"
-"function setMode(m){post({controller_mode:m},'msg-mode')}"
+/* live mode switch through the supervisor; the setting persists for
+ * boot as a side effect */
+"function setMode(m){var el=$('msg-mode');el.textContent='switching\\u2026';"
+"fetch('/mode?controller='+m,{method:'POST'}).then(function(r){"
+"return r.text().then(function(t){"
+"if(r.ok){el.textContent='running '+m;"
+"setTimeout(function(){el.textContent=''},4000);"
+"return fetch('/settings').then(function(r2){return r2.json()})"
+".then(function(s){S=s;fill()})}"
+"el.textContent=t})})"
+".catch(function(){el.textContent='no response'})}"
 
 /* hash-routed tabs */
 "var TABS=['status','machine','gfcloud','grbl','diag','system'],"

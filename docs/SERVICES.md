@@ -49,10 +49,13 @@ factory-jumpered, so the bit stays inactive there — i.e. satisfied; Pro brings
 the connector out for an external lockout chain. Any UI or gate expression must
 treat `interlock_ok = !bit5`.
 
-**Bit 4 (`estop`) reads ACTIVE on a healthy, fireable machine** — it is a sense
+**Bit 4 (`estop`) reads ACTIVE on a healthy, idle machine** — it is a sense
 line whose resting state is high, not an "asserted = stop" input (no Glowforge
 model has a user e-stop, and the hardware fire chain carries no e-stop term).
-Treat inactive as the abnormal state (line low).
+On the factory board the line drops for the whole duration of any stepper
+motion and recovers at idle (measured live), so it cannot gate motion or fire
+there; machines with a real e-stop circuit opt in via the cloud client's
+`MOTION.ESTOP_HALTS_MOTION`. Treat it as idle-telemetry only.
 
 **Bit 7 (`head`) is not head presence.** Bench-verified: a gen2 head connected
 and answering I²C (`head/info` returns id/serial) reads bit 7 INACTIVE. The
@@ -224,6 +227,35 @@ rename) at ~1 Hz and on every verdict change:
   the single writer is provably absent.
 
 ---
+
+## Mode supervision [implemented]
+
+forgectrl owns the controller lifecycle: exactly one of the GRBL controller
+or the cloud client runs at a time, spawned as a **direct child** of
+forgectrl (the parent-child relationship carries the pulse-device fd under
+the broker, and detects controller death the moment it happens). The boot
+init scripts do not start controllers — they defer to the supervisor and
+remain only as manual emergency stops.
+
+- `GET /mode` → `{"mode":"grbl|cloud","controller":"running|stopped|standby","pid":N}`
+- `POST /mode?controller=grbl|cloud` — the live switch: idle-gated (machine
+  idle, no diagnostic), stops the active controller (SIGTERM → SIGKILL
+  escalation on its process group), persists `controller_mode`, starts the
+  other, and waits for its first job-state report to reach the cooling
+  engine (slow first report from the cloud client is logged, not fatal).
+- **Unexpected controller death**: the supervisor safes the machine
+  (`cnc/stop`, `cnc/laser_latch=1` — the kernel dead-man on the child's own
+  fd covers this today; under the broker these writes are the mechanism)
+  and respawns with exponential backoff (1 s → 30 s cap, reset after 60 s
+  healthy).
+- **Diagnostics takeover** rides the same machinery: suspend (controller
+  down, mode unchanged) / resume — the controller that comes back is the
+  selected mode's.
+- A **busy** controller survives a forgectrl stop: it is left running
+  (unmanaged; its own fd carries the dead-man) rather than e-stopping a
+  live job, and a restarted supervisor stands by until told to take over.
+  An unmanaged controller found at startup likewise puts the supervisor in
+  standby — `POST /mode` takes over.
 
 ## Pulse-device ownership [contract]
 

@@ -11,6 +11,7 @@ add_executable(forgectrl
   src/diag.c
   src/settings.c
   src/status.c
+  src/super.c
   src/ui.c
   src/update.c
   src/vpu_jpeg.c

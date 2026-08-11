@@ -1,0 +1,433 @@
+/*
+ * super.c - forgectrl: controller-mode supervisor
+ * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+ * SPDX-License-Identifier: MIT
+ *
+ * forgectrl owns the lifecycle of the motion controllers: exactly one
+ * of grblHAL (GRBL mode) or gfcloud (Glowforge web-service mode) runs
+ * at a time, spawned as a direct child of this daemon. The parent-child
+ * relationship is load-bearing: it is how the pulse-device broker hands
+ * the controller its fd at spawn, and how a controller death is
+ * detected the moment it happens.
+ *
+ * One thread owns the whole lifecycle (spawn, reap, respawn, stop) and
+ * everything else talks to it through a small request mailbox - there
+ * is exactly one waitpid() caller in the process. Unexpected controller
+ * death safes the machine (cnc/stop + laser latch; today the kernel
+ * dead-man on the child's own fd already covers this, but the broker
+ * makes these writes the real mechanism) and respawns with backoff.
+ *
+ * The mode-switch sequence (POST /mode) is idle-gated: stop the active
+ * controller, persist controller_mode, start the other, wait for its
+ * first job-state report to reach the cooling engine. Diagnostics use
+ * the same machinery to take the hardware: suspend (controller down,
+ * mode unchanged) and resume - the controller that comes back is the
+ * selected mode's, whichever that is.
+ *
+ * The boot-time init scripts do not start controllers; they defer here.
+ * If an unmanaged controller is found running at startup anyway (legacy
+ * scripts, manual start), the supervisor stands by rather than fight
+ * over the exclusive-open pulse device and the Grbl port.
+ */
+#define _GNU_SOURCE
+#include "cool.h"
+#include "diag.h"
+#include "settings.h"
+#include "status.h"
+#include "super.h"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+#define GRBL_BIN   "/usr/bin/grblHAL_glowforge"
+#define GRBL_LOG   "/data/glowforge.log"
+#define CLOUD_BIN  "/usr/sbin/gfcloud.py"
+#define CLOUD_LOG  "/data/gfcloud.log"
+
+#define STOP_TERM_WAIT_S   5      /* SIGTERM grace before SIGKILL */
+#define RESPAWN_MIN_S      1
+#define RESPAWN_MAX_S      30
+#define HEALTHY_UPTIME_S   60     /* uptime that resets the backoff */
+#define REPORT_WAIT_S      15     /* mode switch: first /cool/state */
+
+typedef enum { Ctl_None = 0, Ctl_Grbl, Ctl_Cloud } ctl_t;
+
+static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
+static pthread_t th;
+static int th_run = 0;
+
+static ctl_t want = Ctl_None;      /* selected mode */
+static int suspended = 0;          /* diag takeover / standby */
+static pid_t child_pid = 0;
+static ctl_t child_ctl = Ctl_None;
+static double spawned_at = 0.0;
+static unsigned backoff_s = RESPAWN_MIN_S;
+static double respawn_at = 0.0;    /* not before this time */
+static unsigned generation = 0;    /* bumped on every state change */
+
+static double wall_s(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+static void wr_attr(const char *attr, const char *val)
+{
+    char path[96];
+    snprintf(path, sizeof(path), "/sys/glowforge/%s", attr);
+    int fd = open(path, O_WRONLY);
+    if (fd >= 0) {
+        (void)!write(fd, val, strlen(val));
+        close(fd);
+    }
+}
+
+static const char *ctl_name(ctl_t c)
+{
+    return c == Ctl_Grbl ? "grbl" : c == Ctl_Cloud ? "cloud" : "none";
+}
+
+/* ------------------------------------------------------------- spawn */
+
+/* Called with mu held. */
+static void spawn_locked(ctl_t ctl)
+{
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "forgectrl: super: fork failed: %s\n",
+                strerror(errno));
+        respawn_at = wall_s() + backoff_s;
+        return;
+    }
+    if (pid == 0) {
+        /* Child: own process group so stop() can signal helpers too. */
+        setpgid(0, 0);
+        const char *log = ctl == Ctl_Grbl ? GRBL_LOG : CLOUD_LOG;
+        int lfd = open(log, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (lfd >= 0) {
+            dup2(lfd, 1);
+            dup2(lfd, 2);
+            if (lfd > 2)
+                close(lfd);
+        }
+        if (ctl == Ctl_Grbl) {
+            /* Mirrors the former init-script launch. */
+            if (chdir("/data") != 0)
+                _exit(126);
+            setenv("GFSINK", "/dev/glowforge", 1);
+            execl(GRBL_BIN, GRBL_BIN, "-p", "23",
+                  "-e", "/data/EEPROM-glowforge.DAT", (char *)NULL);
+        } else {
+            execl(CLOUD_BIN, CLOUD_BIN, (char *)NULL);
+        }
+        _exit(127);
+    }
+    child_pid = pid;
+    child_ctl = ctl;
+    spawned_at = wall_s();
+    generation++;
+    fprintf(stderr, "forgectrl: super: started %s controller (pid %d)\n",
+            ctl_name(ctl), (int)pid);
+}
+
+/* Reap and, if the death was unexpected, safe the machine and arm the
+ * respawn backoff. Called with mu held. */
+static void reap_locked(int status)
+{
+    ctl_t died = child_ctl;
+    double up = wall_s() - spawned_at;
+    child_pid = 0;
+    child_ctl = Ctl_None;
+    generation++;
+    pthread_cond_broadcast(&cv);
+
+    int expected = suspended || want != died;
+    fprintf(stderr,
+            "forgectrl: super: %s controller exited (status 0x%x, up %.0f s)%s\n",
+            ctl_name(died), (unsigned)status, up,
+            expected ? "" : " - unexpected");
+    if (expected)
+        return;
+
+    /* Safe posture first. Today the kernel dead-man on the child's own
+     * fd already stopped motion and locked the latch; under the device
+     * broker these writes become the real mechanism. */
+    wr_attr("cnc/stop", "1");
+    wr_attr("cnc/laser_latch", "1");
+
+    if (up >= HEALTHY_UPTIME_S)
+        backoff_s = RESPAWN_MIN_S;
+    respawn_at = wall_s() + backoff_s;
+    fprintf(stderr, "forgectrl: super: respawn in %u s\n", backoff_s);
+    if (backoff_s < RESPAWN_MAX_S)
+        backoff_s *= 2;
+}
+
+/* Stop the child: SIGTERM its group, escalate to SIGKILL. Called with
+ * mu held; drops and retakes the lock while waiting (the thread's
+ * waitpid runs reap_locked). */
+static void stop_locked(void)
+{
+    if (child_pid <= 0)
+        return;
+    pid_t pid = child_pid;
+    fprintf(stderr, "forgectrl: super: stopping %s controller (pid %d)\n",
+            ctl_name(child_ctl), (int)pid);
+    kill(-pid, SIGTERM);
+    kill(pid, SIGTERM);
+
+    double deadline = wall_s() + STOP_TERM_WAIT_S;
+    while (child_pid == pid) {
+        pthread_mutex_unlock(&mu);
+        int status;
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        pthread_mutex_lock(&mu);
+        if (r == pid) {
+            reap_locked(status);
+            break;
+        }
+        if (wall_s() > deadline) {
+            fprintf(stderr, "forgectrl: super: escalating to SIGKILL\n");
+            kill(-pid, SIGKILL);
+            kill(pid, SIGKILL);
+            deadline = wall_s() + STOP_TERM_WAIT_S;
+        }
+        pthread_mutex_unlock(&mu);
+        usleep(100 * 1000);
+        pthread_mutex_lock(&mu);
+    }
+}
+
+/* ------------------------------------------------------ thread body */
+
+static void *super_main(void *arg)
+{
+    (void)arg;
+    pthread_mutex_lock(&mu);
+    while (th_run) {
+        /* Reap. */
+        if (child_pid > 0) {
+            pid_t pid = child_pid;
+            pthread_mutex_unlock(&mu);
+            int status;
+            pid_t r = waitpid(pid, &status, WNOHANG);
+            pthread_mutex_lock(&mu);
+            if (r == pid)
+                reap_locked(status);
+        }
+        /* Converge on the wanted state. */
+        if (child_pid > 0 && (suspended || child_ctl != want)) {
+            stop_locked();
+        } else if (child_pid == 0 && !suspended && want != Ctl_None
+                   && wall_s() >= respawn_at) {
+            spawn_locked(want);
+        }
+        pthread_mutex_unlock(&mu);
+        usleep(200 * 1000);
+        pthread_mutex_lock(&mu);
+    }
+    pthread_mutex_unlock(&mu);
+    return NULL;
+}
+
+/* Wait until the lifecycle state satisfies pred (generation-driven).
+ * Called with mu held; returns 0, or -1 on timeout. */
+static int wait_for(int (*pred)(void), double timeout_s)
+{
+    double deadline = wall_s() + timeout_s;
+    while (!pred()) {
+        if (wall_s() > deadline)
+            return -1;
+        pthread_mutex_unlock(&mu);
+        usleep(100 * 1000);
+        pthread_mutex_lock(&mu);
+    }
+    return 0;
+}
+
+static int pred_child_gone(void)  { return child_pid == 0; }
+
+/* --------------------------------------------------------------- api */
+
+static ctl_t configured_mode(void)
+{
+    char v[16];
+    if (settings_get("controller_mode", v, sizeof(v)) == 0
+        && strcmp(v, "cloud") == 0)
+        return Ctl_Cloud;
+    return Ctl_Grbl;
+}
+
+/* The bracketed patterns keep pgrep/pkill -f from matching their own
+ * sh -c wrapper. */
+static int unmanaged_controller_running(void)
+{
+    return system("pgrep -x grblHAL_glowfor >/dev/null 2>&1") == 0 ||
+           system("pgrep -f '[g]fcloud\\.py' >/dev/null 2>&1") == 0;
+}
+
+void super_init(void)
+{
+    pthread_mutex_lock(&mu);
+    want = configured_mode();
+    if (unmanaged_controller_running()) {
+        suspended = 1;
+        fprintf(stderr, "forgectrl: super: unmanaged controller already "
+                        "running - standing by (POST /mode to take over)\n");
+    }
+    th_run = 1;
+    pthread_mutex_unlock(&mu);
+    if (pthread_create(&th, NULL, super_main, NULL) != 0) {
+        th_run = 0;
+        fprintf(stderr, "forgectrl: super: thread failed to start\n");
+        return;
+    }
+    fprintf(stderr, "forgectrl: super: supervising mode %s%s\n",
+            ctl_name(want), suspended ? " (standby)" : "");
+}
+
+void super_shutdown(void)
+{
+    pthread_mutex_lock(&mu);
+    int was = th_run;
+    th_run = 0;
+    suspended = 1;
+    if (child_pid > 0) {
+        /* A busy controller survives a forgectrl stop: it reparents to
+         * init and finishes its job (its own device fd carries the
+         * dead-man). The restarted supervisor finds it unmanaged and
+         * stands by. Idle controllers stop with us. */
+        if (machine_is_idle())
+            stop_locked();
+        else
+            fprintf(stderr, "forgectrl: super: machine busy - leaving %s "
+                            "controller running (pid %d, unmanaged)\n",
+                    ctl_name(child_ctl), (int)child_pid);
+    }
+    pthread_mutex_unlock(&mu);
+    if (was)
+        pthread_join(th, NULL);
+}
+
+int super_mode_switch(const char *mode, char *err, size_t elen)
+{
+    ctl_t target;
+    if (!strcmp(mode, "grbl"))
+        target = Ctl_Grbl;
+    else if (!strcmp(mode, "cloud"))
+        target = Ctl_Cloud;
+    else {
+        snprintf(err, elen, "mode must be grbl or cloud");
+        return -1;
+    }
+
+    if (diag_running()) {
+        snprintf(err, elen, "a diagnostic is running");
+        return -1;
+    }
+    if (!machine_is_idle()) {
+        snprintf(err, elen, "machine is not idle");
+        return -1;
+    }
+
+    pthread_mutex_lock(&mu);
+    int takeover = suspended && unmanaged_controller_running();
+    pthread_mutex_unlock(&mu);
+    if (takeover) {
+        /* Take ownership from a legacy-started controller: stop it the
+         * legacy way, then supervise. */
+        fprintf(stderr, "forgectrl: super: taking over from unmanaged "
+                        "controller\n");
+        system("/etc/init.d/grblhal stop >/dev/null 2>&1");
+        system("/etc/init.d/gfcloud stop >/dev/null 2>&1");
+        system("pkill -x grblHAL_glowfor 2>/dev/null");
+        system("pkill -f '[g]fcloud\\.py' 2>/dev/null");
+        sleep(1);
+    }
+
+    if (settings_set("controller_mode", mode) != 0) {
+        snprintf(err, elen, "cannot persist controller_mode");
+        return -1;
+    }
+
+    pthread_mutex_lock(&mu);
+    want = target;
+    suspended = 0;
+    /* The thread stops the old controller and starts the new one; wait
+     * until the running child IS the target. */
+    double sw_deadline = wall_s() + 20.0;
+    while (!(child_pid > 0 && child_ctl == target)) {
+        if (wall_s() > sw_deadline) {
+            pthread_mutex_unlock(&mu);
+            snprintf(err, elen, "controller did not start");
+            return -1;
+        }
+        pthread_mutex_unlock(&mu);
+        usleep(100 * 1000);
+        pthread_mutex_lock(&mu);
+    }
+    pthread_mutex_unlock(&mu);
+
+    /* Wait for the controller to report in to the cooling engine. The
+     * cloud client signs into the web service first, so give it time;
+     * a slow first report is a warning, not a failure - but a child
+     * that keeps dying (bad binary, immediate crash) is one. */
+    double deadline = wall_s() + REPORT_WAIT_S;
+    while (wall_s() < deadline) {
+        double age = cool_report_age();
+        if (age >= 0.0 && age < 3.0)
+            return 0;
+        pthread_mutex_lock(&mu);
+        int dead = child_pid == 0 || child_ctl != target;
+        pthread_mutex_unlock(&mu);
+        if (dead) {
+            snprintf(err, elen,
+                     "%s controller keeps exiting - check its log", mode);
+            return -1;
+        }
+        usleep(500 * 1000);
+    }
+    fprintf(stderr, "forgectrl: super: %s controller running but no "
+                    "job-state report yet\n", mode);
+    return 0;
+}
+
+int super_controller_stop(void)
+{
+    pthread_mutex_lock(&mu);
+    suspended = 1;
+    int ok = wait_for(pred_child_gone, 15.0) == 0;
+    pthread_mutex_unlock(&mu);
+    return ok ? 0 : -1;
+}
+
+void super_controller_start(void)
+{
+    pthread_mutex_lock(&mu);
+    suspended = 0;
+    respawn_at = 0.0;
+    backoff_s = RESPAWN_MIN_S;
+    pthread_mutex_unlock(&mu);
+}
+
+int super_status_json(char *buf, size_t len)
+{
+    pthread_mutex_lock(&mu);
+    snprintf(buf, len,
+             "{\"mode\":\"%s\",\"controller\":\"%s\",\"pid\":%d}",
+             ctl_name(want),
+             child_pid > 0 ? "running" : suspended ? "standby" : "stopped",
+             (int)child_pid);
+    pthread_mutex_unlock(&mu);
+    return 0;
+}

@@ -3,13 +3,13 @@
  * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
  * SPDX-License-Identifier: MIT
  *
- * Diagnostics own the hardware while they run: the runner stops the
- * grblhal service (launch is idle-gated), drives the thermal loop
- * directly through sysfs - the same model as the bench
- * characterization tools - and restarts the service on every exit
- * path. A marker file records the ownership so a crash mid-run is
- * recovered at the next forgectrl start (hardware stood down,
- * controller restarted).
+ * Diagnostics own the hardware while they run: the runner suspends
+ * the active controller through the supervisor (launch is idle-gated),
+ * drives the thermal loop directly through sysfs - the same model as
+ * the bench characterization tools - and resumes the controller on
+ * every exit path. A marker file records the ownership so a crash
+ * mid-run is recovered at the next forgectrl start (hardware stood
+ * down, controller resumed).
  *
  * Cooling tools. The flow check discriminates on how far the
  * downstream water sensor climbs while the loop heater runs: flowing
@@ -34,6 +34,7 @@
 #include "diag.h"
 #include "settings.h"
 #include "status.h"
+#include "super.h"
 
 #include <fcntl.h>
 #include <pthread.h>
@@ -46,7 +47,6 @@
 
 #define GF_SYSFS   "/sys/glowforge/"
 #define MARKER     "/run/forgefirm-diag.active"
-#define INIT_GRBL  "/etc/init.d/grblhal"
 
 /* Check parameters come from cool.h - the same compiled defaults the
  * engine runs - and the configured cool_* keys override both, so the
@@ -176,24 +176,17 @@ static void stand_down(void)
 
 /* ------------------------------------------------- controller service */
 
-static int controller_running(void)
-{
-    return system("pgrep grblHAL_glowfor >/dev/null 2>&1") == 0;
-}
-
+/* The supervisor owns the controller lifecycle: suspend takes the
+ * hardware (the active mode's controller stops), resume gives it back
+ * (the selected mode's controller returns - whichever that is). */
 static int controller_stop(void)
 {
-    system(INIT_GRBL " stop >/dev/null 2>&1");
-    for (int i = 0; i < 20 && controller_running(); i++)
-        usleep(250 * 1000);
-    return controller_running() ? -1 : 0;
+    return super_controller_stop();
 }
 
-/* The init script gates itself on controller_mode and its pidfile, so
- * an unconditional start is always safe. */
 static void controller_start(void)
 {
-    system(INIT_GRBL " start >/dev/null 2>&1");
+    super_controller_start();
 }
 
 /* ------------------------------------------------------ log + status */

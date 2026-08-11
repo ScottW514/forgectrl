@@ -863,6 +863,14 @@ int cool_state_report(const char *mode, int armed,
     return 0;
 }
 
+double cool_report_age(void)
+{
+    pthread_mutex_lock(&mu);
+    double age = rep_at < 0 ? -1.0 : wall_s() - rep_at;
+    pthread_mutex_unlock(&mu);
+    return age;
+}
+
 int cool_status_json(char *buf, size_t len)
 {
     pthread_mutex_lock(&mu);

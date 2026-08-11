@@ -34,6 +34,7 @@
 #include "diag.h"
 #include "settings.h"
 #include "status.h"
+#include "super.h"
 #include "ui.h"
 #include "update.h"
 
@@ -634,6 +635,33 @@ static int cb_fuse_identity(const struct _u_request *req,
     return U_CALLBACK_CONTINUE;
 }
 
+/* ---------------------------------------------------------------- mode */
+
+static int cb_mode_get(const struct _u_request *req,
+                       struct _u_response *res, void *user_data)
+{
+    (void)req;
+    (void)user_data;
+    char body[128];
+    super_status_json(body, sizeof(body));
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
+static int cb_mode_post(const struct _u_request *req,
+                        struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    const char *mode = setting_param(req, "controller");
+    if (!mode)
+        return reply_error(res, 400, "controller is required");
+    char err[96];
+    if (super_mode_switch(mode, err, sizeof(err)) != 0)
+        return reply_error(res, strstr(err, "must be") ? 400 : 409, err);
+    return cb_mode_get(req, res, NULL);
+}
+
 /* ------------------------------------------------------------- cooling */
 
 /* Level-triggered job-state report from the active controller (~1 Hz).
@@ -753,6 +781,7 @@ int main(void)
     cam_engine_init();
     diag_init();
     cool_init();
+    super_init();
     update_init();
     apply_wifi(0);
 
@@ -776,6 +805,10 @@ int main(void)
                                &cb_machine_status, NULL);
     ulfius_add_endpoint_by_val(&inst, "GET", "/fuse-identity", NULL, 0,
                                &cb_fuse_identity, NULL);
+    ulfius_add_endpoint_by_val(&inst, "GET", "/mode", NULL, 0,
+                               &cb_mode_get, NULL);
+    ulfius_add_endpoint_by_val(&inst, "POST", "/mode", NULL, 0,
+                               &cb_mode_post, NULL);
     ulfius_add_endpoint_by_val(&inst, "POST", "/cool/state", NULL, 0,
                                &cb_cool_state, NULL);
     ulfius_add_endpoint_by_val(&inst, "GET", "/cool/status", NULL, 0,
@@ -825,6 +858,7 @@ int main(void)
     fprintf(stderr, "forgectrl: shutting down\n");
     ulfius_stop_framework(&inst);
     ulfius_clean_instance(&inst);
+    super_shutdown();
     cool_shutdown();
     cam_engine_shutdown();
     return 0;

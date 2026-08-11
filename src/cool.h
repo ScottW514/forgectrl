@@ -50,4 +50,8 @@ int cool_state_report(const char *mode, int armed,
  * the UI and bench tooling. */
 int cool_status_json(char *buf, size_t len);
 
+/* Seconds since the last job-state report, or -1 if none has ever
+ * arrived (the supervisor uses this to see a controller come alive). */
+double cool_report_age(void);
+
 #endif
