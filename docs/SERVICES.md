@@ -257,49 +257,50 @@ remain only as manual emergency stops.
   An unmanaged controller found at startup likewise puts the supervisor in
   standby — `POST /mode` takes over.
 
-## Pulse-device ownership [contract]
+## Pulse-device ownership [implemented: broker; rail policy pending]
 
-`/dev/glowforge` carries three side effects that make its open/close lifecycle a
-machine-behavior concern, not a file-handling detail (kernel semantics in
-`UAPI.md`): open powers the 40 V motor rail, final close is the kernel dead-man
-(mid-program close = emergency stop, laser latch locked), and the `flock` on it
-is what makes motion ownership exclusive.
+`/dev/glowforge` semantics (kernel details in `UAPI.md`): the device is
+**exclusive-open** (a second open fails EBUSY), the `flock` on it arms the
+kernel dead-man (**final close of the open file description** mid-program =
+emergency stop), and every close locks the laser latch. The open itself has
+no rail side effect — the 40 V rail moves on `cnc/enable`/`cnc/disable`
+writes, which is why close-and-reopen handovers historically cycled it (each
+client disabled/enabled around its own open) and why a fast off→on bounce
+can leave the supply folded back (counters run, motors dead; the
+`rail_settle_s` off-period guards every standalone takeover).
 
-**Today [implemented]:** each controller opens the device itself and holds it
-for its process lifetime; mode switches and the GRBL `$H` homing session hand
-the device over by close-and-reopen. Every handover therefore cycles the 40 V
-rail. A fast off→on cycle can leave the rail folded back — playback and
-position counters then run normally while the motors produce no torque — so
-every device takeover currently begins with a deliberate rail-off settle
-(`rail_settle_s`, default 2.5 s).
+**The broker [implemented]:** the forgectrl supervisor opens the device once
+(lazily, at the first managed spawn) and holds it for its lifetime, flock'd.
+Every controller it spawns inherits the fd, named by **`GF_PULSE_FD`** in the
+child environment; exclusive-open then *enforces* that nothing else can open
+the device. The GRBL `$H` homing handover needs no socket passing: the driver
+forks the homing runner, so the same fd and environment flow down a second
+generation. Writers write the pulse ring **directly** through the inherited
+fd — the real-time feed path is never proxied.
 
-**Target:** forgectrl owns the device. It opens `/dev/glowforge` once at start
-and holds it for its lifetime; the underlying open file never closes across
-mode switches or homing handovers, so the rail never cycles as a side effect.
-
-- **Access:** the active motion writer receives a duplicate of forgectrl's fd —
-  inherited at spawn (forgectrl supervises the controller services) or passed
-  over a local socket (`SCM_RIGHTS`) for intra-mode handovers such as the GRBL
-  `$H` cloud-homing session. The writer writes the pulse ring **directly**
-  through its fd: the real-time feed path is never proxied through forgectrl.
-- **Exactly one writer:** forgectrl hands out at most one motion dup at a time
-  and hands it out only with the kernel idle. The laser latch is locked across
-  every handover.
-- **Dead-man, re-plumbed:** with forgectrl holding a reference, a writer crash
-  no longer closes the file, so the kernel dead-man does not fire on it.
-  forgectrl is the dead-man for its writers: it supervises them (child exit /
-  socket close) and on writer death immediately writes `cnc/stop` and
-  `cnc/laser_latch=1`, before any re-handover. Below that remain the kernel's
-  own backstops (ring drains → end-of-data forces all output lines low;
-  underrun faults) and the hardware AND-gate, which is the actual safety
-  boundary. forgectrl itself dying closes the file and trips the kernel
-  dead-man exactly as today — a conservative failure.
-- **Rail policy is forgectrl's alone:** `cnc/enable`/`cnc/disable` are written
-  only by forgectrl (and diagnostics under its takeover rules). Controllers and
-  the cloud client's shutdown path must not disable the rail when handing the
-  device back. Every deliberate re-enable observes the settle period
-  (`rail_settle_s`); forgectrl may drop the rail after a configurable idle
-  period, always restoring it through a settled power-up before the next run.
+- A writer that sees `GF_PULSE_FD` must **never close** that fd, never
+  self-open the device, and skip its takeover rail settle (the device — and
+  the rail's state — is continuous across handovers). The flock re-lock on
+  the shared description is a harmless no-op.
+- **Exactly one writer:** the supervisor runs exactly one controller and
+  safes the machine before any respawn (below). Handovers happen only with
+  the kernel idle (the driver's suspend gate, unchanged).
+- **Dead-man, re-plumbed [implemented]:** a writer crash no longer produces
+  a final close, so the kernel dead-man does not fire on it. The supervisor
+  is the dead-man for its writers: on unexpected child exit it immediately
+  writes `cnc/stop` and `cnc/laser_latch=1` before any respawn. Below that
+  remain the kernel's own backstops (end-of-data forces the lines low;
+  underrun faults) and the hardware AND-gate — the actual safety boundary.
+  forgectrl dying with no writer alive closes the description and trips the
+  kernel dead-man; dying while a writer runs leaves the writer's dup as the
+  last reference, so the writer's own exit becomes the final close — the
+  kernel backstop either way.
+- **Rail policy [contract, pending]:** `cnc/enable`/`cnc/disable` become
+  forgectrl-only writes (diagnostics under its takeover rules). Controllers
+  and the cloud client's shutdown path must not disable the rail when
+  handing back. Every deliberate re-enable observes `rail_settle_s`;
+  forgectrl may drop the rail after a configurable idle period, always
+  restoring it through a settled power-up before the next run.
 
 ---
 

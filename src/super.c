@@ -43,6 +43,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -51,6 +52,7 @@
 #define GRBL_LOG   "/data/glowforge.log"
 #define CLOUD_BIN  "/usr/sbin/gfcloud.py"
 #define CLOUD_LOG  "/data/gfcloud.log"
+#define PULSE_DEV  "/dev/glowforge"
 
 #define STOP_TERM_WAIT_S   5      /* SIGTERM grace before SIGKILL */
 #define RESPAWN_MIN_S      1
@@ -74,11 +76,41 @@ static unsigned backoff_s = RESPAWN_MIN_S;
 static double respawn_at = 0.0;    /* not before this time */
 static unsigned generation = 0;    /* bumped on every state change */
 
+static int broker_fd = -1;         /* /dev/glowforge, held for our lifetime */
+
 static double wall_s(void)
 {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+/* The pulse-device broker: one open for the daemon's lifetime, handed
+ * to every controller as an inherited fd (GF_PULSE_FD). The device is
+ * exclusive-open, so holding it also *enforces* that no one else can
+ * open it; the flock arms the kernel dead-man on the shared
+ * description (final close mid-run = e-stop - i.e. forgectrl dying
+ * with no writer alive). Opened lazily at the first managed spawn so
+ * standby next to a legacy self-opening controller stays conflict-free.
+ * Called with mu held. */
+static void broker_open_locked(void)
+{
+    if (broker_fd >= 0)
+        return;
+    /* A just-stopped legacy holder's close can lag its exit. */
+    for (int i = 0; i < 30 && broker_fd < 0; i++) {
+        broker_fd = open(PULSE_DEV, O_WRONLY);  /* no O_CLOEXEC: inherited */
+        if (broker_fd < 0)
+            usleep(100 * 1000);
+    }
+    if (broker_fd < 0) {
+        fprintf(stderr, "forgectrl: super: cannot open " PULSE_DEV
+                        " - controllers will self-open (no broker)\n");
+        return;
+    }
+    if (flock(broker_fd, LOCK_EX) != 0)
+        fprintf(stderr, "forgectrl: super: flock on " PULSE_DEV " failed\n");
+    fprintf(stderr, "forgectrl: super: holding " PULSE_DEV " (broker)\n");
 }
 
 static void wr_attr(const char *attr, const char *val)
@@ -102,6 +134,8 @@ static const char *ctl_name(ctl_t c)
 /* Called with mu held. */
 static void spawn_locked(ctl_t ctl)
 {
+    broker_open_locked();
+
     pid_t pid = fork();
     if (pid < 0) {
         fprintf(stderr, "forgectrl: super: fork failed: %s\n",
@@ -120,11 +154,16 @@ static void spawn_locked(ctl_t ctl)
             if (lfd > 2)
                 close(lfd);
         }
+        if (broker_fd >= 0) {
+            char fdv[16];
+            snprintf(fdv, sizeof(fdv), "%d", broker_fd);
+            setenv("GF_PULSE_FD", fdv, 1);
+        }
         if (ctl == Ctl_Grbl) {
             /* Mirrors the former init-script launch. */
             if (chdir("/data") != 0)
                 _exit(126);
-            setenv("GFSINK", "/dev/glowforge", 1);
+            setenv("GFSINK", PULSE_DEV, 1);
             execl(GRBL_BIN, GRBL_BIN, "-p", "23",
                   "-e", "/data/EEPROM-glowforge.DAT", (char *)NULL);
         } else {
@@ -313,6 +352,14 @@ void super_shutdown(void)
             fprintf(stderr, "forgectrl: super: machine busy - leaving %s "
                             "controller running (pid %d, unmanaged)\n",
                     ctl_name(child_ctl), (int)child_pid);
+    }
+    /* Our reference goes away either way. Idle: the device closes and
+     * the kernel locks the latch. Busy-orphan: the child's dup keeps
+     * the description open (job survives), and the child's own exit
+     * then IS the final close - the kernel dead-man backstop. */
+    if (broker_fd >= 0) {
+        close(broker_fd);
+        broker_fd = -1;
     }
     pthread_mutex_unlock(&mu);
     if (was)
