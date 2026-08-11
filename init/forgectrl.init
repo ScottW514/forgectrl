@@ -12,15 +12,34 @@ DAEMON=/usr/bin/forgectrl
 PIDFILE=/var/run/forgectrl.pid
 LOG=/data/forgectrl.log
 
+# The daemon runs under a small respawn wrapper: forgectrl supervises
+# the motion controllers and holds the pulse-device broker, so a crash
+# must not leave the machine unmanaged. A crashed forgectrl leaves any
+# running controller alive (it finishes its job unmanaged); the
+# respawned daemon stands by and retakes supervision when the machine
+# is idle. Stopping the service stops the wrapper and the daemon both.
+
 case "$1" in
   start)
     echo "Starting forgectrl"
-    start-stop-daemon -S -q -p $PIDFILE -m -b -x /bin/sh -- \
-      -c "exec $DAEMON >> $LOG 2>&1"
+    start-stop-daemon -S -q -p $PIDFILE -m -b -x /bin/sh -- -c "
+      trap 'kill \$CHILD 2>/dev/null; exit 0' TERM
+      while :; do
+        $DAEMON >> $LOG 2>&1 &
+        CHILD=\$!
+        wait \$CHILD
+        RC=\$?
+        [ \$RC -eq 0 ] && exit 0
+        echo \"forgectrl: exited (\$RC) - respawning in 5 s\" >> $LOG
+        sleep 5 &
+        CHILD=\$!
+        wait \$CHILD
+      done"
     ;;
   stop)
     echo "Stopping forgectrl"
     start-stop-daemon -K -q -p $PIDFILE
+    pkill -x forgectrl 2>/dev/null
     rm -f $PIDFILE
     ;;
   restart)

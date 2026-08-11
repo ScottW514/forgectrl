@@ -80,8 +80,22 @@ static unsigned generation = 0;    /* bumped on every state change */
 static int broker_fd = -1;         /* /dev/glowforge, held for our lifetime */
 static int probed = 0;             /* liveness verified since broker open */
 static int motion_fault = 0;       /* probe failed after recovery - no spawn */
+static int standby_takeover = 0;   /* unmanaged controller found: retake at idle */
 
 static void wr_attr(const char *attr, const char *val);
+
+/* Stop an unmanaged (legacy- or orphan-started) controller the legacy
+ * way so the supervisor can take over. Called with mu NOT held. */
+static void takeover_unmanaged(void)
+{
+    fprintf(stderr, "forgectrl: super: taking over from unmanaged "
+                    "controller\n");
+    system("/etc/init.d/grblhal stop >/dev/null 2>&1");
+    system("/etc/init.d/gfcloud stop >/dev/null 2>&1");
+    system("pkill -x grblHAL_glowfor 2>/dev/null");
+    system("pkill -f '[g]fcloud\\.py' 2>/dev/null");
+    sleep(1);
+}
 
 static double wall_s(void)
 {
@@ -303,6 +317,22 @@ static void *super_main(void *arg)
             if (r == pid)
                 reap_locked(status);
         }
+        /* Standing by next to an unmanaged controller (found at start,
+         * or left orphaned by a previous forgectrl): retake supervision
+         * as soon as the machine is idle - a busy one is left to finish
+         * its job first. */
+        if (standby_takeover && child_pid == 0 && want != Ctl_None) {
+            pthread_mutex_unlock(&mu);
+            int idle = machine_is_idle() && !diag_running();
+            if (idle)
+                takeover_unmanaged();
+            pthread_mutex_lock(&mu);
+            if (idle) {
+                standby_takeover = 0;
+                suspended = 0;
+            }
+        }
+
         /* Converge on the wanted state. The first spawn after taking
          * the broker passes the motion-liveness gate first (unlocked -
          * the probe and its recovery ladder take a while). */
@@ -371,8 +401,9 @@ void super_init(void)
     want = configured_mode();
     if (unmanaged_controller_running()) {
         suspended = 1;
+        standby_takeover = 1;
         fprintf(stderr, "forgectrl: super: unmanaged controller already "
-                        "running - standing by (POST /mode to take over)\n");
+                        "running - standing by until the machine is idle\n");
     }
     th_run = 1;
     pthread_mutex_unlock(&mu);
@@ -440,17 +471,8 @@ int super_mode_switch(const char *mode, char *err, size_t elen)
     pthread_mutex_lock(&mu);
     int takeover = suspended && unmanaged_controller_running();
     pthread_mutex_unlock(&mu);
-    if (takeover) {
-        /* Take ownership from a legacy-started controller: stop it the
-         * legacy way, then supervise. */
-        fprintf(stderr, "forgectrl: super: taking over from unmanaged "
-                        "controller\n");
-        system("/etc/init.d/grblhal stop >/dev/null 2>&1");
-        system("/etc/init.d/gfcloud stop >/dev/null 2>&1");
-        system("pkill -x grblHAL_glowfor 2>/dev/null");
-        system("pkill -f '[g]fcloud\\.py' 2>/dev/null");
-        sleep(1);
-    }
+    if (takeover)
+        takeover_unmanaged();
 
     if (settings_set("controller_mode", mode) != 0) {
         snprintf(err, elen, "cannot persist controller_mode");
@@ -460,6 +482,7 @@ int super_mode_switch(const char *mode, char *err, size_t elen)
     pthread_mutex_lock(&mu);
     want = target;
     suspended = 0;
+    standby_takeover = 0;
     motion_fault = 0;   /* a switch is also the retry lever after a fault */
     /* The thread stops the old controller and starts the new one; wait
      * until the running child IS the target. A pending liveness
