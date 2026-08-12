@@ -3,24 +3,50 @@
 System control daemon for [ForgeFIRM](https://github.com/ScottW514/forgefirm)-powered
 Glowforge lasers.
 
-forgectrl runs on the factory i.MX6 control board and exposes the machine's
-non-motion functions over HTTP (port 8080). Motion is handled by the separate
-[grblHAL-glowforge](https://github.com/ScottW514/grblHAL-glowforge) controller;
-forgectrl is the control surface around it: a web control panel, the camera
-service, and the persisted machine settings shared with the controller and
-the gfhome homing runner. Realtime hardware status/control and
-controller-mode selection (GRBL / Glowforge cloud) are planned here.
+forgectrl runs on the factory i.MX6 control board as the machine-services
+daemon (HTTP on port 8080). Motion is executed by exactly one of two
+controllers — [grblHAL-glowforge](https://github.com/ScottW514/grblHAL-glowforge)
+(GRBL mode) or the gfcloud web-service client (factory cloud mode) — and
+forgectrl owns everything around them:
+
+- **Controller-mode supervision** — the selected controller runs as a
+  direct child; `POST /mode` switches modes live (idle-gated), a crashed
+  controller is respawned after the machine is safed, and forgectrl
+  itself runs under a respawn wrapper that retakes supervision once the
+  machine is idle.
+- **The pulse-device broker** — forgectrl holds `/dev/glowforge`
+  (exclusive-open) for its lifetime and controllers inherit the fd, so
+  mode switches, homing handovers, and respawns never close the device
+  or cycle the 40 V motor rail; the supervisor is the writers' dead-man.
+- **The motion-liveness gate** — the stepper drivers can come out of a
+  rail power-up unserviceable while every counter runs normally, so
+  before each session's first controller spawn the supervisor commands a
+  small probe move and verifies it *physically happened* via the head
+  accelerometer, with a rail-off recovery ladder and an explicit
+  `motion-fault` state.
+- **The cooling engine** — the single owner of fans, pump, TEC, and the
+  flow-check heater for both modes: coolant-flow verification, over-temp
+  hold/resume policy, and per-job fan profiles, fed by controller
+  job-state reports (`POST /cool/state`) and publishing a verdict file
+  the controllers enforce in-process.
+- The **web control panel**, **camera service**, **telemetry**,
+  **diagnostics**, persisted **machine settings**, and the A/B
+  **update system**.
+
+The shared contract — switch maps, sensor conversions, hardware
+ownership, the cooling channels, mode supervision, and pulse-device
+ownership — is [docs/SERVICES.md](docs/SERVICES.md).
 
 ## The control panel (`GET /`)
 
 A self-contained single page (no external assets) carrying the
 OpenGlow visual identity, tabbed:
 
-- **Status** — the controller-mode selector (GRBL today; factory cloud
-  once implemented), live operational status (motion state and
-  position, coolant temperatures and fan tachometers, safety-switch
-  states, system summary), plus a scaled lid-camera snapshot that
-  switches to the live MJPEG stream on demand.
+- **Status** — the live controller-mode selector (switches through the
+  supervisor; the setting persists for boot), live operational status
+  (motion state and position, coolant temperatures and fan tachometers,
+  safety-switch states, system summary), plus a scaled lid-camera
+  snapshot that switches to the live MJPEG stream on demand.
 - **Machine** — shared settings: display units, homing method and the
   post-homing position calibration, cooling tunables.
 - **GF Cloud** — Glowforge web-service overrides: machine identity
@@ -28,9 +54,9 @@ OpenGlow visual identity, tabbed:
   homing-session timeout.
 - **GRBL** — controller connection info; GRBL-mode tunables land here as
   the controller exposes them.
-- **Diagnostics** — tools that take the hardware over (the motion
-  controller is stopped for the duration): cooling system verification
-  and calibration.
+- **Diagnostics** — tools that take the hardware over (the active
+  controller is suspended through the supervisor for the duration):
+  cooling system verification and calibration.
 - **System** — firmware slots (A/B boot selection), ForgeFIRM updates,
   image install/restore, the WiFi regulatory region (power save is
   kept off), reboot.
@@ -50,6 +76,10 @@ restarts.
 | `GET /status` | Machine operational status as JSON (state, position when homed, fans, coolant, switches) |
 | `GET /settings` | Current settings as JSON (plus the system hostname and firmware version) |
 | `POST /settings?key=value&...` | Set any subset of known keys |
+| `GET /mode` | Supervisor state: mode, controller (`running`/`stopped`/`standby`/`motion-fault`), pid, motion verdict |
+| `POST /mode?controller=grbl\|cloud` | Live idle-gated mode switch; also the retry lever after a motion fault |
+| `POST /cool/state` | Controller job-state report (mode, armed, per-job run fan duties), level-triggered ~1 Hz |
+| `GET /cool/status` | Cooling-engine state: phase, verdict, temps, report age |
 
 Position comes from the kernel step counters anchored at the last
 completed homing (`/run/grblhal.homed`, written by the controller) —
@@ -63,7 +93,7 @@ keys:
 
 | Key | Meaning |
 |---|---|
-| `controller_mode` | `grbl` (factory `cloud` mode joins once implemented) |
+| `controller_mode` | `grbl` or `cloud` — the boot-time mode; `POST /mode` switches live and persists it |
 | `homing_mode` | `$H` behavior: `gfcloud`, `switches`, or `none` |
 | `gfcloud_home_x/y/z` | Machine coordinates after a completed homing (mm) |
 | `gfcloud_home_timeout_s` | Web-service homing session budget (30–3600 s) |
