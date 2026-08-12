@@ -253,9 +253,18 @@ remain only as manual emergency stops.
   selected mode's.
 - A **busy** controller survives a forgectrl stop: it is left running
   (unmanaged; its own fd carries the dead-man) rather than e-stopping a
-  live job, and a restarted supervisor stands by until told to take over.
-  An unmanaged controller found at startup likewise puts the supervisor in
-  standby — `POST /mode` takes over.
+  live job. A supervisor that finds an unmanaged controller — at startup,
+  or after its own crash-respawn (the init script runs the daemon under a
+  respawn wrapper) — stands by and **retakes supervision automatically
+  once the machine is idle**; `POST /mode` remains the manual lever.
+- **Motion liveness gates the first spawn** of each broker session: the
+  supervisor commands a small probe move through its own fd (+X first,
+  then back — a cable lives at the end of left travel; laser latched) and
+  verifies it physically happened via the head accelerometer. A dead
+  verdict runs a rail-off recovery ladder (5/15/30 s — the DRV8825
+  drivers can come out of a rail power-up unserviceable and need a true
+  power-off to recover); if the ladder fails, controllers stay down and
+  `/mode` reports `motion-fault` (retry via `POST /mode`).
 
 ## Pulse-device ownership [implemented: broker; rail policy pending]
 
