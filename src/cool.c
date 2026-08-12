@@ -556,12 +556,16 @@ static void engine_tick(void)
     } else
         silent_warned = 0;
 
+    int flood = fresh && (mode == 1 || armed);
     int duty_changed = memcmp(run_duty, duty, sizeof(run_duty)) != 0;
     memcpy(run_duty, duty, sizeof(run_duty));
-    if (duty_changed && flood_on && cool_state == Cool_Run && !forced_cool)
+    /* Reapply only for a duty change carried by a run report: a
+     * run-ending report drops the per-job profile with it, and writing
+     * the fallback duties from that report would blast the fans on the
+     * way OUT of a job that ran a quiet profile. */
+    if (duty_changed && flood && flood_on && cool_state == Cool_Run && !forced_cool)
         fans_run();     /* per-job profile changed mid-run */
 
-    int flood = fresh && (mode == 1 || armed);
     if (flood != flood_on) {
         flood_on = flood;
         flood_apply(flood, now);
