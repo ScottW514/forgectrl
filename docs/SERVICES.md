@@ -160,16 +160,17 @@ pushed state (`/run` anchor files, and the cooling reports below).
 
 ---
 
-## Cooling service [implemented: engine + channels; controllers migrating]
+## Cooling service [implemented]
 
 The cooling engine — fan/pump/TEC/heater profiles, coolant-flow verification,
 over-temp policy — lives in forgectrl (`src/cool.c`) as the single owner of the
 thermal hardware, serving both controller modes. Tunables are the `cool_*` keys
 in the shared machine settings (re-read at every run start) with `GFCOOL_*` env
 overrides. `GET /cool/status` reports the engine state for the UI and bench
-tooling. Until a controller migrates to the channels below, its in-process
-engine keeps writing the thermal attrs; the forgectrl engine writes hardware
-only on its own state transitions, so the two coexist during bring-up.
+tooling. Both controllers are clients of it over the two channels below: they
+report job state and enforce the published verdict in-process, and they write
+no thermal hardware except through the emergency fallback described under the
+verdict file.
 
 ### Job-state reports (controller → forgectrl)
 
@@ -237,7 +238,8 @@ the broker, and detects controller death the moment it happens). The boot
 init scripts do not start controllers — they defer to the supervisor and
 remain only as manual emergency stops.
 
-- `GET /mode` → `{"mode":"grbl|cloud","controller":"running|stopped|standby","pid":N}`
+- `GET /mode` →
+  `{"mode":"grbl|cloud","controller":"running|stopped|standby|motion-fault","pid":N,"motion":"verified|unverified|fault"}`
 - `POST /mode?controller=grbl|cloud` — the live switch: idle-gated (machine
   idle, no diagnostic), stops the active controller (SIGTERM → SIGKILL
   escalation on its process group), persists `controller_mode`, starts the
@@ -305,11 +307,16 @@ fd — the real-time feed path is never proxied.
   last reference, so the writer's own exit becomes the final close — the
   kernel backstop either way.
 - **Rail policy [contract, pending]:** `cnc/enable`/`cnc/disable` become
-  forgectrl-only writes (diagnostics under its takeover rules). Controllers
-  and the cloud client's shutdown path must not disable the rail when
-  handing back. Every deliberate re-enable observes `rail_settle_s`;
-  forgectrl may drop the rail after a configurable idle period, always
-  restoring it through a settled power-up before the next run.
+  forgectrl-only writes (diagnostics under its takeover rules). Every
+  deliberate re-enable observes `rail_settle_s`; forgectrl may drop the rail
+  after a configurable idle period, always restoring it through a settled
+  power-up before the next run. Already true: with a brokered fd in play no
+  client drops the rail on a handback or a takeover, and takeover settles are
+  skipped because the rail never went down (an emergency halt may still
+  disable it deliberately).
+  Outstanding: the GRBL controller still writes `cnc/enable` at init and at
+  homing resume (idempotent against an already-settled rail), and the idle
+  policy is unimplemented.
 
 ---
 
@@ -318,18 +325,18 @@ fd — the real-time feed path is never proxied.
 Single-writer rule: each attr group has exactly one writing process per mode.
 Readers are unrestricted.
 
-| Hardware | GRBL mode | Cloud mode | Diagnostics | Target (engine landed) |
-|---|---|---|---|---|
-| `thermal/*` fans/pump/TEC/heater, `head/air_assist_pwm`, `head/purge_air` | GRBL controller | cloud client | forgectrl (controller stopped) | **forgectrl only** (+ the stale-verdict fallback) |
-| `cnc/*` motion, `/dev/glowforge` ring | GRBL controller | cloud client | — | active controller, via an fd brokered by forgectrl (see Pulse-device ownership) |
-| `cnc/enable` / `cnc/disable` (40 V rail) | GRBL controller | cloud client | forgectrl | **forgectrl only** (rail policy + settle) |
-| `cnc/laser_latch` | GRBL controller | cloud client | — | active controller (locked by forgectrl across handovers and on writer death) |
-| Button LEDs (`/sys/class/leds/button_led_*`) | GRBL controller (arm flow) | cloud client | — | active controller |
-| Head/lid illumination (camera lamps) | forgectrl (`lamp` on snapshot) | forgectrl | forgectrl | forgectrl |
-| Cameras (V4L2, MIPI mux) | forgectrl | forgectrl | forgectrl | forgectrl |
-| `/data/forgefirm.conf` settings | read (re-read per `$H` / flood start) | read | read | forgectrl writes, all read |
-| `/run/grblhal.homed` anchor | GRBL controller writes | — | — | unchanged |
-| `/run/forgefirm/cooling.state` | — | — | — | forgectrl writes, controllers read |
+| Hardware | GRBL mode | Cloud mode | Diagnostics |
+|---|---|---|---|
+| `thermal/*` fans/pump/TEC/heater, `head/air_assist_pwm`, `head/purge_air` | forgectrl engine (+ the controller's stale-verdict fallback) | forgectrl engine (+ fallback) | forgectrl runner (engine suspended, fire blocked) |
+| `cnc/*` motion, `/dev/glowforge` ring | GRBL controller, through the brokered fd | cloud client, through the brokered fd | — (controller suspended) |
+| `cnc/enable` / `cnc/disable` (40 V rail) | forgectrl; the controller's enable-at-init is the one residual write (rail policy above) | forgectrl | forgectrl |
+| `cnc/laser_latch` | GRBL controller (locked by forgectrl across handovers and on writer death) | cloud client (same) | — |
+| Button LEDs (`/sys/class/leds/button_led_*`) | GRBL controller (arm flow) | cloud client | — |
+| Head/lid illumination (camera lamps) | forgectrl (`lamp` on snapshot) | forgectrl | forgectrl |
+| Cameras (V4L2, MIPI mux) | forgectrl | forgectrl | forgectrl |
+| `/data/forgefirm.conf` settings | read (re-read per `$H` / run start) | read | read; forgectrl writes (409 while busy) |
+| `/run/grblhal.homed` anchor | GRBL controller writes | — | — |
+| `/run/forgefirm/cooling.state` | forgectrl writes, controllers read | forgectrl writes, controllers read | forgectrl writes |
 
 Diagnostics ownership (forgectrl stops the motion controller, marker file
 `/run/forgefirm-diag.active`, recovery on next start) is described in the
@@ -351,3 +358,23 @@ kernel-module-glowforge `UAPI.md`, and a live-board spot-check:
 - Sensor conversions verified against live raws: coolant beta-3380 output
   matches the `/status` values; `tec_temp` railed at 1023 as noted; tach
   periods produce plausible RPM in all three unit/pole variants.
+
+The channels and ownership rules above are drilled on hardware, operator
+present:
+
+- **Cooling channels:** idle/run/cooldown postures hit the exact factory
+  duties; a silent controller blocks fire immediately and stands down through
+  smoke; an engine killed mid-flood leaves the run fans held, the heater
+  dropped by the client, and the sender warned, with the posture rebuilt from
+  level-triggered reports within ~2 s of restart; over-temp hold and
+  auto-resume inside a running cycle.
+- **Armed windows:** the fallback rewrites the run duties when the verdict
+  goes stale while armed; a controller killed mid-fire drops FIRE with the
+  kernel ring's in-flight bytes (tens to ~170 ms, always riding real motion)
+  and the supervisor relocks the latch in the same window.
+- **Supervision and broker:** live mode switches both ways, crash respawn
+  after safing, diagnostics suspend/resume returning the selected mode, a
+  busy controller surviving a forgectrl stop and being retaken at idle, and
+  `$H` homing handovers with no device open/close and no rail movement.
+- **Cloud mode** runs the full stack as an engine client over a multi-hour
+  signed-in session, including reconnects and clean stops.
