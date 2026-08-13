@@ -68,6 +68,11 @@ Who reads what:
 - **The active controller** reads the button directly (the GRBL arm flow waits
   on code 2; the cloud client's event loop does the same in its mode). Button
   *meaning* is mode-specific by design; the reads stay in-process for latency.
+- **The active controller also reads bits 3 and 5 for its own motion gate.**
+  In GRBL mode they become the core's safety-door signal — lid open or
+  interlock loop open parks a running job and closing it resumes; bit 4 gates
+  nothing unless the machine settings opt in (`estop_halts_motion`, for a
+  retrofitted e-stop circuit), because of the resting-high behavior above.
 - **No process takes `EVIOCGRAB`** on the device. Exclusivity of button
   *meaning* comes from mode selection, and a grab starves every other reader of
   events. (The cloud client's grab is scheduled for removal.)
