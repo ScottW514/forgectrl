@@ -212,6 +212,16 @@ static void spawn_locked(ctl_t ctl)
             snprintf(fdv, sizeof(fdv), "%d", broker_fd);
             setenv("GF_PULSE_FD", fdv, 1);
         }
+        /* The broker fd is the only descriptor a controller inherits.
+         * Everything else the daemon holds - listening and client
+         * sockets, capture and encoder nodes - would otherwise stay
+         * pinned for the whole life of the child. */
+        long maxfd = sysconf(_SC_OPEN_MAX);
+        if (maxfd < 0 || maxfd > 4096)
+            maxfd = 4096;
+        for (int fd = 3; fd < (int)maxfd; fd++)
+            if (fd != broker_fd)
+                close(fd);
         if (ctl == Ctl_Grbl) {
             /* Mirrors the former init-script launch. */
             if (chdir("/data") != 0)

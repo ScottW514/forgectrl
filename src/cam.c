@@ -429,7 +429,10 @@ static int start_capture(cam_id_t cam, char *err, size_t errlen)
         eng.lamp_prev = 0;
     sysfs_write_int(c->lamp, eng.lamp_level);
 
-    eng.fd = open(dev, O_RDWR | O_NONBLOCK, 0);
+    /* O_CLOEXEC: a controller spawned while the capture is up must not
+     * inherit this descriptor - the buffers stay allocated for as long as
+     * any copy is open, and every later S_FMT fails with EBUSY. */
+    eng.fd = open(dev, O_RDWR | O_NONBLOCK | O_CLOEXEC, 0);
     if (eng.fd < 0) {
         snprintf(err, errlen, "open %s: %s", dev, strerror(errno));
         release_capture();

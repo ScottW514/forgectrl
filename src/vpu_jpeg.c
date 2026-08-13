@@ -72,7 +72,9 @@ static int find_encoder(void)
     for (int i = 0; i < 32; i++) {
         char path[32];
         snprintf(path, sizeof(path), "/dev/video%d", i);
-        int fd = open(path, O_RDWR | O_NONBLOCK, 0);
+        /* O_CLOEXEC: the encoder is cached for the process lifetime and
+         * must not survive into a spawned controller. */
+        int fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC, 0);
         if (fd < 0)
             continue;
         if (is_jpeg_encoder(fd))
