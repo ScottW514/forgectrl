@@ -307,16 +307,16 @@ fd — the real-time feed path is never proxied.
   last reference, so the writer's own exit becomes the final close — the
   kernel backstop either way.
 - **Rail policy [contract, pending]:** `cnc/enable`/`cnc/disable` become
-  forgectrl-only writes (diagnostics under its takeover rules). Every
-  deliberate re-enable observes `rail_settle_s`; forgectrl may drop the rail
-  after a configurable idle period, always restoring it through a settled
-  power-up before the next run. Already true: with a brokered fd in play no
-  client drops the rail on a handback or a takeover, and takeover settles are
-  skipped because the rail never went down (an emergency halt may still
-  disable it deliberately).
-  Outstanding: the GRBL controller still writes `cnc/enable` at init and at
-  homing resume (idempotent against an already-settled rail), and the idle
-  policy is unimplemented.
+  forgectrl-only writes (diagnostics under its takeover rules), and every
+  deliberate re-enable observes `rail_settle_s`. **The rail stays up while
+  the machine is on — there is no idle-rail-off policy**: the stepper
+  drivers can come out of any power-up unserviceable, so each cycle is a
+  fresh gamble and the cheapest policy is not to cycle. Already true: with a
+  brokered fd in play no client drops the rail on a handback or a takeover,
+  and takeover settles are skipped because the rail never went down (an
+  emergency halt may still disable it deliberately). Outstanding: the GRBL
+  controller still writes `cnc/enable` at init and at homing resume
+  (idempotent against an already-settled rail).
 
 ---
 
