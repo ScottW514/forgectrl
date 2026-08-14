@@ -55,7 +55,13 @@
  * - Controller silence: if the active controller stops reporting past
  *   REPORT_TIMEOUT_S, fire_ok goes false immediately and the engine
  *   stands down through the normal cooldown path (smoke clear is the
- *   right physical behavior for a job that died mid-cut).
+ *   right physical behavior for a job that died mid-cut). Silence with
+ *   the armed window open - or with the kernel still playing the ring
+ *   (cloud mode preloads whole jobs, so the ring can run for minutes
+ *   with no live feeder) - additionally stops motion and locks the
+ *   laser latch right here: the supervisor safes controller *deaths*,
+ *   this covers controller *hangs*. And while cnc/state still reads
+ *   running, exhaust/intake never drop below cooldown duty.
  * - Diagnostics (diag.c) own the hardware while they run: the engine
  *   suspends its writes and publishes fire-blocked until they finish.
  */
@@ -255,6 +261,7 @@ static int over_temp_gate = 0;      /* hysteresis: >max sets, <=resume clears */
 static int forced_cool = 0;         /* over-temp overrode the phase fans */
 static int flood_on = 0;            /* effective run window */
 static int silent_warned = 0;
+static int silent_safed = 0;        /* hang dead-man fired this episode */
 static int diag_had = 0;            /* diagnostics held the hardware */
 static long run_duty[3] = {-1, -1, -1};
 static unsigned long verdict_seq = 0;
@@ -309,6 +316,25 @@ static int read_temp(const char *attr, float *c)
         return 0;
     *c = (float)coolant_degc(raw);
     return 1;
+}
+
+/* cnc/state == "running" is the one state in which the machine can be
+ * depositing energy (the ring is being clocked). A read failure counts
+ * as not-running here: this feeds extra protective actions, and the
+ * fire gate itself fails closed elsewhere. */
+static int cnc_is_running(void)
+{
+    char path[128], buf[16];
+    snprintf(path, sizeof(path), GF_SYSFS "cnc/state");
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return 0;
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    buf[n] = '\0';
+    return strncmp(buf, "running", 7) == 0;
 }
 
 static void heater_set_pct(uint32_t pct)
@@ -547,14 +573,33 @@ static void engine_tick(void)
 
     int fresh = at >= 0 && now - at <= REPORT_TIMEOUT_S;
     if (!fresh) {
+        /* Dead-man for a HUNG controller, not just a dead one (the
+         * supervisor covers deaths): a reporter that went silent with
+         * the armed window open, or with the kernel still playing the
+         * ring, has nobody left to stop the beam - stop motion and
+         * lock the laser here. The armed case fires once per silence
+         * episode; the running case repeats until the stop takes, so a
+         * failed write cannot be a one-shot miss. Gated on at >= 0: a
+         * freshly (re)started engine must not shoot down a healthy
+         * orphaned controller that has not reported to it yet. */
+        if (at >= 0 && ((armed && !silent_safed) || cnc_is_running())) {
+            if (!silent_safed)
+                warn("controller silent while armed/running - "
+                     "stopping motion, locking laser");
+            silent_safed = 1;
+            wr_attr("cnc/stop", "1");
+            wr_attr("cnc/laser_latch", "1");
+        }
         mode = 0;
         armed = 0;
         if (at >= 0 && !silent_warned && (flood_on || cool_state == Cool_Run)) {
             silent_warned = 1;
             warn("controller went silent - standing down");
         }
-    } else
+    } else {
         silent_warned = 0;
+        silent_safed = 0;
+    }
 
     int flood = fresh && (mode == 1 || armed);
     int duty_changed = memcmp(run_duty, duty, sizeof(run_duty)) != 0;
@@ -738,9 +783,13 @@ static void engine_tick(void)
         }
     }
 
-    /* Cooldown phases. */
+    /* Cooldown phases. The drop to idle duty is additionally gated on
+     * the kernel actually being done: the ring can still be playing
+     * (cloud mode preloads whole jobs) after the report-driven phases
+     * expire, and airflow must never fall below cooldown duty while
+     * the machine can still be depositing energy. */
     if (cool_state == Cool_Smoke && now >= phase_until) {
-        if (have_up && up > temp_resume_c) {
+        if ((have_up && up > temp_resume_c) || cnc_is_running()) {
             cool_state = Cool_Thermal;
             phase_until = now + (double)cooldown_max_s;
             fans_cool();
@@ -751,7 +800,9 @@ static void engine_tick(void)
         }
     } else if (cool_state == Cool_Thermal) {
         int recovered = have_up && up <= temp_resume_c;
-        if (recovered || now >= phase_until) {
+        if ((recovered || now >= phase_until) && cnc_is_running()) {
+            phase_until = now + (double)cooldown_max_s;  /* ring still live */
+        } else if (recovered || now >= phase_until) {
             if (!recovered)
                 warn("thermal cooldown timed out above the resume gate");
             cool_state = Cool_Idle;

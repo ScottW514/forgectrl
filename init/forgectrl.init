@@ -24,6 +24,9 @@ case "$1" in
     echo "Starting forgectrl"
     start-stop-daemon -S -q -p $PIDFILE -m -b -x /bin/sh -- -c "
       trap 'kill \$CHILD 2>/dev/null; exit 0' TERM
+      # The wrapper must survive memory pressure to respawn the daemon
+      # (the daemon itself runs at -900, controllers at -500).
+      echo -1000 > /proc/self/oom_score_adj 2>/dev/null
       while :; do
         $DAEMON >> $LOG 2>&1 &
         CHILD=\$!

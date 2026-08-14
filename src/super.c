@@ -12,10 +12,12 @@
  *
  * One thread owns the whole lifecycle (spawn, reap, respawn, stop) and
  * everything else talks to it through a small request mailbox - there
- * is exactly one waitpid() caller in the process. Unexpected controller
- * death safes the machine (cnc/stop + laser latch; today the kernel
- * dead-man on the child's own fd already covers this, but the broker
- * makes these writes the real mechanism) and respawns with backoff.
+ * is exactly one waitpid() caller in the process. Every transition out
+ * of a running child - expected or not, including SIGKILL escalation -
+ * safes the machine (cnc/stop + laser latch): under the broker a child
+ * exit is not a final close of the pulse device, so these writes are
+ * the safing mechanism. Unexpected deaths additionally respawn with
+ * backoff.
  *
  * The mode-switch sequence (POST /mode) is idle-gated: stop the active
  * controller, persist controller_mode, start the other, wait for its
@@ -117,9 +119,12 @@ static void broker_open_locked(void)
 {
     if (broker_fd >= 0)
         return;
-    /* A just-stopped legacy holder's close can lag its exit. */
+    /* A just-stopped legacy holder's close can lag its exit. O_CLOEXEC:
+     * only the controller spawn clears the flag before exec, so helper
+     * children (curl, fwup, media-ctl, pkill, ...) can never pin the
+     * pulse device and defeat the kernel dead-man on the description. */
     for (int i = 0; i < 30 && broker_fd < 0; i++) {
-        broker_fd = open(PULSE_DEV, O_WRONLY);  /* no O_CLOEXEC: inherited */
+        broker_fd = open(PULSE_DEV, O_WRONLY | O_CLOEXEC);
         if (broker_fd < 0)
             usleep(100 * 1000);
     }
@@ -212,6 +217,9 @@ static void spawn_locked(ctl_t ctl)
             char fdv[16];
             snprintf(fdv, sizeof(fdv), "%d", broker_fd);
             setenv("GF_PULSE_FD", fdv, 1);
+            /* The broker fd is opened O_CLOEXEC; a controller is the
+             * one child that must inherit it across exec. */
+            fcntl(broker_fd, F_SETFD, 0);
         }
         /* The broker fd is the only descriptor a controller inherits.
          * Everything else the daemon holds - listening and client
@@ -223,6 +231,14 @@ static void spawn_locked(ctl_t ctl)
         for (int fd = 3; fd < (int)maxfd; fd++)
             if (fd != broker_fd)
                 close(fd);
+        /* A controller must be a less-preferred OOM victim than
+         * ordinary processes, but a MORE preferred one than the daemon
+         * (which is its dead-man and respawns it). */
+        int ofd = open("/proc/self/oom_score_adj", O_WRONLY);
+        if (ofd >= 0) {
+            (void)!write(ofd, "-500", 4);
+            close(ofd);
+        }
         if (ctl == Ctl_Grbl) {
             /* Mirrors the former init-script launch. */
             if (chdir("/data") != 0)
@@ -259,14 +275,18 @@ static void reap_locked(int status)
             "forgectrl: super: %s controller exited (status 0x%x, up %.0f s)%s\n",
             ctl_name(died), (unsigned)status, up,
             expected ? "" : " - unexpected");
-    if (expected)
-        return;
 
-    /* Safe posture first. Today the kernel dead-man on the child's own
-     * fd already stopped motion and locked the latch; under the device
-     * broker these writes become the real mechanism. */
+    /* Safe posture on EVERY transition out of a running child, expected
+     * or not. Under the device broker a child's exit is not a final
+     * close of the pulse device, so the kernel's close-relocks backstop
+     * never fires for managed controllers - these two writes are the
+     * real safing mechanism, and both are harmless when the machine is
+     * already idle and latched. */
     wr_attr("cnc/stop", "1");
     wr_attr("cnc/laser_latch", "1");
+
+    if (expected)
+        return;
 
     if (up >= HEALTHY_UPTIME_S)
         backoff_s = RESPAWN_MIN_S;
@@ -303,6 +323,10 @@ static void stop_locked(void)
             fprintf(stderr, "forgectrl: super: escalating to SIGKILL\n");
             kill(-pid, SIGKILL);
             kill(pid, SIGKILL);
+            /* A SIGKILLed child can run no cleanup of its own - safe
+             * the machine now rather than waiting for the reap. */
+            wr_attr("cnc/stop", "1");
+            wr_attr("cnc/laser_latch", "1");
             deadline = wall_s() + STOP_TERM_WAIT_S;
         }
         pthread_mutex_unlock(&mu);

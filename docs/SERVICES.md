@@ -197,7 +197,13 @@ mode=idle|run|cooldown & armed=0|1
   engine publishes `fire_ok=false` immediately and stands down through the
   normal cooldown path (smoke clear is the right physical behavior for a job
   that died mid-cut), ending at the idle profile (pump on, fans idle, heater
-  off).
+  off). Silence with the armed window open — or with `cnc/state` still
+  reading `running` (cloud mode preloads whole jobs, so the ring can play
+  for minutes with no live feeder) — is the **hung-controller dead-man**:
+  the engine itself writes `cnc/stop` + `cnc/laser_latch=1` (the supervisor
+  safes controller *deaths*; this covers *hangs*), and exhaust/intake never
+  drop below cooldown duty while the kernel still reports a run in
+  progress.
 
 ### Verdict file (forgectrl → controllers)
 
@@ -250,11 +256,15 @@ remain only as manual emergency stops.
   escalation on its process group), persists `controller_mode`, starts the
   other, and waits for its first job-state report to reach the cooling
   engine (slow first report from the cloud client is logged, not fatal).
-- **Unexpected controller death**: the supervisor safes the machine
-  (`cnc/stop`, `cnc/laser_latch=1` — the kernel dead-man on the child's own
-  fd covers this today; under the broker these writes are the mechanism)
-  and respawns with exponential backoff (1 s → 30 s cap, reset after 60 s
-  healthy).
+- **Controller exit safing**: the supervisor safes the machine (`cnc/stop`,
+  `cnc/laser_latch=1`) on **every** transition out of a running child —
+  unexpected death, mode switch, diagnostics suspend, shutdown — and again
+  immediately after any SIGKILL escalation (a killed child runs no cleanup
+  of its own). Under the broker a child exit is not a final close of the
+  pulse device, so these writes are the safing mechanism; both are harmless
+  no-ops when the machine is already idle and latched. Unexpected deaths
+  additionally respawn with exponential backoff (1 s → 30 s cap, reset
+  after 60 s healthy).
 - **Diagnostics takeover** rides the same machinery: suspend (controller
   down, mode unchanged) / resume — the controller that comes back is the
   selected mode's.
@@ -303,14 +313,21 @@ fd — the real-time feed path is never proxied.
   the kernel idle (the driver's suspend gate, unchanged).
 - **Dead-man, re-plumbed [implemented]:** a writer crash no longer produces
   a final close, so the kernel dead-man does not fire on it. The supervisor
-  is the dead-man for its writers: on unexpected child exit it immediately
-  writes `cnc/stop` and `cnc/laser_latch=1` before any respawn. Below that
-  remain the kernel's own backstops (end-of-data forces the lines low;
-  underrun faults) and the hardware AND-gate — the actual safety boundary.
-  forgectrl dying with no writer alive closes the description and trips the
-  kernel dead-man; dying while a writer runs leaves the writer's dup as the
-  last reference, so the writer's own exit becomes the final close — the
-  kernel backstop either way.
+  is the dead-man for its writers — `cnc/stop` and `cnc/laser_latch=1` on
+  every transition out of a running child, and again after a SIGKILL — and
+  the cooling engine is the dead-man for *hangs*: a reporter silent past
+  5 s with the window armed or the kernel still running gets the same two
+  writes (see the job-state section). The broker fd is opened `O_CLOEXEC`
+  and only the controller spawn clears the flag, so helper children (curl,
+  fwup, media-ctl, ...) can never hold the device open past an exec and
+  defeat the final-close backstop. Below that remain the kernel's own
+  backstops (end-of-data forces the lines low; underrun faults; every
+  fresh open starts with the flock dead-man disarmed) and the hardware
+  AND-gate — the actual safety boundary. forgectrl dying with no writer
+  alive closes the description and trips the kernel dead-man; dying while
+  a writer runs leaves the writer's dup as the last reference, so the
+  writer's own exit becomes the final close — the kernel backstop either
+  way.
 - **Rail policy [contract, pending]:** `cnc/enable`/`cnc/disable` become
   forgectrl-only writes (diagnostics under its takeover rules), and every
   deliberate re-enable observes `rail_settle_s`. **The rail stays up while
@@ -322,6 +339,18 @@ fd — the real-time feed path is never proxied.
   emergency halt may still disable it deliberately). Outstanding: the GRBL
   controller still writes `cnc/enable` at init and at homing resume
   (idempotent against an already-settled rail).
+
+**Watchdog scope:** the i.MX6 hardware watchdog is a boot/system watchdog,
+not a laser-safety watchdog — nothing ties `/dev/watchdog` to controller
+liveness, motion liveness, or the armed state, and it must not be mistaken
+for a beam stop (a boot-enabled WDT that userspace never opens is petted by
+the kernel indefinitely). The fast beam-stop path on a feeder stall is the
+ring-drain chain: the ring runs dry → the SDMA script forces the FIRE and
+step lines low in the same tick → the driver leaves the running state → the
+charge pump self-terminates on its next 200 ms tick and the HV watchdog
+disarms the chain. Cloud mode preloads whole jobs, so its ring does not
+drain on a feeder stall — that residual is covered by the cooling engine's
+hung-controller dead-man above.
 
 ---
 
@@ -342,6 +371,11 @@ Readers are unrestricted.
 | `/data/forgefirm.conf` settings | read (re-read per `$H` / run start) | read | read; forgectrl writes (409 while busy) |
 | `/run/grblhal.homed` anchor | GRBL controller writes | — | — |
 | `/run/forgefirm/cooling.state` | forgectrl writes, controllers read | forgectrl writes, controllers read | forgectrl writes |
+
+On a kernel dead-man trip (and on module removal) the kernel itself
+de-energizes the heat sources — loop heater and TEC — and touches nothing
+else: pump, exhaust/intake, and head airflow stay with the engine, which
+keeps circulation and airflow running over a hot tube.
 
 Diagnostics ownership (forgectrl stops the motion controller, marker file
 `/run/forgefirm-diag.active`, recovery on next start) is described in the

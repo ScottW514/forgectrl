@@ -40,6 +40,7 @@
 #include "update.h"
 
 #include <ctype.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -917,6 +918,17 @@ int main(void)
     /* Stay well below the motion feeder (SCHED_FIFO) and the controller;
      * best effort. */
     (void)nice(5);
+
+    /* The daemon is the dead-man for hung controllers and the sole
+     * cooling-hardware writer: under memory pressure it must outlive
+     * the processes it supervises. Controllers respawn at -500 (see
+     * super.c), so they are reclaimed first and the daemon safes and
+     * respawns them. */
+    int ofd = open("/proc/self/oom_score_adj", O_WRONLY);
+    if (ofd >= 0) {
+        (void)!write(ofd, "-900", 4);
+        close(ofd);
+    }
 
     /* Raise the descriptor ceiling: the daemon is thread-per-connection,
      * so a connection flood must not exhaust the fd table and make
