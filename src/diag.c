@@ -332,6 +332,10 @@ static void *runner(void *arg)
     set_phase("stopping the motion controller");
     if (controller_stop()) {
         set_result("{\"error\":\"could not stop the motion controller\"}");
+        /* The stop already un-suspended on timeout; this additionally
+         * clears any motion fault and resets the respawn backoff, so a
+         * failed takeover can never leave the machine controller-less. */
+        controller_start();
         goto out_norestart;
     }
     close(open(MARKER, O_CREAT | O_WRONLY, 0644));

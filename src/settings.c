@@ -8,15 +8,21 @@
  * components (the grblHAL-glowforge controller) read it with their own
  * parsers, so the format stays trivial - one "key = value" per line,
  * '#' comments, unknown keys preserved on rewrite. Writes go through a
- * temp file + rename so a concurrent reader never sees a partial file.
+ * temp file + rename so a concurrent reader never sees a partial file,
+ * mutations are serialized by a process-wide lock so concurrent writers
+ * cannot lose keys, and a multi-key update lands as one rename so no
+ * reader can observe it half-applied.
  */
 #define _GNU_SOURCE
 #include "settings.h"
 
 #include <ctype.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+static pthread_mutex_t settings_mu = PTHREAD_MUTEX_INITIALIZER;
 
 #define SETTINGS_PATH_DEF "/data/forgefirm.conf"
 #define LINE_MAX_LEN      256
@@ -78,14 +84,24 @@ int settings_get(const char *key, char *val, size_t len)
     return found;
 }
 
-int settings_set(const char *key, const char *val)
+int settings_set_many(const char *const *keys, const char *const *vals,
+                      size_t count)
 {
     const char *path = settings_path();
-    int drop = val[0] == '\0';   /* empty value = remove the key */
+    int ret = -1;
+
+    if (count == 0)
+        return 0;
+
+    int *applied = calloc(count, sizeof(*applied));
+    if (!applied)
+        return -1;
+
+    pthread_mutex_lock(&settings_mu);
 
     /* Read existing lines so unknown keys and comments survive. */
     char *lines[FILE_MAX_LINES];
-    int n = 0, replaced = 0;
+    int n = 0;
 
     FILE *f = fopen(path, "r");
     if (f) {
@@ -93,11 +109,20 @@ int settings_set(const char *key, const char *val)
         while (n < FILE_MAX_LINES && fgets(line, sizeof(line), f)) {
             char probe[LINE_MAX_LEN], *k, *v;
             snprintf(probe, sizeof(probe), "%s", line);
-            if (parse_line(probe, &k, &v) == 0 && !strcmp(k, key)) {
-                if (drop || replaced)
-                    continue;        /* drop, or collapse duplicates */
-                snprintf(line, sizeof(line), "%s = %s\n", key, val);
-                replaced = 1;
+            if (parse_line(probe, &k, &v) == 0) {
+                size_t m;
+                for (m = 0; m < count; m++)
+                    if (!strcmp(k, keys[m]))
+                        break;
+                if (m < count) {
+                    /* Empty value = remove the key; duplicates collapse
+                     * onto the first occurrence. */
+                    if (vals[m][0] == '\0' || applied[m])
+                        continue;
+                    snprintf(line, sizeof(line), "%s = %s\n",
+                             keys[m], vals[m]);
+                    applied[m] = 1;
+                }
             }
             lines[n] = strdup(line);
             if (!lines[n])
@@ -105,8 +130,15 @@ int settings_set(const char *key, const char *val)
             n++;
         }
         fclose(f);
-    } else if (drop) {
-        return 0;                    /* nothing to remove */
+    } else {
+        size_t m;
+        for (m = 0; m < count; m++)
+            if (vals[m][0] != '\0')
+                break;
+        if (m == count) {
+            ret = 0;                 /* no file, nothing to remove */
+            goto out;
+        }
     }
 
     char tmp[300];
@@ -116,19 +148,32 @@ int settings_set(const char *key, const char *val)
         fprintf(stderr, "settings: cannot write %s\n", tmp);
         for (int i = 0; i < n; i++)
             free(lines[i]);
-        return -1;
+        goto out;
     }
     for (int i = 0; i < n; i++) {
         fputs(lines[i], f);
         free(lines[i]);
     }
-    if (!replaced && !drop)
-        fprintf(f, "%s = %s\n", key, val);
+    for (size_t m = 0; m < count; m++)
+        if (!applied[m] && vals[m][0] != '\0')
+            fprintf(f, "%s = %s\n", keys[m], vals[m]);
     int bad = ferror(f);
     if (fclose(f) != 0 || bad || rename(tmp, path) != 0) {
         fprintf(stderr, "settings: cannot update %s\n", path);
         remove(tmp);
-        return -1;
+        goto out;
     }
-    return 0;
+    ret = 0;
+
+out:
+    pthread_mutex_unlock(&settings_mu);
+    free(applied);
+    return ret;
+}
+
+int settings_set(const char *key, const char *val)
+{
+    const char *const keys[] = { key };
+    const char *const vals[] = { val };
+    return settings_set_many(keys, vals, 1);
 }

@@ -16,4 +16,10 @@ int settings_get(const char *key, char *val, size_t len);
  * An empty value removes the key. Returns 0 on success. */
 int settings_set(const char *key, const char *val);
 
+/* Apply count key/value pairs as ONE atomic replace, so no reader can
+ * observe a half-applied multi-key update. Same per-key semantics as
+ * settings_set. Mutations are serialized process-wide. */
+int settings_set_many(const char *const *keys, const char *const *vals,
+                      size_t count);
+
 #endif

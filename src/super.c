@@ -571,6 +571,9 @@ int super_controller_stop(void)
     pthread_mutex_lock(&mu);
     suspended = 1;
     int ok = wait_for(pred_child_gone, 15.0) == 0;
+    if (!ok)
+        suspended = 0;  /* takeover failed: resume normal supervision so
+                         * the machine is never left controller-less */
     pthread_mutex_unlock(&mu);
     return ok ? 0 : -1;
 }

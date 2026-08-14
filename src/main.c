@@ -684,12 +684,25 @@ static int cb_settings_post(const struct _u_request *req,
         return reply_error(res, 400,
             "cool_temp_resume must be below cool_temp_max");
 
+    /* One atomic write for the whole request: no reader (grblHAL at $H,
+     * gfhome at session start) can observe it half-applied, and a
+     * concurrent writer cannot interleave between the keys. */
+    const char *keys[N_SETTINGS], *vals[N_SETTINGS];
+    size_t nset = 0;
     for (size_t i = 0; i < N_SETTINGS; i++) {
         const char *v = setting_param(req, setting_defs[i].key);
         if (!v)
             continue;
-        if (settings_set(setting_defs[i].key, v) != 0)
-            return reply_error(res, 500, "cannot write settings file");
+        keys[nset] = setting_defs[i].key;
+        vals[nset] = v;
+        nset++;
+    }
+    if (settings_set_many(keys, vals, nset) != 0)
+        return reply_error(res, 500, "cannot write settings file");
+    for (size_t i = 0; i < N_SETTINGS; i++) {
+        const char *v = setting_param(req, setting_defs[i].key);
+        if (!v)
+            continue;
         fprintf(stderr, "forgectrl: %s %s\n", setting_defs[i].key,
                 !v[0] ? "cleared" :
                 setting_defs[i].secret ? "set" : v);

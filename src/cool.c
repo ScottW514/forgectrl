@@ -889,9 +889,19 @@ void cool_shutdown(void)
     pthread_mutex_unlock(&mu);
     if (was)
         pthread_join(engine_th, NULL);
+    /* The heater is this engine's own flow-check heat source; off is
+     * always the right parting state, job or no job. */
     heater_set_pct(0);
-    fans_idle();
-    unlink(VERDICT_FILE);   /* missing file = fire blocked at readers */
+    /* A busy machine keeps its orphaned controller running (see
+     * super_shutdown), so idling the fans here would drop exhaust under
+     * a live cut, and unlinking the verdict would feed-hold it the
+     * moment a reader notices. Leave both alone: an aging verdict file
+     * reads exactly like a stopped engine within the 2 s staleness
+     * window, and the restarted daemon reasserts the right posture. */
+    if (machine_is_idle()) {
+        fans_idle();
+        unlink(VERDICT_FILE);   /* missing file = fire blocked at readers */
+    }
 }
 
 int cool_state_report(const char *mode, int armed,
