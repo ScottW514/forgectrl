@@ -177,6 +177,28 @@ report job state and enforce the published verdict in-process, and they write
 no thermal hardware except through the emergency fallback described under the
 verdict file.
 
+The engine also runs the **physical-evidence witnesses** at its 1 Hz tick:
+
+- **Emission**: `cnc/laser_on_sampled` counts the last ~1 s window's emitting
+  samples on the gated output of the hardware AND-gate — evidence, not a
+  commanded state. Emission with no armed window in the recent past gets the
+  hung-controller treatment (`cnc/stop` + `cnc/laser_latch=1`, repeated while
+  the evidence persists). Power-good degradation during an armed window is
+  warned once per session.
+- **Lid IR fire watch**: the four `pic/lid_ir_*` channels are polled every
+  tick; each job logs its baseline and peaks (the characterization dataset).
+  When `cool_fire_ir_delta` is nonzero, a rise above the run-start baseline on
+  any channel sustained for two ticks is a FIRE signal: motion stopped, latch
+  locked, verdict `FIRE` with `hold` until the next run session, smoke-clear
+  airflow held. The delta ships 0 (watch-only) until the sensors are
+  characterized on the bench. `/cool/status` carries the watch state as
+  `fire_watch: watch | armed | ALARM`.
+- **Telemetry**: `cnc/faults` transitions to nonzero during a run window are
+  warned; `pic/hv_current` (the only live HV telemetry) is ranged per job in
+  the same log line. `/status` exposes the sampled laser evidence, faults, HV,
+  and lid IR values; the panel's latch row is labeled *commanded*, with the
+  sensed emission row beside it.
+
 ### Job-state reports (controller → forgectrl)
 
 `POST /cool/state`, query or form parameters:
@@ -219,7 +241,7 @@ rename) at ~1 Hz and on every verdict change:
 
 - `ts_mono` is `CLOCK_MONOTONIC` seconds. **Readers must treat a missing file
   or `ts_mono` older than 2 s as `fire_ok=false, hold=true`.**
-- `verdict`: `OK | SUSPECT | FAULT | OVERTEMP`. `hold=true` asks the active
+- `verdict`: `OK | SUSPECT | FAULT | OVERTEMP | FIRE`. `hold=true` asks the active
   controller for a feed hold; `resume_ok=true` signals recovery below the
   resume gate (auto-resume is the controller's call).
 - **Enforcement stays in the controller.** The fire gate and hold/resume

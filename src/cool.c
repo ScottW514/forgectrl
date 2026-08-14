@@ -52,6 +52,18 @@
  *   it recovers (resume_ok) once the temp is back under the resume
  *   gate. The upstream sensor gates because it reads the coolant
  *   entering the tube.
+ * - Physical-evidence witnesses (1 Hz, alongside the loop): the
+ *   kernel's sampled LASER_ON count is the ground truth of emission
+ *   (the gated output of the hardware AND-gate, not a commanded
+ *   state). Emission sensed with no armed window in the recent past
+ *   stops motion and locks the latch; laser power-good degradation
+ *   during an armed window is warned. The four lid IR channels are
+ *   polled every tick: their run-start baseline and session peaks are
+ *   logged every job (the commissioning dataset), and when
+ *   cool_fire_ir_delta is nonzero a sustained rise above baseline on
+ *   any channel is a FIRE signal - motion stopped, latch locked,
+ *   verdict FIRE with hold until the next run session. The delta ships
+ *   0 (watch-only) until the sensors are characterized on the bench.
  * - Controller silence: if the active controller stops reporting past
  *   REPORT_TIMEOUT_S, fire_ok goes false immediately and the engine
  *   stands down through the normal cooldown path (smoke clear is the
@@ -195,6 +207,14 @@
  * a marginal pump or recurring airlock. */
 #define FLOW_TREND_N       3
 
+/* Lid IR fire watch: ADC counts of rise above the run-start baseline
+ * that read as a fire signal, sustained for FIRE_IR_TICKS consecutive
+ * ticks. 0 = watch-only (log the dataset, never trip) - the shipped
+ * default until the sensors are characterized on the bench and
+ * cool_fire_ir_delta is set. GFCOOL_FIRE_IR_DELTA overrides. */
+#define FIRE_IR_DELTA      0
+#define FIRE_IR_TICKS      2
+
 typedef enum {
     Cool_Idle = 0,
     Cool_Run,
@@ -262,6 +282,19 @@ static int forced_cool = 0;         /* over-temp overrode the phase fans */
 static int flood_on = 0;            /* effective run window */
 static int silent_warned = 0;
 static int silent_safed = 0;        /* hang dead-man fired this episode */
+
+/* Physical-evidence witnesses. */
+static uint32_t fire_ir_delta = FIRE_IR_DELTA;  /* 0 = watch-only */
+static double last_armed_at = -1.0; /* last fresh armed report seen */
+static int emission_warned = 0;
+static int pgood_warned = 0;        /* once per run session */
+static long last_faults = 0;
+static long ir_base[4] = {-1, -1, -1, -1};  /* run-session baseline */
+static long ir_peak[4];
+static int ir_over_ticks = 0;
+static int fire_alarm = 0;          /* latched lid-IR fire signal */
+static long hv_lo = -1, hv_hi = -1; /* session hv_current range */
+static const char *pub_fire_watch = "watch";
 static int diag_had = 0;            /* diagnostics held the hardware */
 static long run_duty[3] = {-1, -1, -1};
 static unsigned long verdict_seq = 0;
@@ -433,6 +466,8 @@ static struct {
       FLOW_FAULT_RISE_C,      &flow_fault_rise, NULL, 0 },
     { "GFCOOL_CONFIRM_MAX_S",   "cool_confirm_max_s",
       FLOW_CONFIRM_MAX_S,     NULL,             &confirm_max_s, 0 },
+    { "GFCOOL_FIRE_IR_DELTA",   "cool_fire_ir_delta",
+      FIRE_IR_DELTA,          NULL,             &fire_ir_delta, 0 },
 };
 
 static void conf_reload(void)
@@ -522,6 +557,15 @@ static void flood_apply(int on, double now)
             flow_pending_since = now;
             flow_settle_warned = 0;
         }
+        /* New run session: fresh lid-IR baseline and hv range, and a
+         * standing fire alarm clears - a new job means the operator is
+         * back at the machine. */
+        for (int i = 0; i < 4; i++)
+            ir_base[i] = -1;
+        ir_over_ticks = 0;
+        fire_alarm = 0;
+        pgood_warned = 0;
+        hv_lo = hv_hi = -1;
     } else if (cool_state == Cool_Run) {
         cool_state = Cool_Smoke;
         phase_until = now + (double)smoke_s;
@@ -529,6 +573,18 @@ static void flood_apply(int on, double now)
         if (flow_check_active) {    /* run ended before the verdict */
             flow_check_active = 0;
             heater_set_pct(0);
+        }
+        /* The commissioning dataset: one line per job of what the fire
+         * and HV sensors saw. */
+        if (ir_base[0] >= 0) {
+            char msg[160];
+            snprintf(msg, sizeof(msg),
+                     "run telemetry: lid IR %ld/%ld/%ld/%ld peak "
+                     "%ld/%ld/%ld/%ld, hv raw %ld..%ld",
+                     ir_base[0], ir_base[1], ir_base[2], ir_base[3],
+                     ir_peak[0], ir_peak[1], ir_peak[2], ir_peak[3],
+                     hv_lo, hv_hi);
+            info(msg);
         }
     }
 }
@@ -620,6 +676,98 @@ static void engine_tick(void)
             pthread_mutex_unlock(&mu);
         }
     }
+
+    /* Emission witness: laser_on_sampled counts the ~1 s window's
+     * emitting samples on the gated output of the hardware AND-gate -
+     * physical evidence, not a commanded state. Emission with no armed
+     * window in the recent past (3 s covers the sample-window lag plus
+     * the job-end tail) gets the same treatment as a hung controller.
+     * The stop repeats while the evidence persists. */
+    if (fresh && armed)
+        last_armed_at = now;
+    long em = rd_long("cnc/laser_on_sampled");
+    if (em > 0 && (last_armed_at < 0 || now - last_armed_at > 3.0)) {
+        if (!emission_warned)
+            warn("LASER EMISSION SENSED with no armed window - "
+                 "stopping motion, locking laser");
+        emission_warned = 1;
+        wr_attr("cnc/stop", "1");
+        wr_attr("cnc/laser_latch", "1");
+    } else if (em == 0)
+        emission_warned = 0;
+
+    /* Power-good witness: warn once per session when the majority of
+     * the sampled window read not-good while the window was armed. */
+    if (fresh && armed && !pgood_warned) {
+        long pg = rd_long("cnc/laser_pgood_sampled");
+        if (pg >= 0 && pg < 128) {
+            pgood_warned = 1;
+            warn("laser power-good degraded during the armed window");
+        }
+    }
+
+    /* Stepper-fault visibility: the kernel latches triggered faults;
+     * surface a transition to nonzero during the run window. */
+    long faults = rd_long("cnc/faults");
+    if (faults > 0 && faults != last_faults && flood_on) {
+        char msg[64];
+        snprintf(msg, sizeof(msg),
+                 "stepper driver fault reported (mask %ld)", faults);
+        warn(msg);
+    }
+    if (faults >= 0)
+        last_faults = faults;
+
+    /* Lid IR fire watch + HV range. Baseline is the first complete
+     * reading of the run session; peaks build the commissioning
+     * dataset; the abort gate only arms once cool_fire_ir_delta is
+     * set from a characterized baseline. */
+    long ir[4];
+    int have_ir = 1;
+    for (int i = 0; i < 4; i++) {
+        char attr[20];
+        snprintf(attr, sizeof(attr), "pic/lid_ir_%d", i + 1);
+        ir[i] = rd_long(attr);
+        if (ir[i] < 0)
+            have_ir = 0;
+    }
+    if (have_ir && cool_state == Cool_Run) {
+        if (ir_base[0] < 0) {
+            for (int i = 0; i < 4; i++)
+                ir_base[i] = ir_peak[i] = ir[i];
+        } else {
+            int over = 0;
+            for (int i = 0; i < 4; i++) {
+                if (ir[i] > ir_peak[i])
+                    ir_peak[i] = ir[i];
+                if (fire_ir_delta > 0 &&
+                    ir[i] - ir_base[i] > (long)fire_ir_delta)
+                    over = 1;
+            }
+            ir_over_ticks = over ? ir_over_ticks + 1 : 0;
+            if (ir_over_ticks >= FIRE_IR_TICKS && !fire_alarm) {
+                fire_alarm = 1;
+                warn("LID IR FIRE SIGNAL - motion stopped, laser "
+                     "locked, smoke airflow held");
+                wr_attr("cnc/stop", "1");
+                wr_attr("cnc/laser_latch", "1");
+                fans_run();     /* full smoke-clear airflow */
+            }
+        }
+    }
+    if (cool_state == Cool_Run) {
+        long hv = rd_long("pic/hv_current");
+        if (hv >= 0) {
+            if (hv_lo < 0 || hv < hv_lo)
+                hv_lo = hv;
+            if (hv > hv_hi)
+                hv_hi = hv;
+        }
+    }
+    pthread_mutex_lock(&mu);
+    pub_fire_watch = fire_alarm ? "ALARM"
+                   : fire_ir_delta > 0 ? "armed" : "watch";
+    pthread_mutex_unlock(&mu);
 
     float down = 0, up = 0;
     int have_down = read_temp("pic/water_temp_1", &down);
@@ -815,11 +963,14 @@ static void engine_tick(void)
      * hold, resume_ok (= !hold) signals recovery, fire_ok gates the
      * laser. fire_ok additionally requires a live report: an armed
      * window the engine cannot see must not fire. */
-    const char *verdict = over_temp_gate ? "OVERTEMP"
+    const char *verdict = fire_alarm ? "FIRE"
+                        : over_temp_gate ? "OVERTEMP"
                         : flow_verdict == Flow_Fault ? "FAULT"
                         : flow_verdict == Flow_Suspect ? "SUSPECT" : "OK";
-    int hold = over_temp_gate || (armed && flow_verdict != Flow_Normal);
-    int fire_ok = fresh && !over_temp_gate && flow_verdict != Flow_Fault;
+    int hold = fire_alarm || over_temp_gate
+             || (armed && flow_verdict != Flow_Normal);
+    int fire_ok = fresh && !fire_alarm && !over_temp_gate
+                && flow_verdict != Flow_Fault;
 
     pthread_mutex_lock(&mu);
     pub_phase = cool_state == Cool_Run ? "run"
@@ -943,10 +1094,10 @@ int cool_status_json(char *buf, size_t len)
     snprintf(buf, len,
         "{\"phase\":\"%s\",\"verdict\":\"%s\",\"fire_ok\":%s,"
         "\"hold\":%s,\"reason\":\"%s\",\"down_c\":%.2f,\"up_c\":%.2f,"
-        "\"report_age_s\":%.1f,\"armed\":%s}",
+        "\"report_age_s\":%.1f,\"armed\":%s,\"fire_watch\":\"%s\"}",
         pub_phase, pub_verdict, pub_fire_ok ? "true" : "false",
         pub_hold ? "true" : "false", pub_reason, pub_down, pub_up,
-        age, rep_armed ? "true" : "false");
+        age, rep_armed ? "true" : "false", pub_fire_watch);
     pthread_mutex_unlock(&mu);
     return 0;
 }

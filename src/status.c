@@ -23,12 +23,31 @@
 #include <fcntl.h>
 #include <linux/input.h>
 #include <math.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+
+/* Append into a fixed buffer, keeping the running offset within bounds
+ * (snprintf returns the would-have-written length, so an unclamped
+ * accumulator can underflow the next `size - off`). */
+static void append(char *buf, size_t size, size_t *off, const char *fmt, ...)
+{
+    if (*off >= size)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + *off, size - *off, fmt, ap);
+    va_end(ap);
+    if (n < 0)
+        return;
+    *off += (size_t)n;
+    if (*off >= size)
+        *off = size - 1;                /* truncated; keep off in range */
+}
 
 #define GF_SYSFS       "/sys/glowforge/"
 #define HOMED_ANCHOR   "/run/grblhal.homed"
@@ -226,24 +245,49 @@ int machine_status_json(char *buf, size_t len)
     unsigned long sw = read_switches();
 
     size_t off = 0;
-    off += (size_t)snprintf(buf + off, len - off,
+    append(buf, len, &off,
         "{\"state\":\"%s\",\"homed\":%s,\"diag\":%s,",
         state[0] ? state : "unknown", homed ? "true" : "false",
         diag_running() ? "true" : "false");
     if (have_pos)
-        off += (size_t)snprintf(buf + off, len - off,
+        append(buf, len, &off,
             "\"pos\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f},", x, y, z);
+    /* laser_locked is the COMMANDED latch state (interlock_circuit
+     * bit 3 is a driven output read back from the data register - what
+     * the SoC last drove, not a sense of the pad). The physical
+     * evidence is the sampled block below: emission_samples counts the
+     * ~1 s window's samples with the gated LASER_ON output active,
+     * pgood_samples counts power-good samples (255 = good all window). */
     if (ilk >= 0)
-        off += (size_t)snprintf(buf + off, len - off,
+        append(buf, len, &off,
             "\"laser_locked\":%s,", (ilk & 8) ? "true" : "false");
-    off += (size_t)snprintf(buf + off, len - off,
+    long em = rd_attr_long("cnc/laser_on_sampled", -1);
+    long pg = rd_attr_long("cnc/laser_pgood_sampled", -1);
+    if (em >= 0 && pg >= 0)
+        append(buf, len, &off,
+            "\"laser\":{\"emission_samples\":%ld,\"pgood_samples\":%ld},",
+            em, pg);
+    long faults = rd_attr_long("cnc/faults", -1);
+    if (faults >= 0)
+        append(buf, len, &off, "\"faults\":%ld,", faults);
+    long hv = rd_attr_long("pic/hv_current", -1);
+    if (hv >= 0)
+        append(buf, len, &off, "\"hv_current_raw\":%ld,", hv);
+    long ir1 = rd_attr_long("pic/lid_ir_1", -1);
+    long ir2 = rd_attr_long("pic/lid_ir_2", -1);
+    long ir3 = rd_attr_long("pic/lid_ir_3", -1);
+    long ir4 = rd_attr_long("pic/lid_ir_4", -1);
+    if (ir1 >= 0 && ir2 >= 0 && ir3 >= 0 && ir4 >= 0)
+        append(buf, len, &off,
+            "\"lid_ir\":[%ld,%ld,%ld,%ld],", ir1, ir2, ir3, ir4);
+    append(buf, len, &off,
         "\"fans\":{\"air_assist\":%ld,\"exhaust\":%ld,"
         "\"intake_1\":%ld,\"intake_2\":%ld},",
         air_rpm(rd_attr_long("head/air_assist_tach", 0)),
         fan_rpm(rd_attr_long("thermal/tach_exhaust", 0)),
         fan_rpm(rd_attr_long("thermal/tach_intake_1", 0)),
         fan_rpm(rd_attr_long("thermal/tach_intake_2", 0)));
-    off += (size_t)snprintf(buf + off, len - off,
+    append(buf, len, &off,
         "\"coolant\":{\"down_c\":%.1f,\"up_c\":%.1f,\"pump\":%s,\"tec\":%s},",
         coolant_degc(t1), coolant_degc(t2),
         rd_attr_long("thermal/water_pump_on", 0) ? "true" : "false",
@@ -251,10 +295,10 @@ int machine_status_json(char *buf, size_t len)
     char gf_latest[32], gf_tested[32];
     read_gf_latest(gf_latest, sizeof(gf_latest), gf_tested, sizeof(gf_tested));
     if (gf_latest[0] && gf_tested[0])
-        off += (size_t)snprintf(buf + off, len - off,
+        append(buf, len, &off,
             "\"gfsvc\":{\"latest\":\"%s\",\"tested\":\"%s\"},",
             gf_latest, gf_tested);
-    snprintf(buf + off, len - off,
+    append(buf, len, &off,
         "\"switches\":{\"lid\":%s,\"button\":%s,\"interlock_ok\":%s,"
         "\"head\":%s,\"estop\":%s}}",
         (sw & (1u << 3)) ? "true" : "false",

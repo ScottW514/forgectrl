@@ -603,7 +603,7 @@ static int cb_machine_status(const struct _u_request *req,
     (void)user_data;
     if (!auth_read_ok(req, res))
         return U_CALLBACK_COMPLETE;
-    char body[768];
+    char body[1536];
     machine_status_json(body, sizeof(body));
     ulfius_set_string_body_response(res, 200, body);
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
