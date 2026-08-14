@@ -1,4 +1,4 @@
-/*
+﻿/*
  * update.c - forgectrl: firmware update manager
  * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
  * SPDX-License-Identifier: MIT
@@ -129,6 +129,23 @@ static int run_cmd(char *out, size_t outlen, const char *cmd)
     return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 
+/* True when dev is the block device the running root filesystem lives
+ * on - or when that cannot be determined. Device-number comparison, not
+ * string matching: root= may be spelled PARTUUID=, UUID=, /dev/root, or
+ * any alias, and a guard that fails to recognize the spelling must
+ * REFUSE the write into the running slot, never permit it. */
+static int is_booted_root(const char *dev)
+{
+    struct stat r, d;
+    if (stat("/", &r) != 0)
+        return 1;                       /* cannot determine: fail closed */
+    if (stat(dev, &d) != 0 || !S_ISBLK(d.st_mode))
+        return 1;                       /* cannot determine: fail closed */
+    return r.st_dev == d.st_rdev;
+}
+
+/* The root= spelling from the kernel command line, for display only
+ * (the write guard above never trusts it). */
 static const char *booted_root(void)
 {
     static char root[32];
@@ -800,7 +817,7 @@ int cb_update_apply(const struct _u_request *req, struct _u_response *res,
     const struct slot_target *t = find_target(param(req, "slot"));
     if (!t || !t->task)
         return reply_err(res, 400, "slot must be a or b");
-    if (!strcmp(t->dev, booted_root()))
+    if (is_booted_root(t->dev))
         return reply_err(res, 409,
                          "refusing to write the booted root slot");
     if (!slot_geometry_ok(t))
@@ -1036,7 +1053,7 @@ int cb_restore_factory(const struct _u_request *req,
     const struct slot_target *t = find_target(param(req, "slot"));
     if (!t || !t->task)
         return reply_err(res, 400, "slot must be a or b");
-    if (!strcmp(t->dev, booted_root()))
+    if (is_booted_root(t->dev))
         return reply_err(res, 409,
                          "refusing to write the booted root slot");
     if (!slot_geometry_ok(t))

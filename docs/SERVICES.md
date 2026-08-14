@@ -278,6 +278,12 @@ remain only as manual emergency stops.
   escalation on its process group), persists `controller_mode`, starts the
   other, and waits for its first job-state report to reach the cooling
   engine (slow first report from the cloud client is logged, not fatal).
+- `POST /controller/stop` / `POST /controller/start` — the manual emergency
+  lever (the controller init scripts route here): stop halts the active
+  controller and HOLDS supervision suspended — deliberately **not**
+  idle-gated, and the exit safing writes run as always; start resumes
+  supervision of the selected mode. A bare `pkill` of a controller would
+  just be safed and respawned seconds later.
 - **Controller exit safing**: the supervisor safes the machine (`cnc/stop`,
   `cnc/laser_latch=1`) on **every** transition out of a running child —
   unexpected death, mode switch, diagnostics suspend, shutdown — and again

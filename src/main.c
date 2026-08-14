@@ -712,6 +712,36 @@ static int cb_settings_post(const struct _u_request *req,
     return reply_settings(res);
 }
 
+/* Manual emergency lever (the controller init scripts route their
+ * stop/start here): stop the active controller and HOLD supervision
+ * suspended - a bare pkill would be safed and respawned seconds later.
+ * Deliberately NOT idle-gated: an emergency stop must work mid-job (the
+ * supervisor's exit safing writes cnc/stop + laser latch). */
+static int cb_controller_stop(const struct _u_request *req,
+                              struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    if (super_controller_stop() != 0)
+        return reply_error(res, 500, "controller did not stop");
+    ulfius_set_string_body_response(res, 200, "{\"stopped\":true}");
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
+static int cb_controller_start(const struct _u_request *req,
+                               struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    super_controller_start();
+    ulfius_set_string_body_response(res, 200, "{\"started\":true}");
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
 /* The burned-in identity, on demand for the GF Cloud tab's viewer.
  * The values are irrevocable (fuses), so they are fetched only when
  * the operator explicitly asks to see them. */
@@ -985,6 +1015,10 @@ int main(void)
                                &cb_mode_get, NULL);
     ulfius_add_endpoint_by_val(&inst, "POST", "/mode", NULL, 0,
                                &cb_mode_post, NULL);
+    ulfius_add_endpoint_by_val(&inst, "POST", "/controller/stop", NULL, 0,
+                               &cb_controller_stop, NULL);
+    ulfius_add_endpoint_by_val(&inst, "POST", "/controller/start", NULL, 0,
+                               &cb_controller_start, NULL);
     ulfius_add_endpoint_by_val(&inst, "POST", "/cool/state", NULL, 0,
                                &cb_cool_state, NULL);
     ulfius_add_endpoint_by_val(&inst, "GET", "/cool/status", NULL, 0,

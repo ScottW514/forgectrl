@@ -17,16 +17,18 @@
 #include "settings.h"
 
 #include <ctype.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static pthread_mutex_t settings_mu = PTHREAD_MUTEX_INITIALIZER;
 
 #define SETTINGS_PATH_DEF "/data/forgefirm.conf"
-#define LINE_MAX_LEN      256
-#define FILE_MAX_LINES    64
+#define LINE_MAX_LEN      512
+#define FILE_MAX_LINES    256
 
 static const char *settings_path(void)
 {
@@ -129,6 +131,17 @@ int settings_set_many(const char *const *keys, const char *const *vals,
                 break;
             n++;
         }
+        /* NEVER rewrite a file that could not be read in full: silently
+         * dropping the tail would eat unrelated keys (controller mode,
+         * cooling tunables, cloud credentials). */
+        if (n == FILE_MAX_LINES && fgetc(f) != EOF) {
+            fprintf(stderr, "settings: %s exceeds %d lines; refusing to "
+                            "rewrite\n", path, FILE_MAX_LINES);
+            fclose(f);
+            for (int i = 0; i < n; i++)
+                free(lines[i]);
+            goto out;
+        }
         fclose(f);
     } else {
         size_t m;
@@ -157,11 +170,31 @@ int settings_set_many(const char *const *keys, const char *const *vals,
     for (size_t m = 0; m < count; m++)
         if (!applied[m] && vals[m][0] != '\0')
             fprintf(f, "%s = %s\n", keys[m], vals[m]);
+    /* fsync BEFORE the rename: under ext4 delayed allocation a power cut
+     * just after the rename can otherwise leave an empty file - losing
+     * the controller mode, cooling tunables, and cloud credentials at
+     * once. */
     int bad = ferror(f);
+    if (!bad && (fflush(f) != 0 || fsync(fileno(f)) != 0))
+        bad = 1;
     if (fclose(f) != 0 || bad || rename(tmp, path) != 0) {
         fprintf(stderr, "settings: cannot update %s\n", path);
         remove(tmp);
         goto out;
+    }
+    /* Best effort: persist the rename itself. */
+    {
+        char dir[300];
+        snprintf(dir, sizeof(dir), "%s", path);
+        char *slash = strrchr(dir, '/');
+        if (slash && slash != dir) {
+            *slash = '\0';
+            int dfd = open(dir, O_RDONLY | O_DIRECTORY);
+            if (dfd >= 0) {
+                fsync(dfd);
+                close(dfd);
+            }
+        }
     }
     ret = 0;
 

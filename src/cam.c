@@ -860,7 +860,10 @@ static void *worker(void *arg)
                 stat_copy_ms += ts_diff(&c2, &c1) * 1e3;
                 stat_conv_ms += ts_diff(&e1, &e0) * 1e3;
                 stat_enc_ms += ts_diff(&e2, &e1) * 1e3;
-                if (++stat_n >= 100) {
+                /* ~every 11 min of streaming, not every ~7 s: LightBurn
+                 * keeps a stream open for whole sessions, and /data is
+                 * the persistent partition settings and updates live on. */
+                if (++stat_n >= 10000) {
                     fprintf(stderr, "cam: stream stats: dqbuf %.0f ms, "
                             "copy %.0f ms, convert %.0f ms, encode %.0f ms "
                             "avg (%s, %s)\n",

@@ -42,11 +42,14 @@ case "$1" in
   stop)
     echo "Stopping forgectrl"
     start-stop-daemon -K -q -p $PIDFILE
-    # Catch a daemon orphaned by a dead wrapper. A shell script's process
-    # name is its own basename, so this must skip this very script - a
-    # blind name match would terminate it and "restart" would never start.
+    # Catch a daemon orphaned by a dead wrapper. Match the actual
+    # executable, never the process name: this script - and the parent
+    # shell of a "restart", which runs stop as a child - are also named
+    # forgectrl, and a name match killed the restart before it could
+    # reach start. Only a process whose exe IS the daemon binary dies.
     for p in $(pidof forgectrl 2>/dev/null); do
-      [ "$p" = "$$" ] || kill $p 2>/dev/null
+      [ "$(readlink -f /proc/$p/exe 2>/dev/null)" = "$DAEMON" ] && \
+        kill $p 2>/dev/null
     done
     rm -f $PIDFILE
     ;;
