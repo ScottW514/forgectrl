@@ -403,7 +403,7 @@ static void apply_wifi(int set_region)
     /* Reload the database first: when cfg80211 initialized before the
      * rootfs was mounted, its boot-time regulatory.db load failed and
      * stays failed until an explicit reload. */
-    system("iw reg reload >/dev/null 2>&1");
+    (void)!system("iw reg reload >/dev/null 2>&1");
     /* The kernel already defaults to the world domain; hinting 00 on
      * top of it only produces a cosmetic "country 98" intersection.
      * 00 is set only to revert from a previously applied region. */
@@ -960,7 +960,7 @@ int main(void)
 
     /* Stay well below the motion feeder (SCHED_FIFO) and the controller;
      * best effort. */
-    (void)nice(5);
+    (void)!nice(5);
 
     /* The daemon is the dead-man for hung controllers and the sole
      * cooling-hardware writer: under memory pressure it must outlive

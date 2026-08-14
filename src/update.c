@@ -451,16 +451,18 @@ int cb_slots(const struct _u_request *req, struct _u_response *res,
         for (size_t t = 0; t < N_TARGETS; t++) {
             if (strcmp(ln + 5, targets[t].name))
                 continue;
+            /* Explicit precisions: ffboot's values are truncated to
+             * each field's capacity by design. */
             if (!strcmp(field, "present"))
-                snprintf(si[t].present, sizeof(si[t].present), "%s", val);
+                snprintf(si[t].present, sizeof(si[t].present), "%.7s", val);
             else if (!strcmp(field, "state"))
-                snprintf(si[t].state, sizeof(si[t].state), "%s", val);
+                snprintf(si[t].state, sizeof(si[t].state), "%.15s", val);
             else if (!strcmp(field, "type"))
-                snprintf(si[t].type, sizeof(si[t].type), "%s", val);
+                snprintf(si[t].type, sizeof(si[t].type), "%.15s", val);
             else if (!strcmp(field, "version"))
-                snprintf(si[t].version, sizeof(si[t].version), "%s", val);
+                snprintf(si[t].version, sizeof(si[t].version), "%.63s", val);
             else if (!strcmp(field, "kernel"))
-                snprintf(si[t].kernel, sizeof(si[t].kernel), "%s", val);
+                snprintf(si[t].kernel, sizeof(si[t].kernel), "%.7s", val);
             else if (!strcmp(field, "booted"))
                 si[t].booted = 1;
             else if (!strcmp(field, "next"))

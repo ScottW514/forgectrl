@@ -94,10 +94,10 @@ static void takeover_unmanaged(void)
 {
     fprintf(stderr, "forgectrl: super: taking over from unmanaged "
                     "controller\n");
-    system("/etc/init.d/grblhal stop >/dev/null 2>&1");
-    system("/etc/init.d/gfcloud stop >/dev/null 2>&1");
-    system("pkill -x grblHAL_glowfor 2>/dev/null");
-    system("pkill -f '[g]fcloud\\.py' 2>/dev/null");
+    (void)!system("/etc/init.d/grblhal stop >/dev/null 2>&1");
+    (void)!system("/etc/init.d/gfcloud stop >/dev/null 2>&1");
+    (void)!system("pkill -x grblHAL_glowfor 2>/dev/null");
+    (void)!system("pkill -f '[g]fcloud\\.py' 2>/dev/null");
     sleep(1);
 }
 

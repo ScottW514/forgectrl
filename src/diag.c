@@ -200,6 +200,10 @@ static void dlog(const char *fmt, ...)
     va_end(ap);
     pthread_mutex_lock(&mu);
     long el = (long)(time(NULL) - st_started);
+    if (el < 0)
+        el = 0;
+    if (el > 5999)
+        el = 5999;                  /* display cap 99:59 */
     snprintf(logbuf[log_n % LOG_LINES], LOG_LEN, "%3ld:%02ld  %s",
              el / 60, el % 60, line);
     log_n++;
