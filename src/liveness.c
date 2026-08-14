@@ -31,12 +31,34 @@
 #include "liveness.h"
 
 #include <fcntl.h>
+#include <linux/input.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
+
+/* EV_SW bits (device tree): 3 = doors (combined), 5 = remote interlock
+ * (active-when-open). The probe moves the gantry, so it must never run
+ * with an opening the operator could reach into. */
+#define SWITCH_DEV       "/dev/input/event0"
+#define SW_BIT_DOORS     3
+#define SW_BIT_INTERLOCK 5
+
+static int enclosure_open(void)
+{
+    uint8_t sw[2] = { 0 };
+    int fd = open(SWITCH_DEV, O_RDONLY | O_NONBLOCK);
+    if (fd < 0)
+        return 0;                       /* cannot read: do not block motion */
+    int ok = ioctl(fd, EVIOCGSW(sizeof(sw)), sw) >= 0;
+    close(fd);
+    if (!ok)
+        return 0;
+    return (sw[0] & (1u << SW_BIT_DOORS)) || (sw[0] & (1u << SW_BIT_INTERLOCK));
+}
 
 /* Head accelerometer: iio device on i2c-3 addr 0x1e (glowforge.dts
  * head-accel). Resolved by bus path, never by iio index - probe order
@@ -140,6 +162,13 @@ int liveness_probe(int pulse_fd, char *detail, size_t dlen)
     }
     if (rd_attr("cnc/state", st, sizeof(st)) != 0 || strcmp(st, "idle")) {
         snprintf(detail, dlen, "kernel not idle (%s)", st);
+        return -1;
+    }
+    if (enclosure_open()) {
+        /* A lid or interlock is open: do not drive the gantry. Report
+         * "cannot probe" so the supervisor proceeds without marking a
+         * motion fault - the probe re-runs on the next spawn. */
+        snprintf(detail, dlen, "door/interlock open - motion probe skipped");
         return -1;
     }
 

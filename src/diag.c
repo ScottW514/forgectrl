@@ -519,10 +519,13 @@ int diag_status_json(char *buf, size_t len)
         st_running ? (long)(time(NULL) - st_started) : 0,
         st_down, st_up);
     int first = log_n > LOG_LINES ? log_n - LOG_LINES : 0;
-    for (int i = first; i < log_n && off < len - 8; i++)
+    for (int i = first; i < log_n && off < len - 8; i++) {
         off += (size_t)snprintf(buf + off, len - off, "%s\"%s\"",
                                 i > first ? "," : "",
                                 logbuf[i % LOG_LINES]);
+        if (off >= len)             /* a long line overshot: stop appending */
+            off = len - 1;
+    }
     snprintf(buf + off, len - off, "],\"result\":%s}",
              st_result[0] ? st_result : "null");
     pthread_mutex_unlock(&mu);

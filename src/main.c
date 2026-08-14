@@ -29,6 +29,7 @@
  * callback may block waiting for the next frame.
  */
 #define _GNU_SOURCE
+#include "auth.h"
 #include "cam.h"
 #include "cool.h"
 #include "diag.h"
@@ -40,9 +41,11 @@
 
 #include <ctype.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <ulfius.h>
 #include <unistd.h>
 
@@ -180,6 +183,8 @@ static int cb_stream(const struct _u_request *req, struct _u_response *res,
                      void *user_data)
 {
     (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
     int ok;
     cam_id_t cam = parse_cam(req, &ok);
     if (!ok)
@@ -191,6 +196,8 @@ static int cb_snapshot(const struct _u_request *req, struct _u_response *res,
                        void *user_data)
 {
     (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
     int ok;
     cam_id_t cam = parse_cam(req, &ok);
     if (!ok)
@@ -222,8 +229,9 @@ static int cb_snapshot(const struct _u_request *req, struct _u_response *res,
 static int cb_status(const struct _u_request *req, struct _u_response *res,
                      void *user_data)
 {
-    (void)req;
     (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
     struct cam_status st;
     cam_get_status(&st);
     char body[320];
@@ -268,9 +276,16 @@ static int valid_controller_mode(const char *v)
     return !strcmp(v, "grbl") || !strcmp(v, "cloud");
 }
 
+/* Numeric values are short by construction; a long-but-valid string
+ * (e.g. "000...0033.0") is rejected here so the settings-report buffer
+ * math can never be driven to overflow by an accepted value. */
+#define VALUE_MAX_LEN 16
+
 static int valid_mm(const char *v)
 {
     char *end;
+    if (strlen(v) > VALUE_MAX_LEN)
+        return 0;
     double f = strtod(v, &end);
     return end != v && *end == '\0' && f >= -1000.0 && f <= 1000.0;
 }
@@ -278,6 +293,8 @@ static int valid_mm(const char *v)
 static int valid_timeout(const char *v)
 {
     char *end;
+    if (strlen(v) > VALUE_MAX_LEN)
+        return 0;
     long t = strtol(v, &end, 10);
     return end != v && *end == '\0' && t >= 30 && t <= 3600;
 }
@@ -325,16 +342,24 @@ static int valid_country(const char *v)
 static int valid_range(const char *v, double lo, double hi)
 {
     char *end;
+    if (strlen(v) > VALUE_MAX_LEN)
+        return 0;
     double f = strtod(v, &end);
     return end != v && *end == '\0' && f >= lo && f <= hi;
 }
 
-static int valid_rise_c(const char *v)     { return valid_range(v, 1, 30); }
+/* The flow-rise threshold must stay below the no-flow rise the bench
+ * measured (~16 C over the check window): above it the interrogation can
+ * never fault, so the machine would fire with the pump stopped. Capped
+ * well under that. The over-temp ceiling is capped near the factory
+ * window (~33 C) so it cannot be lifted into a range where the tube runs
+ * hot without faulting. */
+static int valid_rise_c(const char *v)     { return valid_range(v, 1, 15); }
 static int valid_heater_pct(const char *v) { return valid_range(v, 0, 100); }
 static int valid_check_s(const char *v)    { return valid_range(v, 0, 300); }
 static int valid_recheck_s(const char *v)  { return valid_range(v, 0, 3600); }
 static int valid_confirm_s(const char *v)  { return valid_range(v, 60, 3600); }
-static int valid_temp_c(const char *v)     { return valid_range(v, 5, 45); }
+static int valid_temp_c(const char *v)     { return valid_range(v, 5, 38); }
 static int valid_cool_s(const char *v)     { return valid_range(v, 0, 1800); }
 
 static const struct {
@@ -505,15 +530,35 @@ static void read_fw_version(char *buf, size_t len)
     buf[o] = '\0';
 }
 
+/* Append into a fixed buffer, keeping the running offset within bounds:
+ * snprintf returns the would-have-written length, so an unclamped
+ * accumulator can run past the buffer and underflow the next
+ * `size - off`. Clamped here so every subsequent append is a safe no-op
+ * once the buffer is full. */
+static void append(char *buf, size_t size, size_t *off, const char *fmt, ...)
+{
+    if (*off >= size)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + *off, size - *off, fmt, ap);
+    va_end(ap);
+    if (n < 0)
+        return;
+    *off += (size_t)n;
+    if (*off >= size)
+        *off = size - 1;                /* truncated; keep off in range */
+}
+
 static int reply_settings(struct _u_response *res)
 {
-    char body[2048], val[128], mid[16], fwver[48];
+    char body[3072], val[128], mid[16], fwver[48];
     size_t off = 0;
 
     read_fw_version(fwver, sizeof(fwver));
     machine_id(mid, sizeof(mid));
 
-    off += (size_t)snprintf(body + off, sizeof(body) - off, "{");
+    append(body, sizeof(body), &off, "{");
     for (size_t i = 0; i < N_SETTINGS; i++) {
         /* A value that fails its own validator (hand-edited file) is
          * reported as unset rather than leaking arbitrary bytes into
@@ -521,16 +566,22 @@ static int reply_settings(struct _u_response *res)
         int have = settings_get(setting_defs[i].key, val, sizeof(val)) == 0 &&
                    setting_defs[i].valid(val);
         if (setting_defs[i].secret)
-            off += (size_t)snprintf(body + off, sizeof(body) - off,
-                                    "\"%s_set\":%s,", setting_defs[i].key,
-                                    have ? "true" : "false");
+            append(body, sizeof(body), &off, "\"%s_set\":%s,",
+                   setting_defs[i].key, have ? "true" : "false");
         else
-            off += (size_t)snprintf(body + off, sizeof(body) - off,
-                                    "\"%s\":\"%s\",", setting_defs[i].key,
-                                    have ? val : "");
+            append(body, sizeof(body), &off, "\"%s\":\"%s\",",
+                   setting_defs[i].key, have ? val : "");
     }
-    snprintf(body + off, sizeof(body) - off,
-             "\"version\":\"%s\",\"machine_id\":\"%s\"}", fwver, mid);
+    /* A zero flow-check window disables coolant-flow interrogation
+     * entirely - a real machine state the panel must surface loudly
+     * rather than present as a bare "0". */
+    char fcs[128];
+    int flow_off = settings_get("cool_flow_check_s", fcs, sizeof(fcs)) == 0 &&
+                   strtod(fcs, NULL) == 0.0;
+    append(body, sizeof(body), &off,
+           "\"flow_checks_disabled\":%s,", flow_off ? "true" : "false");
+    append(body, sizeof(body), &off,
+           "\"version\":\"%s\",\"machine_id\":\"%s\"}", fwver, mid);
     ulfius_set_string_body_response(res, 200, body);
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
     return U_CALLBACK_CONTINUE;
@@ -539,16 +590,18 @@ static int reply_settings(struct _u_response *res)
 static int cb_settings_get(const struct _u_request *req,
                            struct _u_response *res, void *user_data)
 {
-    (void)req;
     (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
     return reply_settings(res);
 }
 
 static int cb_machine_status(const struct _u_request *req,
                              struct _u_response *res, void *user_data)
 {
-    (void)req;
     (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
     char body[768];
     machine_status_json(body, sizeof(body));
     ulfius_set_string_body_response(res, 200, body);
@@ -563,11 +616,34 @@ static const char *setting_param(const struct _u_request *req,
     return v ? v : u_map_get(req->map_url, key);
 }
 
+/* Effective value of a cooling temperature key for cross-field checks:
+ * the request value if this POST sets it, else the persisted value, else
+ * the compiled default. Returns 0 and leaves *out untouched on a key
+ * that is neither in the request nor stored (its default stands). */
+static int effective_temp(const struct _u_request *req, const char *key,
+                          double dflt, double *out)
+{
+    const char *v = setting_param(req, key);
+    char stored[128];
+    if (v && v[0])
+        *out = strtod(v, NULL);
+    else if (v && !v[0])
+        *out = dflt;                    /* this POST clears it */
+    else if (settings_get(key, stored, sizeof(stored)) == 0 && stored[0])
+        *out = strtod(stored, NULL);
+    else
+        *out = dflt;
+    return 0;
+}
+
 static int cb_settings_post(const struct _u_request *req,
                             struct _u_response *res, void *user_data)
 {
     (void)user_data;
     int present = 0;
+
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
 
     /* Settings are locked whenever the machine is not idle: the
      * controller and the homing runner both read this file mid-run.
@@ -595,6 +671,18 @@ static int cb_settings_post(const struct _u_request *req,
     if (!present)
         return reply_error(res, 400, "no known setting in request");
 
+    /* Cross-field cooling safety: the resume ceiling must not sit at or
+     * above the over-temp ceiling, or the hysteresis inverts and the
+     * machine can resume into an over-temperature it never leaves. The
+     * per-key validators already cap each to a bounded range; this pins
+     * their relationship across a multi-key POST. */
+    double tmax, tresume;
+    effective_temp(req, "cool_temp_max", 33.0, &tmax);
+    effective_temp(req, "cool_temp_resume", 31.0, &tresume);
+    if (tresume >= tmax)
+        return reply_error(res, 400,
+            "cool_temp_resume must be below cool_temp_max");
+
     for (size_t i = 0; i < N_SETTINGS; i++) {
         const char *v = setting_param(req, setting_defs[i].key);
         if (!v)
@@ -616,8 +704,14 @@ static int cb_settings_post(const struct _u_request *req,
 static int cb_fuse_identity(const struct _u_request *req,
                             struct _u_response *res, void *user_data)
 {
-    (void)req;
     (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    /* The SRK password is irrevocable and never rotates - reveal it only
+     * to someone physically at the machine holding the button. */
+    if (!operator_present())
+        return reply_error(res, 403,
+            "hold the machine button to reveal the fuse identity");
     char body[192], mid[16], pw[65];
     unsigned long serial = fuse_serial();
     machine_id(mid, sizeof(mid));
@@ -640,8 +734,9 @@ static int cb_fuse_identity(const struct _u_request *req,
 static int cb_mode_get(const struct _u_request *req,
                        struct _u_response *res, void *user_data)
 {
-    (void)req;
     (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
     char body[128];
     super_status_json(body, sizeof(body));
     ulfius_set_string_body_response(res, 200, body);
@@ -653,6 +748,8 @@ static int cb_mode_post(const struct _u_request *req,
                         struct _u_response *res, void *user_data)
 {
     (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
     const char *mode = setting_param(req, "controller");
     if (!mode)
         return reply_error(res, 400, "controller is required");
@@ -671,6 +768,11 @@ static int cb_cool_state(const struct _u_request *req,
                          struct _u_response *res, void *user_data)
 {
     (void)user_data;
+    /* The thermal-safety report channel: only the controller on this
+     * same host writes it. Restricting it to a loopback peer keeps a LAN
+     * client from spoofing a stand-down that drops the exhaust mid-cut. */
+    if (!auth_loopback_ok(req, res))
+        return U_CALLBACK_COMPLETE;
     const char *mode = setting_param(req, "mode");
     if (!mode)
         return reply_error(res, 400, "mode is required");
@@ -693,8 +795,9 @@ static int cb_cool_state(const struct _u_request *req,
 static int cb_cool_status(const struct _u_request *req,
                           struct _u_response *res, void *user_data)
 {
-    (void)req;
     (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
     char body[512];
     cool_status_json(body, sizeof(body));
     ulfius_set_string_body_response(res, 200, body);
@@ -707,7 +810,13 @@ static int cb_cool_status(const struct _u_request *req,
 static int cb_diag_start(const struct _u_request *req,
                          struct _u_response *res, void *user_data)
 {
-    (void)req;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    /* A diagnostic seizes the thermal hardware; refuse it while a
+     * firmware job is mid-flight (the update path does not otherwise
+     * share diag's busy check). */
+    if (update_job_running())
+        return reply_error(res, 409, "an update job is running");
     switch (diag_start((const char *)user_data)) {
     case 0:
         ulfius_set_string_body_response(res, 202, "{\"started\":true}");
@@ -726,8 +835,9 @@ static int cb_diag_start(const struct _u_request *req,
 static int cb_diag_abort(const struct _u_request *req,
                          struct _u_response *res, void *user_data)
 {
-    (void)req;
     (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
     diag_abort();
     ulfius_set_string_body_response(res, 200, "{\"aborting\":true}");
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
@@ -737,13 +847,41 @@ static int cb_diag_abort(const struct _u_request *req,
 static int cb_diag_status(const struct _u_request *req,
                           struct _u_response *res, void *user_data)
 {
-    (void)req;
     (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
     char body[4096];
     diag_status_json(body, sizeof(body));
     ulfius_set_string_body_response(res, 200, body);
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
     return U_CALLBACK_CONTINUE;
+}
+
+/* The panel with the per-machine token spliced in place of the
+ * __FFTOKEN__ placeholder, built once. Serving the token inside the
+ * page (rather than from an endpoint any LAN client could call) is what
+ * lets the origin checks keep it out of a rebinding attacker's reach. */
+static const char *panel_html(void)
+{
+    static char *page;
+    if (page)
+        return page;
+
+    const char *mark = strstr(index_html, "__FFTOKEN__");
+    const char *tok = auth_token();
+    if (!mark || !tok[0])
+        return index_html;              /* no token: serve inert page */
+
+    size_t pre = (size_t)(mark - index_html);
+    size_t tlen = strlen(tok);
+    size_t total = strlen(index_html) - strlen("__FFTOKEN__") + tlen + 1;
+    page = malloc(total);
+    if (!page)
+        return index_html;
+    memcpy(page, index_html, pre);
+    memcpy(page + pre, tok, tlen);
+    strcpy(page + pre + tlen, mark + strlen("__FFTOKEN__"));
+    return page;
 }
 
 /* "/" serves the UI (ui.c), plus the mjpg-streamer-compatible
@@ -752,6 +890,8 @@ static int cb_root(const struct _u_request *req, struct _u_response *res,
                    void *user_data)
 {
     (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
     const char *action = u_map_get(req->map_url, "action");
     if (action) {
         if (!strcmp(action, "stream"))
@@ -760,7 +900,7 @@ static int cb_root(const struct _u_request *req, struct _u_response *res,
             return do_snapshot(CAM_LID, 1, SNAP_Q_DEF, -1, res);
         return reply_error(res, 400, "unknown action");
     }
-    ulfius_set_string_body_response(res, 200, index_html);
+    ulfius_set_string_body_response(res, 200, panel_html());
     ulfius_add_header_to_response(res, "Content-Type", "text/html");
     return U_CALLBACK_CONTINUE;
 }
@@ -778,6 +918,17 @@ int main(void)
      * best effort. */
     (void)nice(5);
 
+    /* Raise the descriptor ceiling: the daemon is thread-per-connection,
+     * so a connection flood must not exhaust the fd table and make
+     * sysfs reads fail - machine_is_idle() fails closed on that now, but
+     * a higher ceiling keeps the daemon serving through the flood. */
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur < 4096) {
+        rl.rlim_cur = rl.rlim_max < 4096 ? rl.rlim_max : 4096;
+        (void)setrlimit(RLIMIT_NOFILE, &rl);
+    }
+
+    auth_init();
     cam_engine_init();
     diag_init();
     cool_init();

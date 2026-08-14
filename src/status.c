@@ -202,8 +202,12 @@ static void read_gf_latest(char *latest, size_t ll, char *tested, size_t tl)
 int machine_is_idle(void)
 {
     char st[24];
+    /* Fail CLOSED: if the state cannot be read - including because the
+     * fd table is exhausted by a connection flood (EMFILE) - treat the
+     * machine as busy. A read failure must never permit a destructive
+     * action (flash, mode switch, diag) or drop safing mid-cut. */
     if (rd_attr("cnc/state", st, sizeof(st)))
-        return 1;   /* no motion driver = nothing can be running */
+        return 0;
     return strcmp(st, "idle") == 0;
 }
 

@@ -5,6 +5,7 @@ set(CMAKE_C_STANDARD 11)
 
 add_executable(forgectrl
   src/main.c
+  src/auth.c
   src/cam.c
   src/cool.c
   src/debayer.c

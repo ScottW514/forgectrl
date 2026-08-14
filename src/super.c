@@ -36,6 +36,7 @@
 #include "settings.h"
 #include "status.h"
 #include "super.h"
+#include "update.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -471,6 +472,10 @@ int super_mode_switch(const char *mode, char *err, size_t elen)
 
     if (diag_running()) {
         snprintf(err, elen, "a diagnostic is running");
+        return -1;
+    }
+    if (update_job_running()) {
+        snprintf(err, elen, "an update job is running");
         return -1;
     }
     if (!machine_is_idle()) {

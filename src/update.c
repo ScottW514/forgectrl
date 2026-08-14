@@ -25,9 +25,11 @@
  */
 #define _GNU_SOURCE
 #include "update.h"
+#include "auth.h"
 #include "diag.h"
 #include "status.h"
 
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -386,8 +388,9 @@ struct slot_info {
 int cb_slots(const struct _u_request *req, struct _u_response *res,
              void *user_data)
 {
-    (void)req;
     (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
 
     char raw[4096];
     FILE *p = popen(FFBOOT " -l 2>/dev/null", "r");
@@ -412,9 +415,13 @@ int cb_slots(const struct _u_request *req, struct _u_response *res,
         char val[96];
         jsan(val, sizeof(val), eq + 1);
         if (!strncmp(ln, "env.", 4)) {
-            eo += (size_t)snprintf(env_json + eo, sizeof(env_json) - eo,
-                                   "%s\"%s\":\"%s\"", eo ? "," : "",
-                                   ln + 4, val);
+            if (eo < sizeof(env_json)) {
+                eo += (size_t)snprintf(env_json + eo, sizeof(env_json) - eo,
+                                       "%s\"%s\":\"%s\"", eo ? "," : "",
+                                       ln + 4, val);
+                if (eo >= sizeof(env_json))
+                    eo = sizeof(env_json) - 1;   /* external output overshot */
+            }
             continue;
         }
         if (strncmp(ln, "slot.", 5))
@@ -525,6 +532,8 @@ int cb_slots(const struct _u_request *req, struct _u_response *res,
             s ? "," : "", staged[s].key, have ? "true" : "false",
             have ? (long)st.st_size : 0, ver);
     }
+    if (off >= sizeof(body))            /* keep the closing append in range */
+        off = sizeof(body) - 1;
     snprintf(body + off, sizeof(body) - off, "}}");
     return reply_json(res, 200, body);
 }
@@ -535,6 +544,8 @@ int cb_boot_select(const struct _u_request *req, struct _u_response *res,
                    void *user_data)
 {
     (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
     if (diag_running())
         return reply_err(res, 409, "a diagnostic is running");
     if (!machine_is_idle())
@@ -570,6 +581,8 @@ int cb_system_reboot(const struct _u_request *req, struct _u_response *res,
                      void *user_data)
 {
     (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
     if (diag_running())
         return reply_err(res, 409, "a diagnostic is running");
     if (!machine_is_idle())
@@ -590,8 +603,9 @@ int cb_system_reboot(const struct _u_request *req, struct _u_response *res,
 int cb_update_check(const struct _u_request *req, struct _u_response *res,
                     void *user_data)
 {
-    (void)req;
     (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
 
     /* HEAD through the redirect chain; the effective URL carries the
      * release tag. */
@@ -686,8 +700,9 @@ static void *dl_worker(void *arg)
 int cb_update_download(const struct _u_request *req,
                        struct _u_response *res, void *user_data)
 {
-    (void)req;
     (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
     return job_start_reply(res, job_start("download", dl_worker, NULL));
 }
 
@@ -779,6 +794,8 @@ int cb_update_apply(const struct _u_request *req, struct _u_response *res,
                     void *user_data)
 {
     (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
 
     const struct slot_target *t = find_target(param(req, "slot"));
     if (!t || !t->task)
@@ -802,13 +819,20 @@ int cb_update_apply(const struct _u_request *req, struct _u_response *res,
     if (stat(path, &st) != 0 || st.st_size == 0)
         return reply_err(res, 404, "staged archive not found");
 
+    const char *cu = param(req, "confirm_unsigned");
+    int allow_unsigned = cu && !strcmp(cu, "1");
+    /* Skipping the signature check requires an operator physically at
+     * the machine, not just a token: the button must be held. */
+    if (allow_unsigned && !operator_present())
+        return reply_err(res, 403,
+            "hold the machine button to install unsigned firmware");
+
     struct apply_args *a = calloc(1, sizeof(*a));
     if (!a)
         return reply_err(res, 500, "out of memory");
     a->slot = t;
     snprintf(a->file, sizeof(a->file), "%s", path);
-    const char *cu = param(req, "confirm_unsigned");
-    a->allow_unsigned = cu && !strcmp(cu, "1");
+    a->allow_unsigned = allow_unsigned;
 
     int rc = job_start("apply", apply_worker, a);
     if (rc != 0)
@@ -833,12 +857,23 @@ int update_upload_sink(const struct _u_request *req, const char *key,
 
     pthread_mutex_lock(&up_mu);
     if (off == 0) {
-        if (up_fp)
-            fclose(up_fp);
-        mkdir(DATA_DIR, 0755);
-        up_fp = fopen(UP_FW, "wb");
-        up_bytes = 0;
-        up_error = up_fp ? 0 : 1;
+        if (up_fp) {
+            fclose(up_fp);              /* bound any leak from a prior upload */
+            up_fp = NULL;
+        }
+        /* Gate the flash-staging write: authorized, machine idle, and no
+         * diagnostic or update job running (the apply worker reads the
+         * same file - an ungated upload could truncate it mid-flash). */
+        if (!auth_write_permitted(req) || diag_running() ||
+            !machine_is_idle() || update_job_running()) {
+            up_error = 1;
+            up_bytes = 0;
+        } else {
+            mkdir(DATA_DIR, 0755);
+            up_fp = fopen(UP_FW, "wb");
+            up_bytes = 0;
+            up_error = up_fp ? 0 : 1;
+        }
     }
     if (up_fp && !up_error) {
         if (up_bytes + size > UPLOAD_MAX) {
@@ -857,7 +892,14 @@ int cb_update_upload(const struct _u_request *req, struct _u_response *res,
                      void *user_data)
 {
     (void)user_data;
-    (void)req;
+    if (!auth_write_ok(req, res)) {
+        pthread_mutex_lock(&up_mu);     /* discard whatever the sink staged */
+        if (up_fp) { fclose(up_fp); up_fp = NULL; }
+        up_error = 1;
+        pthread_mutex_unlock(&up_mu);
+        unlink(UP_FW);
+        return U_CALLBACK_COMPLETE;
+    }
 
     pthread_mutex_lock(&up_mu);
     if (up_fp) {
@@ -941,12 +983,13 @@ static void *restore_worker(void *argp)
     run_cmd(NULL, 0, cmd);
 
     job_set_phase("writing factory image");
+    /* run_cmd already runs this through a shell (popen); the archive
+     * name is charset-restricted at the endpoint, so no second `sh -c`
+     * wrapper around the interpolated value. */
     snprintf(cmd, sizeof(cmd),
              "set -o pipefail; gzip -dc " ARCHIVE_DIR "/%s | "
              "dd of=%s bs=1M 2>&1 | tail -n 1", a->file, a->slot->dev);
-    char shcmd[720];
-    snprintf(shcmd, sizeof(shcmd), "sh -c '%s'", cmd);
-    rc = run_cmd(out, sizeof(out), shcmd);
+    rc = run_cmd(out, sizeof(out), cmd);
     if (rc != 0) {
         drop_lock();
         job_finish("{\"ok\":false,\"error\":\"restore write failed - "
@@ -982,6 +1025,8 @@ int cb_restore_factory(const struct _u_request *req,
                        struct _u_response *res, void *user_data)
 {
     (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
 
     const char *source = param(req, "source");
     if (source && !strcmp(source, "cloud"))
@@ -999,10 +1044,18 @@ int cb_restore_factory(const struct _u_request *req,
                          "target slot is not the 200 MiB factory geometry");
 
     const char *file = param(req, "file");
-    if (!file || strchr(file, '/') || strstr(file, "..") ||
-        strncmp(file, "factory-rootfs-", 15))
+    if (!file || strncmp(file, "factory-rootfs-", 15))
         return reply_err(res, 400,
                          "file must be a factory-rootfs archive name");
+    /* Charset-restrict the name: it is interpolated into a shell
+     * command line, so allow only the characters a real archive name
+     * uses and reject path traversal and every shell metacharacter. */
+    for (const char *p = file; *p; p++)
+        if (!isalnum((unsigned char)*p) && *p != '.' && *p != '_' &&
+            *p != '-')
+            return reply_err(res, 400, "invalid archive name");
+    if (strstr(file, ".."))
+        return reply_err(res, 400, "invalid archive name");
     char path[256];
     snprintf(path, sizeof(path), ARCHIVE_DIR "/%s", file);
     struct stat st;
@@ -1026,8 +1079,9 @@ int cb_restore_factory(const struct _u_request *req,
 int cb_update_status(const struct _u_request *req, struct _u_response *res,
                      void *user_data)
 {
-    (void)req;
     (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
     char body[1280];
     pthread_mutex_lock(&mu);
     long prog = -1;
