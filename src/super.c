@@ -57,6 +57,7 @@
 #define CLOUD_BIN  "/usr/sbin/gfcloud.py"
 #define CLOUD_LOG  "/data/gfcloud.log"
 #define PULSE_DEV  "/dev/glowforge"
+#define HOMED_ANCHOR "/run/grblhal.homed"
 
 #define STOP_TERM_WAIT_S   5      /* SIGTERM grace before SIGKILL */
 #define RESPAWN_MIN_S      1
@@ -284,6 +285,11 @@ static void reap_locked(int status)
      * already idle and latched. */
     wr_attr("cnc/stop", "1");
     wr_attr("cnc/laser_latch", "1");
+    /* The homing anchor belongs to the controller that wrote it: it
+     * must not survive into another mode (cloud re-zeros the counters
+     * it anchors) or into a respawn. A fresh GRBL controller starts
+     * unreferenced and re-homes. */
+    unlink(HOMED_ANCHOR);
 
     if (expected)
         return;
