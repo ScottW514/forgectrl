@@ -119,6 +119,9 @@ const char index_html[] =
 ".banner{background:#fff6e6;border:1px solid var(--warn);color:#7a4a06;"
 "border-radius:8px;padding:10px 12px;margin:0 0 12px;font-size:13px}"
 ".banner a{color:var(--navy);font-weight:600}"
+".safety{background:#fdeaea;border:1px solid var(--red);color:#8a1518;"
+"border-radius:8px;padding:8px 12px;margin:0 0 12px;font-size:12.5px;"
+"line-height:1.5}"
 "#fusewrap{display:none;position:fixed;left:0;top:0;right:0;bottom:0;"
 "background:rgba(20,22,30,.55);z-index:50;align-items:center;"
 "justify-content:center}"
@@ -175,6 +178,13 @@ const char index_html[] =
 "<a href='#diag' id='t-diag'>Diagnostics</a>"
 "<a href='#system' id='t-system'>System</a>"
 "</div></nav><main>"
+
+/* Persistent laser-safety banner: shown on every tab */
+"<div class='safety'><b>Class 4 CO&#8322; laser</b> &mdash; invisible "
+"10.6 &micro;m beam. Never defeat the lid switches or interlock &middot; "
+"vent the exhaust outdoors &middot; never cut PVC or chlorinated "
+"plastics &middot; never leave a running job unattended &middot; keep a "
+"fire extinguisher within reach.</div>"
 "<div id='locknote'></div>"
 
 /* ------------------------------------------------------ status tab */
