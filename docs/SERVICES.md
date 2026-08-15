@@ -39,7 +39,7 @@ arrive as input events. Bit set = switch active.
 | 3 | `doors` | both door switches closed (the series combination the safety chain sees) |
 | 4 | `estop` | e-stop sense line high — the **normal** state; see below |
 | 5 | `interlock` | **remote-interlock loop OPEN** — see below |
-| 6 | `interlock_latch` | interlock latch tripped |
+| 6 | `interlock_latch` | interlock latch set (LASER_ON blocked in hardware); the kernel sets it while bit 5 reads open and releases it when the loop closes |
 | 7 | `head` | head-attention line — **not** a head-present indicator; see below |
 
 **The interlock sense is inverted relative to the door/button switches.** Bit 5
