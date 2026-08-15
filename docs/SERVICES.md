@@ -287,10 +287,15 @@ remain only as manual emergency stops.
   supervision of the selected mode. A bare `pkill` of a controller would
   just be safed and respawned seconds later.
 - **Controller exit safing**: the supervisor safes the machine (`cnc/stop`,
-  `cnc/laser_latch=1`) on **every** transition out of a running child —
-  unexpected death, mode switch, diagnostics suspend, shutdown — and again
-  immediately after any SIGKILL escalation (a killed child runs no cleanup
-  of its own). Under the broker a child exit is not a final close of the
+  `cnc/laser_latch=1`) **before it signals a child to stop**, on **every**
+  transition out of a running child — unexpected death, mode switch,
+  diagnostics suspend, shutdown, the emergency lever — and again immediately
+  after any SIGKILL escalation (a killed child runs no cleanup of its own).
+  The pre-signal writes are what make the lever immediate: motion
+  decelerates and FIRE is severed at the kernel the moment the stop is
+  requested, whatever the controller then does with its SIGTERM (the GRBL
+  controller treats a termination signal during motion as a `^X`: controlled
+  stop, latch relocked, exit). Under the broker a child exit is not a final close of the
   pulse device, so these writes are the safing mechanism; both are harmless
   no-ops when the machine is already idle and latched. Unexpected deaths
   additionally respawn with exponential backoff (1 s → 30 s cap, reset

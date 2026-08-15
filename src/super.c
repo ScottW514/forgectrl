@@ -375,6 +375,14 @@ static void stop_locked(void)
     pid_t pid = child_pid;
     fprintf(stderr, "forgectrl: super: stopping %s controller (pid %d)\n",
             ctl_name(child_ctl), (int)pid);
+    /* Safe the machine BEFORE the signal, not only after the reap: this
+     * path is also the emergency lever (POST /controller/stop is not
+     * idle-gated), and a controller that is mid-job may take its whole
+     * SIGTERM grace to leave. cnc/stop is a controlled deceleration and
+     * the latch relock severs FIRE - both instantaneous at the kernel,
+     * both harmless no-ops when the machine is already idle and latched. */
+    wr_attr("cnc/stop", "1");
+    wr_attr("cnc/laser_latch", "1");
     kill(-pid, SIGTERM);
     kill(pid, SIGTERM);
 

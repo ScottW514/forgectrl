@@ -180,15 +180,15 @@ static int deny(struct _u_response *res, unsigned status, const char *msg)
 /* Layer 1: Host literal + Sec-Fetch-Site + Origin. Returns 1 to allow. */
 static int origin_ok(const struct _u_request *req)
 {
-    const char *host = u_map_get(req->map_header, "Host");
+    const char *host = u_map_get_case(req->map_header, "Host");
     if (!host_is_literal(host))
         return 0;
 
-    const char *sfs = u_map_get(req->map_header, "Sec-Fetch-Site");
+    const char *sfs = u_map_get_case(req->map_header, "Sec-Fetch-Site");
     if (sfs && strcmp(sfs, "same-origin") && strcmp(sfs, "none"))
         return 0;
 
-    const char *origin = u_map_get(req->map_header, "Origin");
+    const char *origin = u_map_get_case(req->map_header, "Origin");
     if (origin && strcmp(origin, "null")) {
         char auth[128];
         origin_authority(origin, auth, sizeof(auth));
@@ -230,7 +230,7 @@ int auth_write_permitted(const struct _u_request *req)
 {
     if (!origin_ok(req))
         return 0;
-    const char *tok = u_map_get(req->map_header, "X-ForgeFIRM-Token");
+    const char *tok = u_map_get_case(req->map_header, "X-ForgeFIRM-Token");
     if (!tok)
         tok = u_map_get(req->map_url, "token");
     return token_eq(tok);
@@ -240,7 +240,7 @@ int auth_write_ok(const struct _u_request *req, struct _u_response *res)
 {
     if (!origin_ok(req))
         return deny(res, 403, "request origin refused");
-    const char *tok = u_map_get(req->map_header, "X-ForgeFIRM-Token");
+    const char *tok = u_map_get_case(req->map_header, "X-ForgeFIRM-Token");
     if (!tok)
         tok = u_map_get(req->map_url, "token");
     if (!token_eq(tok))
