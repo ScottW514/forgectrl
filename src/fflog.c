@@ -6,7 +6,9 @@
  * Vendored verbatim into the other ForgeFIRM C daemons; keep the
  * copies identical.
  */
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include "fflog.h"
 
 #include <ctype.h>
