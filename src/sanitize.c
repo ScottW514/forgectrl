@@ -524,8 +524,11 @@ static char *pass_ip6(sanitizer_t *s, const char *in)
     const char *p = in;
     while (*p) {
         if (!(isxdigit((unsigned char)*p) || *p == ':')) {
-            sb_add(&out, p, 1);
-            p++;
+            const char *r = p + 1;
+            while (*r && !(isxdigit((unsigned char)*r) || *r == ':'))
+                r++;
+            sb_add(&out, p, (size_t)(r - p));
+            p = r;
             continue;
         }
         const char *q = p;
@@ -555,8 +558,11 @@ static char *pass_hex(sanitizer_t *s, const char *in)
     const char *p = in;
     while (*p) {
         if (!isxdigit((unsigned char)*p)) {
-            sb_add(&out, p, 1);
-            p++;
+            const char *r = p + 1;
+            while (*r && !isxdigit((unsigned char)*r))
+                r++;
+            sb_add(&out, p, (size_t)(r - p));
+            p = r;
             continue;
         }
         const char *q = p;
@@ -588,8 +594,11 @@ static char *pass_b64(sanitizer_t *s, const char *in)
     const char *p = in;
     while (*p) {
         if (!is_b64((unsigned char)*p)) {
-            sb_add(&out, p, 1);
-            p++;
+            const char *r = p + 1;
+            while (*r && !is_b64((unsigned char)*r))
+                r++;
+            sb_add(&out, p, (size_t)(r - p));
+            p = r;
             continue;
         }
         const char *q = p;
@@ -614,6 +623,47 @@ static char *pass_b64(sanitizer_t *s, const char *in)
     return sb_take(&out);
 }
 
+/* Cheap pre-checks: a regex pass runs only when the line can contain a
+ * match at all (a substring the pattern requires). POSIX regexec is the
+ * expensive part on the target; most log lines have no '@', no "eyJ",
+ * no credential keyword, so most passes are skipped outright. */
+static int has_ci(const char *s, const char *word)
+{
+    return strcasestr(s, word) != NULL;
+}
+
+static int may_have_kv(const char *s)
+{
+    static const char *const words[] = {
+        "token", "password", "passwd", "pwd", "passphrase", "secret",
+        "api_key", "apikey", "secret_key", "private_key", "psk",
+        "authorization", "session", "cookie",
+    };
+    if (!strchr(s, '=') && !strchr(s, ':'))
+        return 0;
+    for (size_t i = 0; i < sizeof(words) / sizeof(*words); i++)
+        if (has_ci(s, words[i]))
+            return 1;
+    return 0;
+}
+
+static size_t count_char(const char *s, int c)
+{
+    size_t n = 0;
+    for (; (s = strchr(s, c)) != NULL; s++)
+        n++;
+    return n;
+}
+
+static int may_have_ip4(const char *s)
+{
+    /* a digit, a dot, a digit somewhere */
+    for (const char *p = s; (p = strchr(p, '.')) != NULL; p++)
+        if (p > s && isdigit((unsigned char)p[-1]) && isdigit((unsigned char)p[1]))
+            return 1;
+    return 0;
+}
+
 char *san_line(sanitizer_t *s, const char *line)
 {
     if (!s || !line)
@@ -623,22 +673,38 @@ char *san_line(sanitizer_t *s, const char *line)
         regex_t *re;
         size_t nmatch;
         match_cb cb;
+        int (*maybe)(const char *);
     } steps[] = {
-        { &s->re_bearer, 1, cb_bearer },
-        { &s->re_basic, 1, cb_basic },
-        { &s->re_jwt, 1, cb_jwt },
-        { &s->re_kv, 6, cb_kv },
-        { &s->re_email, 1, cb_email },
-        { &s->re_mac, 4, cb_mac },
-        { &s->re_ip4, 4, cb_ip4 },
+        { &s->re_bearer, 1, cb_bearer, NULL },
+        { &s->re_basic, 1, cb_basic, NULL },
+        { &s->re_jwt, 1, cb_jwt, NULL },
+        { &s->re_kv, 6, cb_kv, may_have_kv },
+        { &s->re_email, 1, cb_email, NULL },
+        { &s->re_mac, 4, cb_mac, NULL },
+        { &s->re_ip4, 4, cb_ip4, may_have_ip4 },
     };
     for (size_t i = 0; cur && i < sizeof(steps) / sizeof(*steps); i++) {
+        int run = 1;
+        if (steps[i].re == &s->re_bearer)
+            run = has_ci(cur, "bearer");
+        else if (steps[i].re == &s->re_basic)
+            run = has_ci(cur, "basic");
+        else if (steps[i].re == &s->re_jwt)
+            run = strstr(cur, "eyJ") != NULL;
+        else if (steps[i].re == &s->re_email)
+            run = strchr(cur, '@') != NULL;
+        else if (steps[i].re == &s->re_mac)
+            run = count_char(cur, ':') >= 5;
+        else if (steps[i].maybe)
+            run = steps[i].maybe(cur);
+        if (!run)
+            continue;
         char *next = pass_regex(s, cur, steps[i].re, steps[i].nmatch,
                                 steps[i].cb);
         free(cur);
         cur = next;
     }
-    if (cur) {
+    if (cur && count_char(cur, ':') >= 2) {
         char *next = pass_ip6(s, cur);
         free(cur);
         cur = next;
