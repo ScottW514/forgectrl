@@ -32,6 +32,7 @@
 #define _GNU_SOURCE
 #include "cool.h"
 #include "diag.h"
+#include "fflog.h"
 #include "settings.h"
 #include "status.h"
 #include "super.h"
@@ -208,7 +209,7 @@ static void dlog(const char *fmt, ...)
              el / 60, el % 60, line);
     log_n++;
     pthread_mutex_unlock(&mu);
-    fprintf(stderr, "forgectrl: diag %s\n", line);
+    fflog(LOG_INFO, "diag %s", line);
 }
 
 static void set_phase(const char *fmt, ...)
@@ -448,8 +449,8 @@ out_norestart:
 void diag_init(void)
 {
     if (access(MARKER, F_OK) == 0) {
-        fprintf(stderr, "forgectrl: stale diagnostic marker - standing "
-                        "down and restarting the controller\n");
+        fflog(LOG_WARNING, "stale diagnostic marker - standing "
+                           "down and restarting the controller");
         stand_down();
         controller_start();
         unlink(MARKER);

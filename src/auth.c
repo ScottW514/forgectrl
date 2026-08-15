@@ -29,6 +29,7 @@
  */
 #define _GNU_SOURCE
 #include "auth.h"
+#include "fflog.h"
 
 #include <ctype.h>
 #include <fcntl.h>
@@ -61,8 +62,8 @@ static void generate_token(void)
         /* Never ship a predictable token: without entropy the panel
          * must stay locked rather than fall back to something guessable. */
         token[0] = '\0';
-        fprintf(stderr, "forgectrl: auth: cannot read /dev/urandom - "
-                        "panel token unavailable\n");
+        fflog(LOG_ERR, "auth: cannot read /dev/urandom - "
+                       "panel token unavailable");
         return;
     }
     close(fd);
@@ -98,13 +99,13 @@ void auth_init(void)
 
     int fd = open(TOKEN_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd < 0) {
-        fprintf(stderr, "forgectrl: auth: cannot persist panel token\n");
+        fflog(LOG_ERR, "auth: cannot persist panel token");
         return;
     }
     (void)!write(fd, token, TOKEN_HEX);
     (void)!write(fd, "\n", 1);
     close(fd);
-    fprintf(stderr, "forgectrl: auth: generated a new panel token\n");
+    fflog(LOG_NOTICE, "auth: generated a new panel token");
 }
 
 const char *auth_token(void)

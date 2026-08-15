@@ -30,12 +30,13 @@ forgectrl owns everything around them:
   job-state reports (`POST /cool/state`) and publishing a verdict file
   the controllers enforce in-process.
 - The **web control panel**, **camera service**, **telemetry**,
-  **diagnostics**, persisted **machine settings**, and the A/B
-  **update system**.
+  **diagnostics**, persisted **machine settings**, the **logging**
+  tree (levels, viewer, sanitized export), and the A/B **update
+  system**.
 
 The shared contract — switch maps, sensor conversions, hardware
-ownership, the cooling channels, mode supervision, and pulse-device
-ownership — is [docs/SERVICES.md](docs/SERVICES.md).
+ownership, the cooling channels, mode supervision, pulse-device
+ownership, and logging — is [docs/SERVICES.md](docs/SERVICES.md).
 
 ## The control panel (`GET /`)
 
@@ -58,6 +59,9 @@ OpenGlow visual identity, tabbed:
 - **Diagnostics** — tools that take the hardware over (the active
   controller is suspended through the supervisor for the duration):
   cooling system verification and calibration.
+- **Logs** — per-logger disk and remote log levels (applied at the next
+  reboot), the remote syslog target, a live log viewer, and the log
+  export (sanitized by default) for issue reports.
 - **System** — firmware slots (A/B boot selection), ForgeFIRM updates,
   image install/restore, the WiFi regulatory region (power save is
   kept off), reboot.
@@ -103,6 +107,38 @@ keys:
 | `ui_units` | Panel display units: `metric` or `imperial` (values are stored and exchanged in metric) |
 | `cool_*` | Coolant-loop protection tunables (flow-check bands, temperature ceiling/resume, cooldown) — see the Machine tab hints |
 | `wifi_country` | WiFi regulatory region, ISO 3166-1 alpha-2; unset = automatic (the AP's 802.11d country, else world). Applied via `iw reg reload`/`iw reg set` at startup and on change; power save is pinned off in the same pass |
+| `log_<logger>_disk`, `log_<logger>_remote` | Log level per logger (`forgectrl`, `grblhal`, `gfcloud`, `gfhome`, `kernel`, `system`) and destination: `off`, `error`, `warning`, `notice`, `info` (disk default), `debug`; remote defaults to `off`. Applied at the next reboot |
+| `syslog_server`, `syslog_port`, `syslog_proto` | Remote syslog target (host or address; 514; `udp` or `tcp`). Nothing is forwarded until a server is set. Applied at the next reboot |
+
+## Logging
+
+Every ForgeFIRM process emits through the system syslog socket
+(forgectrl and the grblHAL driver through the shared non-blocking
+`fflog` emitter in `src/fflog.[ch]`, the Python apps through
+`SysLogHandler`); rsyslog is the only file writer and files each program
+under its own directory, `/data/log/forgefirm/<logger>/`, size-capped
+and rotated. A process emits at the more verbose of its two configured
+levels and rsyslog filters per destination; the kernel's levels only
+filter what printk emits. The stray stdout/stderr of a controller (an
+interpreter traceback, a library message) reaches syslog through a
+`logger` relay under the controller's own name; the daemon's own stray
+output takes the same route through its init script.
+
+`forgectrl --render-syslog` writes the rsyslog rules
+(`/data/forgefirm/rsyslog-forgefirm.conf`) and the log directories from
+the settings; the boot sequence runs it before rsyslog starts, which is
+why level changes apply at reboot. The panel shows configured against
+effective levels and offers the reboot.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /logs` | Loggers with configured and effective levels and on-disk sizes, the remote target, `pending_reboot` |
+| `GET /logs/tail?name=&lines=&from=` | The last `lines` of a logger's live file, or everything since byte offset `from` (incremental follow) |
+| `POST /logs/export?sanitize=1\|0` | Streams a `tar.gz` of every logger's files plus a system snapshot (version, dmesg, uptime, memory, disk, processes, effective levels, settings with secrets masked). Sanitized by default: known identifiers (serial, hostname, cloud credentials, panel token, WiFi network) and pattern classes (network addresses, e-mail addresses, bearer/basic credentials, JWTs, key=value secrets, long hex/base64 blobs) become placeholders that stay stable within the bundle (`src/sanitize.c`; `tests/sanitize_test.c` in CI) |
+
+All three require the panel token. `tests/fflog_e2e.sh` proves the whole
+path on a host against a private rsyslogd (emitter, relay, format,
+per-logger filtering).
 
 ## Camera service
 
@@ -150,10 +186,13 @@ illumination LED is raised during capture and restored on idle.
 | `FORGECTRL_NO_NEON` | unset | Force the scalar demosaic |
 | `FORGECTRL_NO_CACHED_BUFS` | unset | Force uncached capture buffers + bounce copy |
 | `FORGECTRL_NEON_CHECK` | unset | One-shot NEON/scalar equivalence check (logged) |
+| `FFLOG_LEVEL` | from settings | Override the emit level (`off`..`debug`) |
+| `FFLOG_STDERR` | unset | Echo log lines to stderr even when it is not a terminal (harnesses) |
+| `FFLOG_CONF`, `FFLOG_SOCK` | `/data/forgefirm.conf`, `/dev/log` | Settings file and syslog socket (host tests) |
 
 ## Building
 
-CMake; links against ulfius and libjpeg. Runtime needs Linux with imx-media,
+CMake; links against ulfius, libjpeg and zlib. Runtime needs Linux with imx-media,
 the coda VPU driver, and v4l-utils (`media-ctl`/`v4l2-ctl`) on the target.
 The ForgeFIRM Yocto layer (`meta-forgefirm` in the forgefirm repo) carries
 the recipe, which also installs the sysvinit script from `init/`.

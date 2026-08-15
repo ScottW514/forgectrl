@@ -19,6 +19,7 @@
 #define _GNU_SOURCE
 #include "cam.h"
 #include "debayer.h"
+#include "fflog.h"
 #include "vpu_jpeg.h"
 
 #include <errno.h>
@@ -188,7 +189,7 @@ static int run(const char *fmt, ...)
     va_end(ap);
     int rc = system(cmd);
     if (rc == -1 || !WIFEXITED(rc) || WEXITSTATUS(rc) != 0) {
-        fprintf(stderr, "cam: command failed (%d): %s\n", rc, cmd);
+        fflog(LOG_ERR, "cam: command failed (%d): %s", rc, cmd);
         return -1;
     }
     return 0;
@@ -213,7 +214,7 @@ static int run_read(char *out, size_t outlen, const char *fmt, ...)
     int rc = pclose(p);
     out[strcspn(out, "\r\n")] = '\0';
     if (rc == -1 || !WIFEXITED(rc) || WEXITSTATUS(rc) != 0 || !out[0]) {
-        fprintf(stderr, "cam: command failed: %s\n", cmd);
+        fflog(LOG_ERR, "cam: command failed: %s", cmd);
         return -1;
     }
     return 0;
@@ -472,8 +473,8 @@ static int start_capture(cam_id_t cam, char *err, size_t errlen)
     pthread_mutex_lock(&eng.lock);
     eng.cached_bufs = cached;
     pthread_mutex_unlock(&eng.lock);
-    fprintf(stderr, "cam: capture buffers %s\n",
-            cached ? "cached (non-coherent)" : "uncached (bounce copy)");
+    fflog(LOG_INFO, "cam: capture buffers %s",
+          cached ? "cached (non-coherent)" : "uncached (bounce copy)");
 
     for (eng.n_bufs = 0; eng.n_bufs < (int)req.count; eng.n_bufs++) {
         struct v4l2_buffer buf = {0};
@@ -643,7 +644,7 @@ static void *worker(void *arg)
     uint64_t fps_frames = 0;
 
     if (!rgb_half || !raw_cached) {
-        fprintf(stderr, "cam: worker OOM\n");
+        fflog(LOG_ERR, "cam: worker OOM");
         goto out;
     }
 
@@ -693,12 +694,12 @@ static void *worker(void *arg)
                     fail_snap();
                 release_capture();
             } else {
-                fprintf(stderr, "cam: borrow start failed: %s\n", berr);
+                fflog(LOG_ERR, "cam: borrow start failed: %s", berr);
                 fail_snap();
             }
             if (start_capture(orig_cam, berr, sizeof(berr))) {
-                fprintf(stderr, "cam: restore after borrow failed: %s\n",
-                        berr);
+                fflog(LOG_ERR, "cam: restore after borrow failed: %s",
+                      berr);
                 break;  /* engine dies; streams end; reconnect heals */
             }
             continue;
@@ -714,12 +715,12 @@ static void *worker(void *arg)
             continue;
         if (r <= 0) {
             if (r == 0 && ++dq_timeouts >= MAX_DQ_TIMEOUTS) {
-                fprintf(stderr, "cam: %d consecutive frame timeouts, "
-                        "stopping engine\n", dq_timeouts);
+                fflog(LOG_WARNING, "cam: %d consecutive frame timeouts, "
+                      "stopping engine", dq_timeouts);
                 break;
             }
             if (r == -1) {
-                fprintf(stderr, "cam: select: %s\n", strerror(errno));
+                fflog(LOG_ERR, "cam: select: %s", strerror(errno));
                 break;
             }
             continue;
@@ -734,7 +735,7 @@ static void *worker(void *arg)
         if (xioctl(eng.fd, VIDIOC_DQBUF, &buf) < 0) {
             if (errno == EAGAIN || errno == EIO)
                 continue;
-            fprintf(stderr, "cam: DQBUF: %s\n", strerror(errno));
+            fflog(LOG_ERR, "cam: DQBUF: %s", strerror(errno));
             break;
         }
         now_ts(&c1);
@@ -790,8 +791,8 @@ static void *worker(void *arg)
                 vpu = vpu_jpeg_open(HALF_W, HALF_H, eng.stream_quality);
                 if (!vpu) {
                     vpu_disabled = 1;
-                    fprintf(stderr, "cam: no VPU JPEG encoder, "
-                            "using software encode\n");
+                    fflog(LOG_WARNING, "cam: no VPU JPEG encoder, "
+                          "using software encode");
                 }
             }
             static int vpu_hard_fails;
@@ -818,11 +819,11 @@ static void *worker(void *arg)
                         debayer_bggr_half_yuv420_scalar(raw, CAM_W, CAM_H,
                                                         HFLIP, ry, ys,
                                                         ru, rv, uvs);
-                        fprintf(stderr, "cam: NEON/scalar compare: %s\n",
-                                (!memcmp(ry, yp, ysz) &&
+                        fflog(LOG_DEBUG, "cam: NEON/scalar compare: %s",
+                              (!memcmp(ry, yp, ysz) &&
                                  !memcmp(ru, up, usz) &&
                                  !memcmp(rv, vp, usz))
-                                ? "IDENTICAL" : "MISMATCH");
+                              ? "IDENTICAL" : "MISMATCH");
                     }
                     free(ry);
                     free(ru);
@@ -839,8 +840,8 @@ static void *worker(void *arg)
                      * on a noise frame): drop it, keep the VPU */
                     vpu_hard_fails = 0;
                 } else if (++vpu_hard_fails >= 3) {
-                    fprintf(stderr, "cam: repeated VPU encode failures, "
-                            "falling back to software\n");
+                    fflog(LOG_WARNING, "cam: repeated VPU encode failures, "
+                          "falling back to software");
                     vpu_jpeg_close(vpu);
                     vpu = NULL;
                     vpu_disabled = 1;
@@ -864,13 +865,13 @@ static void *worker(void *arg)
                  * keeps a stream open for whole sessions, and /data is
                  * the persistent partition settings and updates live on. */
                 if (++stat_n >= 10000) {
-                    fprintf(stderr, "cam: stream stats: dqbuf %.0f ms, "
-                            "copy %.0f ms, convert %.0f ms, encode %.0f ms "
-                            "avg (%s, %s)\n",
-                            stat_dq_ms / stat_n, stat_copy_ms / stat_n,
-                            stat_conv_ms / stat_n, stat_enc_ms / stat_n,
-                            via_vpu ? "vpu" : "software",
-                            eng.cached_bufs ? "cached" : "uncached");
+                    fflog(LOG_DEBUG, "cam: stream stats: dqbuf %.0f ms, "
+                          "copy %.0f ms, convert %.0f ms, encode %.0f ms "
+                          "avg (%s, %s)",
+                          stat_dq_ms / stat_n, stat_copy_ms / stat_n,
+                          stat_conv_ms / stat_n, stat_enc_ms / stat_n,
+                          via_vpu ? "vpu" : "software",
+                          eng.cached_bufs ? "cached" : "uncached");
                     stat_dq_ms = stat_copy_ms = stat_conv_ms = 0;
                     stat_enc_ms = 0;
                     stat_n = 0;
@@ -896,7 +897,7 @@ static void *worker(void *arg)
         }
 
         if (xioctl(eng.fd, VIDIOC_QBUF, &buf) < 0) {
-            fprintf(stderr, "cam: QBUF: %s\n", strerror(errno));
+            fflog(LOG_ERR, "cam: QBUF: %s", strerror(errno));
             break;
         }
     }

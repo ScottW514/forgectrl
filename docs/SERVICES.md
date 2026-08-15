@@ -4,7 +4,7 @@ The shared contract between the three things that touch the Glowforge factory
 board's non-motion hardware:
 
 - **forgectrl** (this repo) — the machine-services daemon: web control panel,
-  camera service, machine settings, telemetry, diagnostics.
+  camera service, machine settings, telemetry, diagnostics, logging.
 - The **GRBL controller** —
   [grblHAL-glowforge](https://github.com/ScottW514/grblHAL-glowforge), motion +
   laser in GRBL mode.
@@ -396,6 +396,82 @@ disarms the chain. Cloud mode preloads whole jobs, so its ring does not
 drain on a feeder stall — that residual is covered by the cooling engine's
 hung-controller dead-man above.
 
+## Logging [implemented]
+
+One transport, one writer. Every ForgeFIRM process emits through the
+system syslog socket (`/dev/log`) and **rsyslog is the only file writer**:
+nobody opens its own log file, and nothing of ours is written anywhere under
+the factory's `/data/log/*` directories or as `/data/*.log`.
+
+**Emitters.** forgectrl and the grblHAL driver use the shared `fflog`
+emitter (`src/fflog.[ch]`, vendored verbatim into grblHAL-glowforge; keep
+the copies identical). It differs from glibc `syslog(3)` in one deliberate
+way: the socket is non-blocking and a message that cannot be queued is
+dropped and counted, never waited for — a unix datagram socket exerts
+backpressure on its sender, so a stalled log daemon could otherwise park a
+controller thread. The RT feeder thread never logs except a fault. The
+Python apps (gfcloud, gfhome) use `logging.handlers.SysLogHandler` on a
+non-blocking socket with the same drop semantics. Stray stdout/stderr of a
+controller (an interpreter traceback, a library message) reaches syslog
+through a `logger` relay the supervisor spawns per controller under the
+controller's program name (double-forked, outlives the daemon while the
+controller does); the daemon's own stray output flows through a fifo relay
+in its init script.
+
+**Loggers and tree.** `LOGS_ROOT = /data/log/forgefirm/<logger>/<logger>.log`
+plus rotated `.N.gz`:
+
+| Logger | Selector | Emitter |
+|---|---|---|
+| `forgectrl` | `programname == forgectrl` | fflog (+ fifo relay) |
+| `grblhal` | `programname == grblhal` | fflog (+ relay) |
+| `gfcloud` | `programname == gfcloud` | SysLogHandler (+ relay) |
+| `gfhome` | `programname == gfhome` | SysLogHandler; stray output rides the grblhal relay (it is the controller's child) |
+| `kernel` | facility `kern` (imklog) | printk — levels only filter |
+| `system` | everything else | sshd, ntpd, wpa_supplicant, init scripts via `logger` |
+
+Line format (`ff_line`): `2026-08-15T16:35:44.123456-04:00 forgectrl[512] INFO super: started grbl controller (pid 3084)`.
+
+**Levels.** Per logger, two independent settings in `/data/forgefirm.conf`:
+`log_<logger>_disk` (default `info`) and `log_<logger>_remote` (default
+`off`), each `off|error|warning|notice|info|debug`; plus `syslog_server`,
+`syslog_port` (514) and `syslog_proto` (`udp`|`tcp`) for the remote target
+(RFC 5424 forwarding, per-action queue that discards when full — an
+unreachable server never stalls the disk writers). Rule: **a process emits
+at the more verbose of its two levels** and rsyslog filters per destination
+(`fflog_init` reads both keys itself; the kernel is filter-only). Python has
+no `notice`; its loggers emit INFO for both `info` and `notice`.
+
+**Applied at reboot, by design.** `forgectrl --render-syslog` renders the
+rules into `/data/forgefirm/rsyslog-forgefirm.conf` (included by
+`/etc/rsyslog.conf`) and records the levels in force in
+`/var/run/forgefirm-loglevels`; the `forgefirm-logging` init script runs it
+before rsyslog starts and each process reads its own level at start. There
+is no live re-level path; the panel shows configured vs. effective and
+offers the reboot. Rotation: logrotate, size-capped per file, `HUP` to
+rsyslog (never `copytruncate`), driven by the same init script at boot and
+hourly.
+
+**Panel / API.** `GET /logs`, `GET /logs/tail`, `POST /logs/export`
+(token-gated; see the README). The export is a `tar.gz` of the tree plus a
+system snapshot; sanitized by default for public issue reports. The
+sanitizer (`src/sanitize.c`) is two-layer — exact known values (serial,
+hostname, cloud credentials, panel token, WiFi SSID/PSK/identity) then
+pattern classes (bearer/basic credentials, JWTs, key=value secrets, e-mail,
+MAC, IPv4/IPv6 with loopback kept, hex >= 32, base64-like >= 40) — with
+stable per-value placeholders and an idempotent output; `tests/sanitize_test.c`
+runs in CI and is the regression gate for both leaks and over-redaction.
+
+**Rules for new code.** No `fprintf(stderr)`/`printf` for logging in the C
+daemons — `fflog(LOG_x, ...)`, message without a program prefix (rsyslog
+tags it) and without a trailing newline. Never log a credential, token, or
+password value; the sanitizer is the second line, not the first. Never log
+from the RT feeder path except a fault. New loggers are added to
+`logs_names[]` (forgectrl) plus a setting pair; new secrets to
+`load_known()`.
+
+---
+
 ---
 
 ## Clocks [rule]
@@ -428,6 +504,7 @@ Readers are unrestricted.
 | `/data/forgefirm.conf` settings | read (re-read per `$H` / run start) | read | read; forgectrl writes (409 while busy) |
 | `/run/grblhal.homed` anchor | GRBL controller writes | — | — |
 | `/run/forgefirm/cooling.state` | forgectrl writes, controllers read | forgectrl writes, controllers read | forgectrl writes |
+| `/data/log/forgefirm/**` log files | rsyslog writes; every process emits to `/dev/log` only | same | same |
 
 On a kernel dead-man trip (and on module removal) the kernel itself
 de-energizes the heat sources — loop heater and TEC — and touches nothing

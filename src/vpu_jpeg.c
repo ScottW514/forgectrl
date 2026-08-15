@@ -10,6 +10,7 @@
  * four nodes and the numbering depends on probe order.
  */
 #include "vpu_jpeg.h"
+#include "fflog.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -122,7 +123,7 @@ vpu_jpeg_t *vpu_jpeg_open(int w, int h, int quality)
     if (xioctl(v->fd, VIDIOC_S_FMT, &fo) < 0 ||
         fo.fmt.pix.width != (unsigned)w ||
         fo.fmt.pix.height != (unsigned)h) {
-        fprintf(stderr, "vpu: S_FMT output rejected %dx%d\n", w, h);
+        fflog(LOG_WARNING, "vpu: S_FMT output rejected %dx%d", w, h);
         goto fail;
     }
     v->w = w;

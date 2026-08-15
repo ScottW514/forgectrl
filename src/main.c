@@ -16,6 +16,13 @@
  *   GET /settings                           JSON machine settings
  *   POST /settings?key=value                update machine settings
  *   GET /fuse-identity                      burned-in identity (on demand)
+ *   GET /logs                               loggers, levels, sizes
+ *   GET /logs/tail?name=&lines=&from=       a logger's live file (follow)
+ *   POST /logs/export?sanitize=1|0          tar.gz bundle of all logs
+ *
+ * Invocation: forgectrl [--render-syslog]. --render-syslog writes the
+ * rsyslog rules and log directories from the settings and exits; the
+ * boot sequence runs it before rsyslog starts (see logs.c).
  *
  * The two cameras share the hardware mux; the newest request wins it. A
  * STREAM request for the other camera preempts the current stream
@@ -33,6 +40,8 @@
 #include "cam.h"
 #include "cool.h"
 #include "diag.h"
+#include "fflog.h"
+#include "logs.h"
 #include "settings.h"
 #include "status.h"
 #include "super.h"
@@ -47,6 +56,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <time.h>
 #include <ulfius.h>
 #include <unistd.h>
 
@@ -372,6 +382,11 @@ static int valid_button_s(const char *v)   { return valid_range(v, 1, 3600); }
 static int valid_disarm_s(const char *v)   { return valid_range(v, 1, 3600); }
 static int valid_settle_s(const char *v)   { return valid_range(v, 0, 30); }
 
+/* Logging: per-logger disk and remote levels (each off|error|warning|
+ * notice|info|debug) and the remote syslog target. Read at boot by
+ * `forgectrl --render-syslog` (rsyslog rules) and by each process for
+ * its own emit level, so a change applies at the next reboot. */
+
 static const struct {
     const char *key;
     int (*valid)(const char *);
@@ -399,8 +414,39 @@ static const struct {
     { "laser_button_timeout_s", valid_button_s,    0 },
     { "laser_disarm_s",         valid_disarm_s,    0 },
     { "rail_settle_s",          valid_settle_s,    0 },
+    { "log_forgectrl_disk",     logs_valid_level,  0 },
+    { "log_forgectrl_remote",   logs_valid_level,  0 },
+    { "log_grblhal_disk",       logs_valid_level,  0 },
+    { "log_grblhal_remote",     logs_valid_level,  0 },
+    { "log_gfcloud_disk",       logs_valid_level,  0 },
+    { "log_gfcloud_remote",     logs_valid_level,  0 },
+    { "log_gfhome_disk",        logs_valid_level,  0 },
+    { "log_gfhome_remote",      logs_valid_level,  0 },
+    { "log_kernel_disk",        logs_valid_level,  0 },
+    { "log_kernel_remote",      logs_valid_level,  0 },
+    { "log_system_disk",        logs_valid_level,  0 },
+    { "log_system_remote",      logs_valid_level,  0 },
+    { "syslog_server",          logs_valid_server, 0 },
+    { "syslog_port",            logs_valid_port,   0 },
+    { "syslog_proto",           logs_valid_proto,  0 },
 };
 #define N_SETTINGS (sizeof(setting_defs) / sizeof(*setting_defs))
+
+/* The settings as text for the log export: one "key = value" per line,
+ * secrets shown only as set/unset. */
+static void settings_snapshot(FILE *out)
+{
+    char val[128];
+    for (size_t i = 0; i < N_SETTINGS; i++) {
+        int have = settings_get(setting_defs[i].key, val, sizeof(val)) == 0 &&
+                   setting_defs[i].valid(val);
+        if (setting_defs[i].secret)
+            fprintf(out, "%s = %s\n", setting_defs[i].key,
+                    have ? "<set>" : "<unset>");
+        else
+            fprintf(out, "%s = %s\n", setting_defs[i].key, have ? val : "");
+    }
+}
 
 /* WiFi radio policy, applied at startup and whenever the wifi_country
  * setting changes. The stored region (unset = "00", the world domain)
@@ -422,10 +468,10 @@ static void apply_wifi(int set_region)
     if (set_region || strcmp(cc, "00")) {
         snprintf(cmd, sizeof(cmd), "iw reg set %s >/dev/null 2>&1", cc);
         if (system(cmd) != 0)
-            fprintf(stderr, "forgectrl: iw reg set %s failed\n", cc);
+            fflog(LOG_ERR, "iw reg set %s failed", cc);
     }
     if (system("iw dev wlan0 set power_save off >/dev/null 2>&1") != 0)
-        fprintf(stderr, "forgectrl: wifi power_save off failed\n");
+        fflog(LOG_ERR, "wifi power_save off failed");
 }
 
 /* Machine identity, derived from the i.MX6 OCOTP fuses exactly like
@@ -436,7 +482,7 @@ static void apply_wifi(int set_region)
  * characters, split XXX-YYY. The GUI always identifies the machine by
  * this fuse identity - the gf_serial setting overrides only what is
  * sent to the Glowforge cloud. */
-static unsigned long fuse_serial(void)
+unsigned long fuse_serial(void)
 {
     static unsigned long cached;
     static int tried;
@@ -463,7 +509,7 @@ static unsigned long fuse_serial(void)
  * offset 96) as 64 hex digits - what the machine signs in to the
  * Glowforge service with. Read on demand only (the fuse-identity
  * viewer), never included in routine polls. */
-static int fuse_password(char *buf, size_t len)
+int fuse_password(char *buf, size_t len)
 {
     buf[0] = '\0';
     if (len < 65)
@@ -498,7 +544,7 @@ static int fuse_password(char *buf, size_t len)
     return 0;
 }
 
-static void machine_id(char *buf, size_t len)
+void machine_id(char *buf, size_t len)
 {
     static char cached[16];
     if (!cached[0]) {
@@ -565,7 +611,7 @@ static void append(char *buf, size_t size, size_t *off, const char *fmt, ...)
 
 static int reply_settings(struct _u_response *res)
 {
-    char body[3072], val[128], mid[16], fwver[48];
+    char body[4096], val[128], mid[16], fwver[48];
     size_t off = 0;
 
     read_fw_version(fwver, sizeof(fwver));
@@ -715,9 +761,9 @@ static int cb_settings_post(const struct _u_request *req,
         const char *v = setting_param(req, setting_defs[i].key);
         if (!v)
             continue;
-        fprintf(stderr, "forgectrl: %s %s\n", setting_defs[i].key,
-                !v[0] ? "cleared" :
-                setting_defs[i].secret ? "set" : v);
+        fflog(LOG_NOTICE, "%s %s", setting_defs[i].key,
+              !v[0] ? "cleared" :
+              setting_defs[i].secret ? "set" : v);
     }
     if (setting_param(req, "wifi_country"))
         apply_wifi(1);
@@ -940,6 +986,98 @@ static const char *panel_html(void)
     return page;
 }
 
+/* ---------------------------------------------------------------- logs */
+
+static int cb_logs_list(const struct _u_request *req,
+                        struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    char *body = logs_list_json();
+    if (!body)
+        return reply_error(res, 500, "out of memory");
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    free(body);
+    return U_CALLBACK_CONTINUE;
+}
+
+/* Log content is token-gated like a write: it can carry network
+ * addresses and protocol detail the open status endpoints never do. */
+static int cb_logs_tail(const struct _u_request *req,
+                        struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    const char *name = u_map_get(req->map_url, "name");
+    const char *l = u_map_get(req->map_url, "lines");
+    const char *f = u_map_get(req->map_url, "from");
+    long lines = l ? atol(l) : 200;
+    long long from = f ? atoll(f) : -1;
+    if (!name)
+        return reply_error(res, 400, "name required");
+    char *body = logs_tail_json(name, lines, from);
+    if (!body)
+        return reply_error(res, 404, "unknown logger");
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    free(body);
+    return U_CALLBACK_CONTINUE;
+}
+
+static ssize_t export_stream_cb(void *cls, uint64_t pos, char *buf,
+                                size_t max)
+{
+    (void)pos;
+    ssize_t n = logs_export_read(cls, buf, max);
+    if (n < 0)
+        return U_STREAM_ERROR;
+    if (n == 0)
+        return U_STREAM_END;
+    return n;
+}
+
+static void export_stream_free(void *cls)
+{
+    logs_export_end(cls);
+}
+
+/* Bundle every logger's files plus a system snapshot into a tar.gz.
+ * Sanitized by default (for public issue reports); ?sanitize=0 keeps
+ * everything. Streams; the staging area is removed when the stream
+ * ends, however it ends. */
+static int cb_logs_export(const struct _u_request *req,
+                          struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    const char *sv = setting_param(req, "sanitize");
+    int sanitize = !(sv && (!strcmp(sv, "0") || !strcmp(sv, "false") ||
+                            !strcmp(sv, "no")));
+    char err[160];
+    logs_export_t *e = logs_export_begin(sanitize, settings_snapshot, err,
+                                        sizeof(err));
+    if (!e)
+        return reply_error(res, !strcmp(err, "busy") ? 409 : 500, err);
+    char fn[96], ts[24];
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    strftime(ts, sizeof(ts), "%Y%m%d-%H%M%S", &tm);
+    snprintf(fn, sizeof(fn), "attachment; filename=\"forgefirm-logs-%s%s"
+             ".tar.gz\"", ts, sanitize ? "" : "-full");
+    ulfius_add_header_to_response(res, "Content-Type", "application/gzip");
+    ulfius_add_header_to_response(res, "Content-Disposition", fn);
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    ulfius_set_stream_response(res, 200, export_stream_cb, export_stream_free,
+                               U_STREAM_SIZE_UNKNOWN, 16 * 1024, e);
+    return U_CALLBACK_CONTINUE;
+}
+
 /* "/" serves the UI (ui.c), plus the mjpg-streamer-compatible
  * ?action=stream / ?action=snapshot aliases many clients expect. */
 static int cb_root(const struct _u_request *req, struct _u_response *res,
@@ -963,12 +1101,29 @@ static int cb_root(const struct _u_request *req, struct _u_response *res,
 
 /* ------------------------------------------------------------------ main */
 
-int main(void)
+int main(int argc, char **argv)
 {
     unsigned port = DEFAULT_PORT;
     const char *v = getenv("FORGECTRL_PORT");
     if (v && atoi(v) > 0 && atoi(v) < 65536)
         port = (unsigned)atoi(v);
+
+    /* Boot-time helper: render the rsyslog rules from the settings and
+     * leave. Runs before rsyslog (and before this daemon) starts. */
+    if (argc > 1 && !strcmp(argv[1], "--render-syslog")) {
+        char err[160];
+        if (logs_render(err, sizeof(err)) != 0) {
+            fprintf(stderr, "forgectrl: render-syslog: %s\n", err);
+            return 1;
+        }
+        return 0;
+    }
+    if (argc > 1) {
+        fprintf(stderr, "usage: forgectrl [--render-syslog]\n");
+        return 2;
+    }
+
+    fflog_init("forgectrl");
 
     /* Stay well below the motion feeder (SCHED_FIFO) and the controller;
      * best effort. */
@@ -1005,7 +1160,7 @@ int main(void)
 
     struct _u_instance inst;
     if (ulfius_init_instance(&inst, port, NULL, NULL) != U_OK) {
-        fprintf(stderr, "forgectrl: ulfius init failed\n");
+        fflog(LOG_ERR, "ulfius init failed");
         return 1;
     }
     ulfius_add_endpoint_by_val(&inst, "GET", "/", NULL, 0, &cb_root, NULL);
@@ -1061,15 +1216,21 @@ int main(void)
                                &cb_restore_factory, NULL);
     ulfius_add_endpoint_by_val(&inst, "GET", "/update/status", NULL, 0,
                                &cb_update_status, NULL);
+    ulfius_add_endpoint_by_val(&inst, "GET", "/logs", NULL, 0,
+                               &cb_logs_list, NULL);
+    ulfius_add_endpoint_by_val(&inst, "GET", "/logs/tail", NULL, 0,
+                               &cb_logs_tail, NULL);
+    ulfius_add_endpoint_by_val(&inst, "POST", "/logs/export", NULL, 0,
+                               &cb_logs_export, NULL);
     ulfius_set_upload_file_callback_function(&inst, &update_upload_sink,
                                              NULL);
 
     if (ulfius_start_framework(&inst) != U_OK) {
-        fprintf(stderr, "forgectrl: cannot start HTTP on port %u\n", port);
+        fflog(LOG_ERR, "cannot start HTTP on port %u", port);
         ulfius_clean_instance(&inst);
         return 1;
     }
-    fprintf(stderr, "forgectrl: listening on port %u\n", port);
+    fflog(LOG_NOTICE, "listening on port %u", port);
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
@@ -1077,7 +1238,7 @@ int main(void)
     while (!quit)
         pause();
 
-    fprintf(stderr, "forgectrl: shutting down\n");
+    fflog(LOG_NOTICE, "shutting down");
     ulfius_stop_framework(&inst);
     ulfius_clean_instance(&inst);
     super_shutdown();

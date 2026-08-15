@@ -80,6 +80,7 @@
 #define _GNU_SOURCE
 #include "cool.h"
 #include "diag.h"
+#include "fflog.h"
 #include "settings.h"
 #include "status.h"
 
@@ -426,12 +427,12 @@ static void warn(const char *msg)
     pthread_mutex_lock(&mu);
     snprintf(pub_reason, sizeof(pub_reason), "%s", msg);
     pthread_mutex_unlock(&mu);
-    fprintf(stderr, "forgectrl: cool: %s\n", msg);
+    fflog(LOG_WARNING, "cool: %s", msg);
 }
 
 static void info(const char *msg)
 {
-    fprintf(stderr, "forgectrl: cool: %s\n", msg);
+    fflog(LOG_INFO, "cool: %s", msg);
 }
 
 /* ---------------------------------------------------------- tunables */
@@ -520,8 +521,8 @@ static void verdict_publish(int fire_ok, const char *verdict, int hold,
     if (n < 0)
         return;
     if ((size_t)n >= sizeof(body)) {
-        fprintf(stderr, "forgectrl: cool: verdict too long (%d bytes), "
-                        "not published\n", n);
+        fflog(LOG_ERR, "cool: verdict too long (%d bytes), "
+                       "not published", n);
         return;
     }
 
@@ -1036,10 +1037,10 @@ void cool_init(void)
     engine_run = 1;
     if (pthread_create(&engine_th, NULL, engine_main, NULL) != 0) {
         engine_run = 0;
-        fprintf(stderr, "forgectrl: cool: engine thread failed to start\n");
+        fflog(LOG_ERR, "cool: engine thread failed to start");
         return;
     }
-    fprintf(stderr, "forgectrl: cool: engine started\n");
+    fflog(LOG_INFO, "cool: engine started");
 }
 
 void cool_shutdown(void)

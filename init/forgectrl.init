@@ -1,7 +1,7 @@
 #!/bin/sh
 ### BEGIN INIT INFO
 # Provides:          forgectrl
-# Required-Start:    $network
+# Required-Start:    $network $syslog
 # Required-Stop:
 # Default-Start:     2 3 4 5
 # Default-Stop:      0 1 6
@@ -10,7 +10,7 @@
 
 DAEMON=/usr/bin/forgectrl
 PIDFILE=/var/run/forgectrl.pid
-LOG=/data/forgectrl.log
+FIFO=/var/run/forgectrl.stderr
 
 # The daemon runs under a small respawn wrapper: forgectrl supervises
 # the motion controllers and holds the pulse-device broker, so a crash
@@ -18,22 +18,33 @@ LOG=/data/forgectrl.log
 # running controller alive (it finishes its job unmanaged); the
 # respawned daemon stands by and retakes supervision when the machine
 # is idle. Stopping the service stops the wrapper and the daemon both.
+#
+# Logging: the daemon emits through syslog itself (rsyslog files it
+# under /data/log/forgefirm/forgectrl). Anything that still reaches its
+# stdout/stderr - a loader error, a helper's output, an abort message -
+# flows through a fifo into a `logger` relay under the same program
+# name. The relay holds the fifo open read-write so it never sees EOF
+# and survives daemon respawns.
 
 case "$1" in
   start)
     echo "Starting forgectrl"
+    rm -f "$FIFO"
+    mkfifo -m 600 "$FIFO"
     start-stop-daemon -S -q -p $PIDFILE -m -b -x /bin/sh -- -c "
-      trap 'kill \$CHILD 2>/dev/null; exit 0' TERM
+      trap 'kill \$CHILD \$RELAY 2>/dev/null; exit 0' TERM
       # The wrapper must survive memory pressure to respawn the daemon
       # (the daemon itself runs at -900, controllers at -500).
       echo -1000 > /proc/self/oom_score_adj 2>/dev/null
+      logger -t forgectrl -p daemon.warning <> $FIFO &
+      RELAY=\$!
       while :; do
-        $DAEMON >> $LOG 2>&1 &
+        $DAEMON > $FIFO 2>&1 &
         CHILD=\$!
         wait \$CHILD
         RC=\$?
-        [ \$RC -eq 0 ] && exit 0
-        echo \"forgectrl: exited (\$RC) - respawning in 5 s\" >> $LOG
+        [ \$RC -eq 0 ] && { kill \$RELAY 2>/dev/null; exit 0; }
+        logger -t forgectrl -p daemon.err \"exited (\$RC) - respawning in 5 s\"
         sleep 5 &
         CHILD=\$!
         wait \$CHILD

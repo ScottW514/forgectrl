@@ -14,6 +14,7 @@
  * reader can observe it half-applied.
  */
 #define _GNU_SOURCE
+#include "fflog.h"
 #include "settings.h"
 
 #include <ctype.h>
@@ -136,8 +137,8 @@ int settings_set_many(const char *const *keys, const char *const *vals,
          * dropping the tail would eat unrelated keys (controller mode,
          * cooling tunables, cloud credentials). */
         if (n == FILE_MAX_LINES && fgetc(f) != EOF) {
-            fprintf(stderr, "settings: %s exceeds %d lines; refusing to "
-                            "rewrite\n", path, FILE_MAX_LINES);
+            fflog(LOG_ERR, "settings: %s exceeds %d lines; refusing to "
+                           "rewrite", path, FILE_MAX_LINES);
             fclose(f);
             for (int i = 0; i < n; i++)
                 free(lines[i]);
@@ -163,7 +164,7 @@ int settings_set_many(const char *const *keys, const char *const *vals,
     if (!f) {
         if (tfd >= 0)
             close(tfd);
-        fprintf(stderr, "settings: cannot write %s\n", tmp);
+        fflog(LOG_ERR, "settings: cannot write %s", tmp);
         for (int i = 0; i < n; i++)
             free(lines[i]);
         goto out;
@@ -184,7 +185,7 @@ int settings_set_many(const char *const *keys, const char *const *vals,
     if (!bad && (fflush(f) != 0 || fsync(fileno(f)) != 0))
         bad = 1;
     if (fclose(f) != 0 || bad || rename(tmp, path) != 0) {
-        fprintf(stderr, "settings: cannot update %s\n", path);
+        fflog(LOG_ERR, "settings: cannot update %s", path);
         remove(tmp);
         goto out;
     }

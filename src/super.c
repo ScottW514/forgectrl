@@ -12,12 +12,12 @@
  *
  * One thread owns the whole lifecycle (spawn, reap, respawn, stop) and
  * everything else talks to it through a small request mailbox - there
- * is exactly one waitpid() caller in the process. Every transition out
- * of a running child - expected or not, including SIGKILL escalation -
- * safes the machine (cnc/stop + laser latch): under the broker a child
- * exit is not a final close of the pulse device, so these writes are
- * the safing mechanism. Unexpected deaths additionally respawn with
- * backoff.
+ * is exactly one waitpid() caller for the controller pid. Every
+ * transition out of a running child - expected or not, including
+ * SIGKILL escalation - safes the machine (cnc/stop + laser latch):
+ * under the broker a child exit is not a final close of the pulse
+ * device, so these writes are the safing mechanism. Unexpected deaths
+ * additionally respawn with backoff.
  *
  * The mode-switch sequence (POST /mode) is idle-gated: stop the active
  * controller, persist controller_mode, start the other, wait for its
@@ -34,6 +34,7 @@
 #define _GNU_SOURCE
 #include "cool.h"
 #include "diag.h"
+#include "fflog.h"
 #include "liveness.h"
 #include "settings.h"
 #include "status.h"
@@ -53,9 +54,7 @@
 #include <unistd.h>
 
 #define GRBL_BIN   "/usr/bin/grblHAL_glowforge"
-#define GRBL_LOG   "/data/glowforge.log"
 #define CLOUD_BIN  "/usr/sbin/gfcloud.py"
-#define CLOUD_LOG  "/data/gfcloud.log"
 #define PULSE_DEV  "/dev/glowforge"
 #define HOMED_ANCHOR "/run/grblhal.homed"
 
@@ -93,8 +92,8 @@ static void wr_attr(const char *attr, const char *val);
  * way so the supervisor can take over. Called with mu NOT held. */
 static void takeover_unmanaged(void)
 {
-    fprintf(stderr, "forgectrl: super: taking over from unmanaged "
-                    "controller\n");
+    fflog(LOG_WARNING, "super: taking over from unmanaged "
+                       "controller");
     (void)!system("/etc/init.d/grblhal stop >/dev/null 2>&1");
     (void)!system("/etc/init.d/gfcloud stop >/dev/null 2>&1");
     (void)!system("pkill -x grblHAL_glowfor 2>/dev/null");
@@ -131,15 +130,15 @@ static void broker_open_locked(void)
             usleep(100 * 1000);
     }
     if (broker_fd < 0) {
-        fprintf(stderr, "forgectrl: super: cannot open " PULSE_DEV
-                        " - controllers will self-open (no broker)\n");
+        fflog(LOG_ERR, "super: cannot open " PULSE_DEV
+                       " - controllers will self-open (no broker)");
         return;
     }
     if (flock(broker_fd, LOCK_EX) != 0)
-        fprintf(stderr, "forgectrl: super: flock on " PULSE_DEV " failed\n");
+        fflog(LOG_ERR, "super: flock on " PULSE_DEV " failed");
     probed = 0;     /* a fresh hold means unverified motion */
     probe_skipped = 0;
-    fprintf(stderr, "forgectrl: super: holding " PULSE_DEV " (broker)\n");
+    fflog(LOG_INFO, "super: holding " PULSE_DEV " (broker)");
 }
 
 /* Motion-liveness gate, run with mu NOT held (takes seconds; the
@@ -155,25 +154,25 @@ static int probe_sequence(int fd)
 
     for (size_t i = 0; i < sizeof(ladder_s) / sizeof(ladder_s[0]); i++) {
         if (ladder_s[i] > 0) {
-            fprintf(stderr, "forgectrl: super: motion dead - rail off %d s "
-                            "and re-probing (%zu/3)\n", ladder_s[i], i);
+            fflog(LOG_WARNING, "super: motion dead - rail off %d s "
+                               "and re-probing (%zu/3)", ladder_s[i], i);
             wr_attr("cnc/disable", "1");
             sleep((unsigned)ladder_s[i]);
         }
         wr_attr("cnc/enable", "1");
         sleep(1);
         int rc = liveness_probe(fd, detail, sizeof(detail));
-        fprintf(stderr, "forgectrl: super: liveness probe: %s - %s\n",
-                rc == 1 ? "MOTION OK" : rc == 0 ? "NO MOTION" : "ERROR",
-                detail);
+        fflog(LOG_INFO, "super: liveness probe: %s - %s",
+              rc == 1 ? "MOTION OK" : rc == 0 ? "NO MOTION" : "ERROR",
+              detail);
         if (rc == 1)
             return 1;
         if (rc < 0)
             return 2;   /* cannot probe (no accel?): do not block the machine */
     }
-    fprintf(stderr, "forgectrl: super: MOTION FAULT - the stepper drivers "
-                    "did not recover; a full power cycle may be required. "
-                    "Controllers stay down (retry via POST /mode).\n");
+    fflog(LOG_CRIT, "super: MOTION FAULT - the stepper drivers "
+                   "did not recover; a full power cycle may be required. "
+                   "Controllers stay down (retry via POST /mode).");
     return 0;
 }
 
@@ -252,6 +251,58 @@ static void free_child_env(char **env)
     free(env);
 }
 
+/* A controller's stray stdout/stderr - interpreter tracebacks, library
+ * messages, anything not sent through its own syslog emitter - flows
+ * through a `logger` relay into syslog under the controller's program
+ * name, so it lands in that controller's log directory. The relay is
+ * double-forked (init reaps it) and lives as long as the pipe has a
+ * writer, so it outlives this daemon whenever the controller does.
+ * Returns the pipe's write end, or -1 (the controller then runs with
+ * its output discarded rather than not at all). */
+static int spawn_output_relay(const char *tag)
+{
+    int p[2];
+    if (pipe2(p, O_CLOEXEC) != 0)
+        return -1;
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(p[0]);
+        close(p[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        pid_t g = fork();
+        if (g != 0)
+            _exit(g < 0 ? 127 : 0);
+        dup2(p[0], 0);
+        int nul = open("/dev/null", O_WRONLY);
+        if (nul >= 0) {
+            dup2(nul, 1);
+            dup2(nul, 2);
+        }
+        long maxfd = sysconf(_SC_OPEN_MAX);
+        if (maxfd < 0 || maxfd > 4096)
+            maxfd = 4096;
+        for (int fd = 3; fd < (int)maxfd; fd++)
+            close(fd);
+        /* Reclaimed no sooner than the controller it serves: a dead
+         * relay turns the controller's stray writes into EPIPE. */
+        int ofd = open("/proc/self/oom_score_adj", O_WRONLY);
+        if (ofd >= 0) {
+            (void)!write(ofd, "-500", 4);
+            close(ofd);
+        }
+        execl("/usr/bin/logger", "logger", "-t", tag, "-p",
+              "daemon.warning", (char *)NULL);
+        _exit(127);
+    }
+    close(p[0]);
+    int st;
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
+        ;
+    return p[1];
+}
+
 /* Called with mu held. */
 static void spawn_locked(ctl_t ctl)
 {
@@ -259,17 +310,20 @@ static void spawn_locked(ctl_t ctl)
 
     char **env = build_child_env(ctl, broker_fd);
     if (!env) {
-        fprintf(stderr, "forgectrl: super: cannot build the controller "
-                        "environment: %s\n", strerror(errno));
+        fflog(LOG_ERR, "super: cannot build the controller "
+                       "environment: %s", strerror(errno));
         respawn_at = wall_s() + backoff_s;
         return;
     }
 
+    int lfd = spawn_output_relay(ctl == Ctl_Grbl ? "grblhal" : "gfcloud");
     pid_t pid = fork();
     if (pid < 0) {
-        fprintf(stderr, "forgectrl: super: fork failed: %s\n",
-                strerror(errno));
+        fflog(LOG_ERR, "super: fork failed: %s",
+              strerror(errno));
         free_child_env(env);
+        if (lfd >= 0)
+            close(lfd);
         respawn_at = wall_s() + backoff_s;
         return;
     }
@@ -277,13 +331,9 @@ static void spawn_locked(ctl_t ctl)
         /* Child: async-signal-safe calls only from here to exec. Own
          * process group so stop() can signal helpers too. */
         setpgid(0, 0);
-        const char *log = ctl == Ctl_Grbl ? GRBL_LOG : CLOUD_LOG;
-        int lfd = open(log, O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (lfd >= 0) {
             dup2(lfd, 1);
             dup2(lfd, 2);
-            if (lfd > 2)
-                close(lfd);
         }
         if (broker_fd >= 0) {
             /* The broker fd is opened O_CLOEXEC; a controller is the
@@ -319,12 +369,14 @@ static void spawn_locked(ctl_t ctl)
         _exit(127);
     }
     free_child_env(env);
+    if (lfd >= 0)
+        close(lfd);         /* the controller holds the only writer now */
     child_pid = pid;
     child_ctl = ctl;
     spawned_at = wall_s();
     generation++;
-    fprintf(stderr, "forgectrl: super: started %s controller (pid %d)\n",
-            ctl_name(ctl), (int)pid);
+    fflog(LOG_NOTICE, "super: started %s controller (pid %d)",
+          ctl_name(ctl), (int)pid);
 }
 
 /* Reap and, if the death was unexpected, safe the machine and arm the
@@ -339,10 +391,10 @@ static void reap_locked(int status)
     pthread_cond_broadcast(&cv);
 
     int expected = suspended || want != died;
-    fprintf(stderr,
-            "forgectrl: super: %s controller exited (status 0x%x, up %.0f s)%s\n",
-            ctl_name(died), (unsigned)status, up,
-            expected ? "" : " - unexpected");
+    fflog(expected ? LOG_NOTICE : LOG_WARNING,
+          "super: %s controller exited (status 0x%x, up %.0f s)%s",
+          ctl_name(died), (unsigned)status, up,
+          expected ? "" : " - unexpected");
 
     /* Safe posture on EVERY transition out of a running child, expected
      * or not. Under the device broker a child's exit is not a final
@@ -364,7 +416,7 @@ static void reap_locked(int status)
     if (up >= HEALTHY_UPTIME_S)
         backoff_s = RESPAWN_MIN_S;
     respawn_at = wall_s() + backoff_s;
-    fprintf(stderr, "forgectrl: super: respawn in %u s\n", backoff_s);
+    fflog(LOG_WARNING, "super: respawn in %u s", backoff_s);
     if (backoff_s < RESPAWN_MAX_S)
         backoff_s *= 2;
 }
@@ -377,8 +429,8 @@ static void stop_locked(void)
     if (child_pid <= 0)
         return;
     pid_t pid = child_pid;
-    fprintf(stderr, "forgectrl: super: stopping %s controller (pid %d)\n",
-            ctl_name(child_ctl), (int)pid);
+    fflog(LOG_INFO, "super: stopping %s controller (pid %d)",
+          ctl_name(child_ctl), (int)pid);
     /* Safe the machine BEFORE the signal, not only after the reap: this
      * path is also the emergency lever (POST /controller/stop is not
      * idle-gated), and a controller that is mid-job may take its whole
@@ -407,7 +459,7 @@ static void stop_locked(void)
         if (child_pid != pid || (r < 0 && errno == ECHILD))
             break;
         if (wall_s() > deadline) {
-            fprintf(stderr, "forgectrl: super: escalating to SIGKILL\n");
+            fflog(LOG_WARNING, "super: escalating to SIGKILL");
             kill(-pid, SIGKILL);
             kill(pid, SIGKILL);
             /* A SIGKILLed child can run no cleanup of its own - safe
@@ -525,18 +577,18 @@ void super_init(void)
     if (unmanaged_controller_running()) {
         suspended = 1;
         standby_takeover = 1;
-        fprintf(stderr, "forgectrl: super: unmanaged controller already "
-                        "running - standing by until the machine is idle\n");
+        fflog(LOG_WARNING, "super: unmanaged controller already "
+                           "running - standing by until the machine is idle");
     }
     th_run = 1;
     pthread_mutex_unlock(&mu);
     if (pthread_create(&th, NULL, super_main, NULL) != 0) {
         th_run = 0;
-        fprintf(stderr, "forgectrl: super: thread failed to start\n");
+        fflog(LOG_ERR, "super: thread failed to start");
         return;
     }
-    fprintf(stderr, "forgectrl: super: supervising mode %s%s\n",
-            ctl_name(want), suspended ? " (standby)" : "");
+    fflog(LOG_INFO, "super: supervising mode %s%s",
+          ctl_name(want), suspended ? " (standby)" : "");
 }
 
 void super_shutdown(void)
@@ -553,9 +605,9 @@ void super_shutdown(void)
         if (machine_is_idle())
             stop_locked();
         else
-            fprintf(stderr, "forgectrl: super: machine busy - leaving %s "
-                            "controller running (pid %d, unmanaged)\n",
-                    ctl_name(child_ctl), (int)child_pid);
+            fflog(LOG_WARNING, "super: machine busy - leaving %s "
+                               "controller running (pid %d, unmanaged)",
+                  ctl_name(child_ctl), (int)child_pid);
     }
     /* Our reference goes away either way. Idle: the device closes and
      * the kernel locks the latch. Busy-orphan: the child's dup keeps
@@ -649,8 +701,8 @@ int super_mode_switch(const char *mode, char *err, size_t elen)
         }
         usleep(500 * 1000);
     }
-    fprintf(stderr, "forgectrl: super: %s controller running but no "
-                    "job-state report yet\n", mode);
+    fflog(LOG_INFO, "super: %s controller running but no "
+                    "job-state report yet", mode);
     return 0;
 }
 
