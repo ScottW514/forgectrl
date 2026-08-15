@@ -18,3 +18,5 @@ jobs:
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-Werror
       - name: Build
         run: cmake --build build -j"$(nproc)"
+      - name: machine_is_idle fail-closed (X-2)
+        run: ./build/status_idle_test

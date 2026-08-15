@@ -64,10 +64,24 @@ static void append(char *buf, size_t size, size_t *off, const char *fmt, ...)
 #define XY_MM_PER_FULL_STEP 0.15
 #define Z_MM_PER_FULL_STEP  0.70612
 
+/* The sysfs root is fixed in production; GF_SYSFS_ROOT overrides it for
+ * host unit tests (the same test-seam idiom as GF_VERDICT_FILE), letting
+ * a test point the reader at a temp tree and exercise the fail-closed
+ * path with no /sys/glowforge present. Must end with '/'. */
+static const char *gf_sysfs_root(void)
+{
+    static const char *root;
+    if (!root) {
+        const char *r = getenv("GF_SYSFS_ROOT");
+        root = (r && *r) ? r : GF_SYSFS;
+    }
+    return root;
+}
+
 static int rd_attr(const char *attr, char *buf, size_t len)
 {
     char path[128];
-    snprintf(path, sizeof(path), GF_SYSFS "%s", attr);
+    snprintf(path, sizeof(path), "%s%s", gf_sysfs_root(), attr);
     int fd = open(path, O_RDONLY);
     if (fd < 0)
         return -1;
