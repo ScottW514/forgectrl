@@ -40,9 +40,10 @@
 #include <time.h>
 #include <unistd.h>
 
-/* EV_SW bits (device tree): 3 = doors (combined), 5 = remote interlock
- * (active-when-open). The probe moves the gantry, so it must never run
- * with an opening the operator could reach into. */
+/* EV_SW bits (device tree): 3 = doors (combined; bit SET = closed),
+ * 5 = remote interlock (bit SET = open). Same senses as the
+ * controller's switch map. The probe moves the gantry, so it must
+ * never run with an opening the operator could reach into. */
 #define SWITCH_DEV       "/dev/input/event0"
 #define SW_BIT_DOORS     3
 #define SW_BIT_INTERLOCK 5
@@ -57,7 +58,7 @@ static int enclosure_open(void)
     close(fd);
     if (!ok)
         return 0;
-    return (sw[0] & (1u << SW_BIT_DOORS)) || (sw[0] & (1u << SW_BIT_INTERLOCK));
+    return !(sw[0] & (1u << SW_BIT_DOORS)) || (sw[0] & (1u << SW_BIT_INTERLOCK));
 }
 
 /* Head accelerometer: iio device on i2c-3 addr 0x1e (glowforge.dts
