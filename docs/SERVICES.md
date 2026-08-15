@@ -74,9 +74,14 @@ Who reads what:
   *meaning* is mode-specific by design; the reads stay in-process for latency.
 - **The active controller also reads bits 3 and 5 for its own motion gate.**
   In GRBL mode they become the core's safety-door signal — lid open or
-  interlock loop open parks a running job and closing it resumes; bit 4 gates
-  nothing unless the machine settings opt in (`estop_halts_motion`, for a
-  retrofitted e-stop circuit), because of the resting-high behavior above.
+  interlock loop open parks a running (or held) job, and a cycle start
+  resumes it once closed. While the core is idle, jogging or homing the
+  signal is hidden from it, so a lid cycle at idle (loading material) never
+  strands the controller in Door; a job started with the lid open parks on
+  the first poll. Bit 4 gates nothing unless the machine settings opt in
+  (`estop_halts_motion`, for a retrofitted e-stop circuit), because of the
+  resting-high behavior above. The cloud client reads the same bits itself
+  and is unaffected (it reports every lid event to the service).
 - **No process takes `EVIOCGRAB`** on the device — the cloud client's reader
   included. Exclusivity of button *meaning* comes from mode selection, and a
   grab starves every other reader of events.
