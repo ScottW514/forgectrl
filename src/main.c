@@ -363,6 +363,15 @@ static int valid_confirm_s(const char *v)  { return valid_range(v, 60, 3600); }
 static int valid_temp_c(const char *v)     { return valid_range(v, 5, 38); }
 static int valid_cool_s(const char *v)     { return valid_range(v, 0, 1800); }
 
+/* GRBL-mode tunables, read by the controller from the same file. The
+ * button wait runs with the laser latch unlocked and the controller
+ * refuses an unbounded value, so the range here matches its clamp; the
+ * disarm grace and the rail settle are bounded to what the machine can
+ * mean by them. */
+static int valid_button_s(const char *v)   { return valid_range(v, 1, 3600); }
+static int valid_disarm_s(const char *v)   { return valid_range(v, 1, 3600); }
+static int valid_settle_s(const char *v)   { return valid_range(v, 0, 30); }
+
 static const struct {
     const char *key;
     int (*valid)(const char *);
@@ -387,6 +396,9 @@ static const struct {
     { "cool_temp_resume",       valid_temp_c,      0 },
     { "cool_cooldown_s",        valid_cool_s,      0 },
     { "cool_cooldown_max_s",    valid_cool_s,      0 },
+    { "laser_button_timeout_s", valid_button_s,    0 },
+    { "laser_disarm_s",         valid_disarm_s,    0 },
+    { "rail_settle_s",          valid_settle_s,    0 },
 };
 #define N_SETTINGS (sizeof(setting_defs) / sizeof(*setting_defs))
 

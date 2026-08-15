@@ -57,6 +57,9 @@
 /* An upload larger than any plausible archive is cut off (slot is
  * 200 MiB; a .fw compresses well below that). */
 #define UPLOAD_MAX  (256UL * 1024 * 1024)
+/* The same bound on the release download, enforced by curl before the
+ * signature check can discard an oversized file. */
+#define DL_MAX_BYTES "268435456"
 
 /* ------------------------------------------------------------- state */
 
@@ -691,8 +694,8 @@ static void *dl_worker(void *arg)
     unlink(DL_FW);
     char out[512];
     int rc = run_cmd(out, sizeof(out),
-                     "curl -fSL --max-time 600 -o " DL_FW " " LATEST_URL
-                     " 2>&1");
+                     "curl -fSL --max-time 600 --max-filesize " DL_MAX_BYTES
+                     " -o " DL_FW " " LATEST_URL " 2>&1");
     if (rc != 0) {
         unlink(DL_FW);
         job_finish("{\"ok\":false,\"error\":\"download failed\","

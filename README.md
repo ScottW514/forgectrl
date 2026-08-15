@@ -52,8 +52,9 @@ OpenGlow visual identity, tabbed:
 - **GF Cloud** — Glowforge web-service overrides: machine identity
   (serial / password; blank = the factory fuse identity) and the
   homing-session timeout.
-- **GRBL** — controller connection info; GRBL-mode tunables land here as
-  the controller exposes them.
+- **GRBL** — controller connection info and the GRBL-mode tunables the
+  controller reads from the shared settings: the laser arm window
+  (button wait, disarm grace) and the motor-rail settle time.
 - **Diagnostics** — tools that take the hardware over (the active
   controller is suspended through the supervisor for the duration):
   cooling system verification and calibration.

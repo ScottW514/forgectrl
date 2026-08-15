@@ -514,6 +514,16 @@ static void verdict_publish(int fire_ok, const char *verdict, int hold,
         verdict, hold ? "true" : "false", hold ? "false" : "true",
         pub_reason, pub_down, pub_up);
     pthread_mutex_unlock(&mu);
+    /* snprintf reports the untruncated length; never publish more than
+     * the buffer holds, and never a document whose closing brace was
+     * cut off (the client refuses an incomplete verdict). */
+    if (n < 0)
+        return;
+    if ((size_t)n >= sizeof(body)) {
+        fprintf(stderr, "forgectrl: cool: verdict too long (%d bytes), "
+                        "not published\n", n);
+        return;
+    }
 
     int fd = open(VERDICT_TMP, O_CREAT | O_TRUNC | O_WRONLY, 0644);
     if (fd < 0)

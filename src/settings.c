@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static pthread_mutex_t settings_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -156,13 +157,18 @@ int settings_set_many(const char *const *keys, const char *const *vals,
 
     char tmp[300];
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-    f = fopen(tmp, "w");
+    /* The file carries the cloud password: owner-only from creation. */
+    int tfd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    f = tfd >= 0 ? fdopen(tfd, "w") : NULL;
     if (!f) {
+        if (tfd >= 0)
+            close(tfd);
         fprintf(stderr, "settings: cannot write %s\n", tmp);
         for (int i = 0; i < n; i++)
             free(lines[i]);
         goto out;
     }
+    (void)fchmod(tfd, 0600);
     for (int i = 0; i < n; i++) {
         fputs(lines[i], f);
         free(lines[i]);

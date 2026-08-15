@@ -191,20 +191,87 @@ static const char *ctl_name(ctl_t c)
 
 /* ------------------------------------------------------------- spawn */
 
+extern char **environ;
+
+/* The controller's environment, assembled in the parent: the daemon is
+ * multithreaded, so between fork() and exec the child may only call
+ * async-signal-safe functions - setenv() (malloc + the environ lock)
+ * is not one, and a lock another thread held at fork time would hang
+ * the child forever while it holds the broker fd. Returns a NULL-
+ * terminated vector to free with free_child_env(), or NULL. */
+static char **build_child_env(ctl_t ctl, int pulse_fd)
+{
+    size_t n = 0;
+    while (environ && environ[n])
+        n++;
+    char **env = calloc(n + 3, sizeof(*env));
+    if (!env)
+        return NULL;
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++) {
+        /* Our own entries replace any inherited value of the same key. */
+        if (!strncmp(environ[i], "GF_PULSE_FD=", 12) ||
+            !strncmp(environ[i], "GFSINK=", 7))
+            continue;
+        env[k] = strdup(environ[i]);
+        if (!env[k])
+            goto fail;
+        k++;
+    }
+    if (pulse_fd >= 0) {
+        char fdv[32];
+        snprintf(fdv, sizeof(fdv), "GF_PULSE_FD=%d", pulse_fd);
+        if (!(env[k] = strdup(fdv)))
+            goto fail;
+        k++;
+    }
+    if (ctl == Ctl_Grbl) {
+        if (!(env[k] = strdup("GFSINK=" PULSE_DEV)))
+            goto fail;
+        k++;
+    }
+    env[k] = NULL;
+    return env;
+fail:
+    for (size_t i = 0; i < k; i++)
+        free(env[i]);
+    free(env);
+    return NULL;
+}
+
+static void free_child_env(char **env)
+{
+    if (!env)
+        return;
+    for (size_t i = 0; env[i]; i++)
+        free(env[i]);
+    free(env);
+}
+
 /* Called with mu held. */
 static void spawn_locked(ctl_t ctl)
 {
     broker_open_locked();
 
+    char **env = build_child_env(ctl, broker_fd);
+    if (!env) {
+        fprintf(stderr, "forgectrl: super: cannot build the controller "
+                        "environment: %s\n", strerror(errno));
+        respawn_at = wall_s() + backoff_s;
+        return;
+    }
+
     pid_t pid = fork();
     if (pid < 0) {
         fprintf(stderr, "forgectrl: super: fork failed: %s\n",
                 strerror(errno));
+        free_child_env(env);
         respawn_at = wall_s() + backoff_s;
         return;
     }
     if (pid == 0) {
-        /* Child: own process group so stop() can signal helpers too. */
+        /* Child: async-signal-safe calls only from here to exec. Own
+         * process group so stop() can signal helpers too. */
         setpgid(0, 0);
         const char *log = ctl == Ctl_Grbl ? GRBL_LOG : CLOUD_LOG;
         int lfd = open(log, O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -215,9 +282,6 @@ static void spawn_locked(ctl_t ctl)
                 close(lfd);
         }
         if (broker_fd >= 0) {
-            char fdv[16];
-            snprintf(fdv, sizeof(fdv), "%d", broker_fd);
-            setenv("GF_PULSE_FD", fdv, 1);
             /* The broker fd is opened O_CLOEXEC; a controller is the
              * one child that must inherit it across exec. */
             fcntl(broker_fd, F_SETFD, 0);
@@ -241,17 +305,16 @@ static void spawn_locked(ctl_t ctl)
             close(ofd);
         }
         if (ctl == Ctl_Grbl) {
-            /* Mirrors the former init-script launch. */
             if (chdir("/data") != 0)
                 _exit(126);
-            setenv("GFSINK", PULSE_DEV, 1);
-            execl(GRBL_BIN, GRBL_BIN, "-p", "23",
-                  "-e", "/data/EEPROM-glowforge.DAT", (char *)NULL);
+            execle(GRBL_BIN, GRBL_BIN, "-p", "23",
+                   "-e", "/data/EEPROM-glowforge.DAT", (char *)NULL, env);
         } else {
-            execl(CLOUD_BIN, CLOUD_BIN, (char *)NULL);
+            execle(CLOUD_BIN, CLOUD_BIN, (char *)NULL, env);
         }
         _exit(127);
     }
+    free_child_env(env);
     child_pid = pid;
     child_ctl = ctl;
     spawned_at = wall_s();
@@ -325,6 +388,12 @@ static void stop_locked(void)
             reap_locked(status);
             break;
         }
+        /* Reaped meanwhile by the supervisor thread (shutdown runs this
+         * from the caller's thread while that loop may still be
+         * draining): the pid is free for reuse and must not be
+         * signaled again. */
+        if (child_pid != pid || (r < 0 && errno == ECHILD))
+            break;
         if (wall_s() > deadline) {
             fprintf(stderr, "forgectrl: super: escalating to SIGKILL\n");
             kill(-pid, SIGKILL);

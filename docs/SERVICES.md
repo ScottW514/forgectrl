@@ -73,9 +73,9 @@ Who reads what:
   interlock loop open parks a running job and closing it resumes; bit 4 gates
   nothing unless the machine settings opt in (`estop_halts_motion`, for a
   retrofitted e-stop circuit), because of the resting-high behavior above.
-- **No process takes `EVIOCGRAB`** on the device. Exclusivity of button
-  *meaning* comes from mode selection, and a grab starves every other reader of
-  events. (The cloud client's grab is scheduled for removal.)
+- **No process takes `EVIOCGRAB`** on the device — the cloud client's reader
+  included. Exclusivity of button *meaning* comes from mode selection, and a
+  grab starves every other reader of events.
 
 ---
 
@@ -101,9 +101,8 @@ degC = 3380 / ln(R / Rinf) - 273.15
 Higher raw = colder (NTC). Treat `raw <= 0` or `raw >= F` as open/shorted
 sensor, not a temperature. `water_temp_1` is **downstream** of the flow-check
 heater, `water_temp_2` **upstream**; run/resume ceilings gate on the upstream
-sensor. The legacy linear approximation still present in `gfhardware`'s
-`cooling.py` does not match this curve and is slated for replacement — do not
-copy it into new code.
+sensor. `gfhardware`'s `cooling.py` implements this same curve for the cloud
+client.
 
 ### Chassis temperature (LM75)
 
@@ -240,7 +239,10 @@ rename) at ~1 Hz and on every verdict change:
 ```
 
 - `ts_mono` is `CLOCK_MONOTONIC` seconds. **Readers must treat a missing file
-  or `ts_mono` older than 2 s as `fire_ok=false, hold=true`.**
+  or `ts_mono` older than 2 s as `fire_ok=false, hold=true`.** A body without
+  its closing brace is a torn read, not a verdict; an absent `fire_ok`,
+  `hold`, or `resume_ok` key takes the fail-safe value (`false`, `true`,
+  `false`). The publisher never writes a document longer than its buffer.
 - `verdict`: `OK | SUSPECT | FAULT | OVERTEMP | FIRE`. `hold=true` asks the active
   controller for a feed hold; `resume_ok=true` signals recovery below the
   resume gate (auto-resume is the controller's call).
@@ -311,17 +313,17 @@ remain only as manual emergency stops.
   power-off to recover); if the ladder fails, controllers stay down and
   `/mode` reports `motion-fault` (retry via `POST /mode`).
 
-## Pulse-device ownership [implemented: broker; rail policy pending]
+## Pulse-device ownership [implemented: broker; rail policy: contract]
 
 `/dev/glowforge` semantics (kernel details in `UAPI.md`): the device is
 **exclusive-open** (a second open fails EBUSY), the `flock` on it arms the
 kernel dead-man (**final close of the open file description** mid-program =
 emergency stop), and every close locks the laser latch. The open itself has
-no rail side effect — the 40 V rail moves on `cnc/enable`/`cnc/disable`
-writes, which is why close-and-reopen handovers historically cycled it (each
-client disabled/enabled around its own open) and why a fast off→on bounce
-can leave the supply folded back (counters run, motors dead; the
-`rail_settle_s` off-period guards every standalone takeover).
+no rail side effect — the 40 V rail moves only on `cnc/enable`/`cnc/disable`
+writes. A client that disables and re-enables the rail around its own open
+cycles it on every handover, and a fast off→on bounce can leave the supply
+folded back (counters run, motors dead), which is why the `rail_settle_s`
+off-period guards every standalone takeover and why the broker exists.
 
 **The broker [implemented]:** the forgectrl supervisor opens the device once
 (lazily, at the first managed spawn) and holds it for its lifetime, flock'd.
@@ -356,17 +358,18 @@ fd — the real-time feed path is never proxied.
   a writer runs leaves the writer's dup as the last reference, so the
   writer's own exit becomes the final close — the kernel backstop either
   way.
-- **Rail policy [contract, pending]:** `cnc/enable`/`cnc/disable` become
-  forgectrl-only writes (diagnostics under its takeover rules), and every
-  deliberate re-enable observes `rail_settle_s`. **The rail stays up while
-  the machine is on — there is no idle-rail-off policy**: the stepper
+- **Rail policy [contract]:** `cnc/enable`/`cnc/disable` are forgectrl's
+  writes (the liveness ladder, diagnostics under its takeover rules), and
+  every deliberate re-enable observes `rail_settle_s`. **The rail stays up
+  while the machine is on — there is no idle-rail-off policy**: the stepper
   drivers can come out of any power-up unserviceable, so each cycle is a
-  fresh gamble and the cheapest policy is not to cycle. Already true: with a
-  brokered fd in play no client drops the rail on a handback or a takeover,
-  and takeover settles are skipped because the rail never went down (an
-  emergency halt may still disable it deliberately). Outstanding: the GRBL
-  controller still writes `cnc/enable` at init and at homing resume
-  (idempotent against an already-settled rail).
+  fresh gamble and the cheapest policy is not to cycle. With a brokered fd
+  in play no client drops the rail on a handback or a takeover, and takeover
+  settles are skipped because the rail never went down (an emergency halt
+  may still disable it deliberately). The GRBL controller's `cnc/enable` at
+  init and at homing resume are the one residual controller write:
+  idempotent against a rail that is already up (listed in the ownership
+  table below).
 
 **Watchdog scope:** the i.MX6 hardware watchdog is a boot/system watchdog,
 not a laser-safety watchdog — nothing ties `/dev/watchdog` to controller
@@ -379,6 +382,19 @@ charge pump self-terminates on its next 200 ms tick and the HV watchdog
 disarms the chain. Cloud mode preloads whole jobs, so its ring does not
 drain on a feeder stall — that residual is covered by the cooling engine's
 hung-controller dead-man above.
+
+---
+
+## Clocks [rule]
+
+The board has no RTC: wall-clock time is whatever NTP last set and steps by
+years across a cold boot (`ntp.conf` carries `tinker panic 0` so it may).
+Every job, timeout, deadline, and freshness comparison in this stack — the
+verdict `ts_mono` and its 2 s freshness, the report cadences, the button wait
+and disarm grace, the dead-man silences, the supervisor's stop deadlines and
+respawn backoff, the liveness ladder — is on `CLOCK_MONOTONIC`. Wall-clock
+time (`time()`, `CLOCK_REALTIME`) is for display and log stamps only. **Never
+put a safety, job, or timeout decision on the wall clock.**
 
 ---
 
