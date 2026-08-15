@@ -312,13 +312,18 @@ int machine_status_json(char *buf, size_t len)
         append(buf, len, &off,
             "\"gfsvc\":{\"latest\":\"%s\",\"tested\":\"%s\"},",
             gf_latest, gf_tested);
+    /* Head presence is the head driver having probed (its sysfs group
+     * exists), never EV_SW bit 7 - that line is not presence (a connected
+     * head reads it inactive; it pulses while the head MCU reboots). */
+    char hall[16];
+    int head_present = rd_attr("head/hall_sensor", hall, sizeof(hall)) == 0;
     append(buf, len, &off,
         "\"switches\":{\"lid\":%s,\"button\":%s,\"interlock_ok\":%s,"
         "\"head\":%s,\"estop\":%s}}",
         (sw & (1u << 3)) ? "true" : "false",
         (sw & (1u << 2)) ? "true" : "false",
         (sw & (1u << 5)) ? "false" : "true",
-        (sw & (1u << 7)) ? "true" : "false",
+        head_present ? "true" : "false",
         (sw & (1u << 4)) ? "true" : "false");
     return 0;
 }

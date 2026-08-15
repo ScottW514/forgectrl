@@ -82,7 +82,8 @@ static double respawn_at = 0.0;    /* not before this time */
 static unsigned generation = 0;    /* bumped on every state change */
 
 static int broker_fd = -1;         /* /dev/glowforge, held for our lifetime */
-static int probed = 0;             /* liveness verified since broker open */
+static int probed = 0;             /* liveness gate passed since broker open */
+static int probe_skipped = 0;      /* ...but the probe itself could not run */
 static int motion_fault = 0;       /* probe failed after recovery - no spawn */
 static int standby_takeover = 0;   /* unmanaged controller found: retake at idle */
 
@@ -137,13 +138,16 @@ static void broker_open_locked(void)
     if (flock(broker_fd, LOCK_EX) != 0)
         fprintf(stderr, "forgectrl: super: flock on " PULSE_DEV " failed\n");
     probed = 0;     /* a fresh hold means unverified motion */
+    probe_skipped = 0;
     fprintf(stderr, "forgectrl: super: holding " PULSE_DEV " (broker)\n");
 }
 
 /* Motion-liveness gate, run with mu NOT held (takes seconds; the
  * recovery ladder takes a minute). The DRV8825 drivers can come out of
  * a rail power-up unserviceable; each recovery attempt gives them a
- * longer true power-off before re-probing. Returns 1 ok, 0 fault. */
+ * longer true power-off before re-probing. Returns 1 verified, 0 fault,
+ * 2 when the probe could not run (no accelerometer, enclosure open): the
+ * machine is not blocked, but motion stays UNVERIFIED and is reported so. */
 static int probe_sequence(int fd)
 {
     static const int ladder_s[] = { 0, 5, 15, 30 };
@@ -165,7 +169,7 @@ static int probe_sequence(int fd)
         if (rc == 1)
             return 1;
         if (rc < 0)
-            return 1;   /* cannot probe (no accel?): do not block the machine */
+            return 2;   /* cannot probe (no accel?): do not block the machine */
     }
     fprintf(stderr, "forgectrl: super: MOTION FAULT - the stepper drivers "
                     "did not recover; a full power cycle may be required. "
@@ -462,10 +466,11 @@ static void *super_main(void *arg)
             if (broker_fd >= 0 && !probed) {
                 int fd = broker_fd;
                 pthread_mutex_unlock(&mu);
-                int ok = probe_sequence(fd);
+                int rc = probe_sequence(fd);
                 pthread_mutex_lock(&mu);
-                probed = ok;
-                motion_fault = !ok;
+                probed = rc != 0;
+                probe_skipped = rc == 2;
+                motion_fault = rc == 0;
             } else
                 spawn_locked(want);
         }
@@ -682,7 +687,8 @@ int super_status_json(char *buf, size_t len)
                  : motion_fault ? "motion-fault"
                  : suspended ? "standby" : "stopped",
              (int)child_pid,
-             motion_fault ? "fault" : probed ? "verified" : "unverified");
+             motion_fault ? "fault"
+                 : probed && !probe_skipped ? "verified" : "unverified");
     pthread_mutex_unlock(&mu);
     return 0;
 }

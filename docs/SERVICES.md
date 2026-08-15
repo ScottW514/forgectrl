@@ -60,7 +60,11 @@ there; machines with a real e-stop circuit opt in via the cloud client's
 **Bit 7 (`head`) is not head presence.** Bench-verified: a gen2 head connected
 and answering I²C (`head/info` returns id/serial) reads bit 7 INACTIVE. The
 line pulses while the head MCU reboots (hence its 60 ms debounce in the device
-tree). Detect head presence via `head/info` I²C liveness, never this bit.
+tree). Detect head presence via the head driver having probed — the
+`/sys/glowforge/head/` group exists (`head/hall_sensor` readable) — never this
+bit. `/status` `switches.head` reports that presence; the GRBL controller
+refuses to arm without it (no lens, no air assist, no beam detector — and the
+hardware safety chain does not include head presence).
 
 Who reads what:
 
