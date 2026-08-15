@@ -37,7 +37,7 @@ arrive as input events. Bit set = switch active.
 | 1 | `door2` | door/lid switch 2 closed |
 | 2 | `button` | the big button is pressed |
 | 3 | `doors` | both door switches closed (the series combination the safety chain sees) |
-| 4 | `estop` | e-stop sense line high — the **normal** state; see below |
+| 4 | `hv_enable` | the safety chain's HV_ENABLE output is asserted (readback) — see below |
 | 5 | `interlock` | **remote-interlock loop OPEN** — see below |
 | 6 | `interlock_latch` | interlock latch set (LASER_ON blocked in hardware); the kernel sets it while bit 5 reads open and releases it when the loop closes |
 | 7 | `head` | head-attention line — **not** a head-present indicator; see below |
@@ -49,13 +49,13 @@ factory-jumpered, so the bit stays inactive there — i.e. satisfied; Pro brings
 the connector out for an external lockout chain. Any UI or gate expression must
 treat `interlock_ok = !bit5`.
 
-**Bit 4 (`estop`) reads ACTIVE on a healthy, idle machine** — it is a sense
-line whose resting state is high, not an "asserted = stop" input (no Glowforge
-model has a user e-stop, and the hardware fire chain carries no e-stop term).
-On the factory board the line drops for the whole duration of any stepper
-motion and recovers at idle (measured live), so it cannot gate motion or fire
-there; machines with a real e-stop circuit opt in via the cloud client's
-`MOTION.ESTOP_HALTS_MOTION`. Treat it as idle-telemetry only.
+**Bit 4 (`hv_enable`) is a readback, not an input.** It mirrors the safety
+chain's HV_ENABLE output (`DOORS_OK · WDOG_ALIVE`, see forgefirm
+`docs/SAFETY.md`): inactive at idle, active only while a run feeds the
+charge-pump watchdog with the lid closed, and it drops ≈0.45 s after the last
+pulse. It is telemetry — `/status` reports it and the control panel shows it —
+and nothing gates on it: the beam and the HV supply are already governed by
+the chain it reads back.
 
 **Bit 7 (`head`) is not head presence.** Bench-verified: a gen2 head connected
 and answering I²C (`head/info` returns id/serial) reads bit 7 INACTIVE. The
@@ -78,10 +78,9 @@ Who reads what:
   resumes it once closed. While the core is idle, jogging or homing the
   signal is hidden from it, so a lid cycle at idle (loading material) never
   strands the controller in Door; a job started with the lid open parks on
-  the first poll. Bit 4 gates nothing unless the machine settings opt in
-  (`estop_halts_motion`, for a retrofitted e-stop circuit), because of the
-  resting-high behavior above. The cloud client reads the same bits itself
-  and is unaffected (it reports every lid event to the service).
+  the first poll. Bit 4 gates nothing (it is a readback of the chain
+  itself). The cloud client reads the same bits itself and is unaffected
+  (it reports every lid event to the service).
 - **No process takes `EVIOCGRAB`** on the device — the cloud client's reader
   included. Exclusivity of button *meaning* comes from mode selection, and a
   grab starves every other reader of events.

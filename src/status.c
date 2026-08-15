@@ -174,7 +174,8 @@ static int read_position(double *x, double *y, double *z, int *homed)
 }
 
 /* EV_SW bits per the device tree: 0/1 door1/door2, 2 button, 3 doors
- * (combined), 4 estop, 5 interlock, 6 interlock_latch, 7 head.
+ * (combined), 4 hv_enable (readback of the HV_ENABLE output), 5
+ * interlock, 6 interlock_latch, 7 head.
  * The interlock sense is inverted: the remote-interlock connector (the
  * regulatory 2-pin lockout loop) reads ACTIVE only when the loop is
  * open. Basic/Plus machines ship it factory-jumpered, so the bit stays
@@ -319,7 +320,7 @@ int machine_status_json(char *buf, size_t len)
     int head_present = rd_attr("head/hall_sensor", hall, sizeof(hall)) == 0;
     append(buf, len, &off,
         "\"switches\":{\"lid\":%s,\"button\":%s,\"interlock_ok\":%s,"
-        "\"head\":%s,\"estop\":%s}}",
+        "\"head\":%s,\"hv_enable\":%s}}",
         (sw & (1u << 3)) ? "true" : "false",
         (sw & (1u << 2)) ? "true" : "false",
         (sw & (1u << 5)) ? "false" : "true",

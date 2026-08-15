@@ -48,7 +48,7 @@ status = {
              'intake_2': 730},
     'coolant': {'down_c': 22.4, 'up_c': 22.3, 'pump': True, 'tec': False},
     'switches': {'lid': True, 'button': False, 'interlock_ok': True,
-                 'head': False, 'estop': True},
+                 'head': False, 'hv_enable': False},
 }
 
 diag = {
