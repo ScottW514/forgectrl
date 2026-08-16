@@ -1,0 +1,43 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "panel: dev server",
+      "detail": "Serve the panel from src/ui.c with live reload; API from the machine in .env, or the mock",
+      "type": "shell",
+      "command": "python3",
+      "args": ["tools/devserver.py"],
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "panel" },
+      "runOptions": { "runOn": "folderOpen" }
+    },
+    {
+      "label": "panel: dev server (mock)",
+      "detail": "Same, but always answer the API from the built-in mock backend",
+      "type": "shell",
+      "command": "python3",
+      "args": ["tools/devserver.py", "--mock"],
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "panel" }
+    },
+    {
+      "label": "build (host)",
+      "detail": "cmake --build build (native forgectrl + the host unit tests)",
+      "type": "shell",
+      "command": "cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON && cmake --build build -j$(nproc)",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "tests (host)",
+      "detail": "The CI unit tests: status_idle_test, sanitize_test",
+      "type": "shell",
+      "command": "./build/status_idle_test && ./build/sanitize_test",
+      "dependsOn": ["build (host)"],
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": []
+    }
+  ]
+}

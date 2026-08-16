@@ -197,6 +197,41 @@ the coda VPU driver, and v4l-utils (`media-ctl`/`v4l2-ctl`) on the target.
 The ForgeFIRM Yocto layer (`meta-forgefirm` in the forgefirm repo) carries
 the recipe, which also installs the sysvinit script from `init/`.
 
+## Developing the panel
+
+The page is the C string in `src/ui.c`. `tools/devserver.py` (Python 3,
+standard library only) serves it with live reload: on every save the
+literals are re-extracted - the same text the compiler would produce - and
+the open browser tab reloads; a literal that does not extract shows the
+error and its `ui.c` line, and the page comes back when it is fixed. API
+calls from the page go to one of two backends:
+
+- **A real machine.** `GF_HOST` (IP literal, `:port` if not 8080) and
+  `GF_TOKEN` (the panel token, `/data/forgefirm/panel.token` on the
+  machine) in the environment or in a git-ignored `.env` at the repo root
+  (`.env.example` is the template; the file is re-read when it changes).
+  The token is embedded in the served page exactly as the daemon does it,
+  requests are proxied with the machine's address-literal `Host`, and the
+  MJPEG stream passes through - so the panel shows live data and its
+  actions reach the hardware.
+- **The built-in mock** (`--mock`, or automatically without `GF_HOST`):
+  in-memory settings, status, diagnostics, slots, logs and a placeholder
+  camera, with the daemon's token check mirrored on state-changing calls.
+
+```
+cp .env.example .env            # then fill in GF_HOST / GF_TOKEN
+python3 tools/devserver.py      # http://127.0.0.1:8081
+python3 tools/devserver.py --mock
+python3 tools/devserver.py --dump > panel.html   # the extracted page
+```
+
+`.devcontainer/` packages this for VS Code (Dev Containers, Docker or
+Podman): Ubuntu 24.04 with the host build dependencies, so `cmake -B build
+&& cmake --build build` and the CI unit tests also run inside; the "panel:
+dev server" task starts the dev server when the folder opens and port
+8081 is forwarded. Interactive shells in the container export `.env`, so
+the ForgeFIRM bench tools see `GF_HOST` / `GF_TOKEN` too.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

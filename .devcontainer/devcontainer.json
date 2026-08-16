@@ -1,0 +1,33 @@
+{
+  "name": "forgectrl",
+  "build": { "dockerfile": "Dockerfile" },
+  "remoteUser": "vscode",
+
+  // The panel dev server (tools/devserver.py) is started by the
+  // "panel: dev server" task in .vscode/tasks.json when the folder opens.
+  // It reads GF_HOST / GF_TOKEN from the git-ignored .env at the repo root
+  // (see .env.example) and proxies the panel's API calls to that machine;
+  // without a .env it answers from its built-in mock backend.
+  "forwardPorts": [8081],
+  "portsAttributes": {
+    "8081": { "label": "forgectrl panel (dev)", "onAutoForward": "notify" }
+  },
+
+  "postCreateCommand": "sh .devcontainer/post-create.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-vscode.cmake-tools",
+        "ms-python.python"
+      ],
+      "settings": {
+        "task.allowAutomaticTasks": "on",
+        "C_Cpp.default.compileCommands": "${containerWorkspaceFolder}/build/compile_commands.json",
+        "cmake.configureOnOpen": false,
+        "files.eol": "\n"
+      }
+    }
+  }
+}
