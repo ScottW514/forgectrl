@@ -149,40 +149,6 @@ const char *cam_name(cam_id_t cam)
     return camdefs[cam].name;
 }
 
-/* The lid lamp at idle. The PIC lights it at power-on; a warm reboot
- * leaves it dark (the module's remove path turns it off) and the cloud
- * client sets its own level, so the daemon asserts the configured idle
- * level itself: at start, on a settings change, and whenever the
- * supervisor spawns a controller. Setting lid_lamp_idle, 0-255. */
-#define LAMP_IDLE_DEFAULT 236
-
-int cam_lamp_idle_level(void)
-{
-    char v[16];
-    if (settings_get("lid_lamp_idle", v, sizeof(v)) == 0 && v[0]) {
-        char *end;
-        long l = strtol(v, &end, 10);
-        if (end != v && *end == '\0' && l >= 0 && l <= 255)
-            return (int)l;
-    }
-    return LAMP_IDLE_DEFAULT;
-}
-
-void cam_lamp_apply_idle(void)
-{
-    int level = cam_lamp_idle_level();
-    pthread_mutex_lock(&eng.ctl);
-    pthread_mutex_lock(&eng.lock);
-    int lid_capturing = eng.running && eng.cam == CAM_LID && eng.lamp_prev >= 0;
-    pthread_mutex_unlock(&eng.lock);
-    if (lid_capturing)
-        eng.lamp_prev = level;      /* restored at the capture's teardown */
-    else
-        sysfs_write_int(camdefs[CAM_LID].lamp, level);
-    pthread_mutex_unlock(&eng.ctl);
-    fflog(LOG_INFO, "cam: lid lamp idle level %d%s", level,
-          lid_capturing ? " (applies after the capture)" : "");
-}
 
 /* CODA960 hardware JPEG encoder for the stream path; libjpeg remains the
  * fallback (and the snapshot path). Worker-thread use only. */
@@ -274,6 +240,41 @@ static int sysfs_write_int(const char *path, int val)
     int ok = fprintf(f, "%d", val) > 0;
     fclose(f);
     return ok ? 0 : -1;
+}
+
+/* The lid lamp at idle. The PIC lights it at power-on; a warm reboot
+ * leaves it dark (the module's remove path turns it off) and the cloud
+ * client sets its own level, so the daemon asserts the configured idle
+ * level itself: at start, on a settings change, and whenever the
+ * supervisor spawns a controller. Setting lid_lamp_idle, 0-255. */
+#define LAMP_IDLE_DEFAULT 236
+
+int cam_lamp_idle_level(void)
+{
+    char v[16];
+    if (settings_get("lid_lamp_idle", v, sizeof(v)) == 0 && v[0]) {
+        char *end;
+        long l = strtol(v, &end, 10);
+        if (end != v && *end == '\0' && l >= 0 && l <= 255)
+            return (int)l;
+    }
+    return LAMP_IDLE_DEFAULT;
+}
+
+void cam_lamp_apply_idle(void)
+{
+    int level = cam_lamp_idle_level();
+    pthread_mutex_lock(&eng.ctl);
+    pthread_mutex_lock(&eng.lock);
+    int lid_capturing = eng.running && eng.cam == CAM_LID && eng.lamp_prev >= 0;
+    pthread_mutex_unlock(&eng.lock);
+    if (lid_capturing)
+        eng.lamp_prev = level;      /* restored at the capture's teardown */
+    else
+        sysfs_write_int(camdefs[CAM_LID].lamp, level);
+    pthread_mutex_unlock(&eng.ctl);
+    fflog(LOG_INFO, "cam: lid lamp idle level %d%s", level,
+          lid_capturing ? " (applies after the capture)" : "");
 }
 
 /* --------------------------------------------------- pipeline configure */
