@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Panel development server: live reload for the embedded web UI.
+"""Panel development server: live reload for the control panel.
 
-Serves the control panel straight from src/ui.c - the page is
-re-extracted from the C string literals on every save, and an injected
-watcher reloads the browser tab as soon as the file changes - while
-every API request is either
+Serves the panel from src/ui/ (index.html, panel.css, panel.js) as plain
+files - so the browser's devtools see real file names and line numbers -
+and reloads the open tab through an injected watcher as soon as anything
+in that directory changes, while every API request is either
 
   * proxied to a real machine (GF_HOST / GF_TOKEN, from the environment
     or the .env file at the repo root; see .env.example), so the panel
@@ -18,14 +18,17 @@ every API request is either
 Usage:
     python3 tools/devserver.py [--port 8081] [--bind 127.0.0.1]
                                [--host ADDR[:PORT]] [--token HEX]
-                               [--env FILE] [--mock] [-v]
-    python3 tools/devserver.py --dump    # extracted HTML to stdout
+                               [--env FILE] [--mock] [--bundle] [-v]
+    python3 tools/devserver.py --dump    # the bundled page to stdout
 
-Then browse http://127.0.0.1:8081 and edit src/ui.c.
+Then browse http://127.0.0.1:8081 and edit src/ui/. --bundle serves the
+page the way the daemon does (CSS and JS inlined, one response), which is
+also what --dump prints; the bundling mirrors src/ui/embed.cmake.
 
 Requires only the Python 3 standard library.
 """
 import argparse
+import hashlib
 import http.client
 import io
 import json
@@ -40,13 +43,17 @@ from urllib.parse import urlsplit, parse_qsl
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
-UI_C = os.path.join(ROOT, 'src', 'ui.c')
+UI_DIR = os.path.join(ROOT, 'src', 'ui')
 ENV_FILE = os.path.join(ROOT, '.env')
+
+TOKEN_MARK = '__FFTOKEN__'          # in panel.js; the daemon substitutes it
+CSS_TAG = '<link rel="stylesheet" href="panel.css" />'   # as embed.cmake
+JS_TAG = '<script src="panel.js"></script>'
 
 DEFAULT_PORT = 8081
 DEVICE_PORT = 8080
 MOCK_TOKEN = '0123456789abcdef0123456789abcdef'
-WATCH_POLL_S = 0.25         # ui.c stat interval
+WATCH_POLL_S = 0.25         # src/ui/ stat interval
 WATCH_HOLD_S = 25.0         # long-poll ceiling per /__dev/watch call
 PROXY_TIMEOUT_S = 30.0      # per-request upstream timeout (streams: none)
 STREAM_PATHS = ('/cam/stream',)
@@ -172,101 +179,7 @@ class Config:
                                     '[%s]' % name, port)
 
 
-# ------------------------------------------------------- ui.c panel
-class PanelError(Exception):
-    pass
-
-
-ESCAPES = {'n': '\n', 't': '\t', 'r': '\r', 'a': '\a', 'b': '\b',
-           'f': '\f', 'v': '\v', '0': '\0', '\\': '\\', '"': '"',
-           "'": "'", '?': '?', '/': '/', '\n': ''}
-
-
-def extract_html(src):
-    """Concatenate the C string literals that initialize index_html[],
-    honoring the escapes and skipping the comments between pieces - the
-    same text the compiler would produce."""
-    marker = 'index_html[] ='
-    start = src.find(marker)
-    if start < 0:
-        raise PanelError('no "index_html[] =" in src/ui.c')
-    i = start + len(marker)
-    n = len(src)
-    out = []
-    line = src.count('\n', 0, i) + 1
-
-    def where():
-        return 'ui.c:%d' % line
-
-    while i < n:
-        c = src[i]
-        if c == '\n':
-            line += 1
-            i += 1
-        elif c in ' \t\r':
-            i += 1
-        elif src.startswith('/*', i):
-            j = src.find('*/', i + 2)
-            if j < 0:
-                raise PanelError('%s: unterminated comment' % where())
-            line += src.count('\n', i, j)
-            i = j + 2
-        elif src.startswith('//', i):
-            j = src.find('\n', i)
-            i = n if j < 0 else j
-        elif c == '"':
-            i += 1
-            while True:
-                if i >= n:
-                    raise PanelError('%s: unterminated string' % where())
-                c = src[i]
-                if c == '"':
-                    i += 1
-                    break
-                if c == '\n':
-                    raise PanelError('%s: newline inside string literal'
-                                     % where())
-                if c == '\\':
-                    i += 1
-                    if i >= n:
-                        raise PanelError('%s: dangling backslash'
-                                         % where())
-                    e = src[i]
-                    if e == 'x':
-                        j = i + 1
-                        while j < n and src[j] in '0123456789abcdefABCDEF':
-                            j += 1
-                        if j == i + 1:
-                            raise PanelError('%s: bad \\x escape'
-                                             % where())
-                        out.append(chr(int(src[i + 1:j], 16)))
-                        i = j
-                        continue
-                    if e in '01234567':
-                        j = i
-                        while j < n and j < i + 3 and src[j] in '01234567':
-                            j += 1
-                        out.append(chr(int(src[i:j], 8)))
-                        i = j
-                        continue
-                    if e not in ESCAPES:
-                        raise PanelError('%s: unknown escape \\%s'
-                                         % (where(), e))
-                    if e == '\n':
-                        line += 1
-                    out.append(ESCAPES[e])
-                    i += 1
-                    continue
-                out.append(c)
-                i += 1
-        elif c == ';':
-            return ''.join(out)
-        else:
-            raise PanelError('%s: unexpected %r after string literals'
-                             % (where(), c))
-    raise PanelError('ui.c: initializer never terminated with ";"')
-
-
+# ------------------------------------------------------------ panel
 RELOAD_JS = (
     "<script>(function(){var v=%(ver)s;"
     "function w(){var x=new XMLHttpRequest();"
@@ -283,37 +196,56 @@ BADGE_HTML = (
     "system-ui,sans-serif;padding:6px 9px;border-radius:5px;opacity:.85;"
     "letter-spacing:.3px;pointer-events:none'>DEV &middot; %(label)s</div>"
 )
-ERROR_HTML = (
-    "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-    "<title>ForgeFIRM - panel extraction error</title></head>"
-    "<body style='font:14px/1.5 system-ui,sans-serif;margin:40px;"
-    "color:#222'><h2 style='color:#e8262a'>src/ui.c does not extract</h2>"
-    "<pre style='background:#f0f1f4;padding:14px;border-radius:6px'>"
-    "%(err)s</pre><p style='color:#767a82'>Fix the literal and save; "
-    "this page reloads by itself.</p>%(reload)s</body></html>"
-)
+CONTENT_TYPES = {
+    '.html': 'text/html; charset=utf-8',
+    '.css': 'text/css; charset=utf-8',
+    '.js': 'application/javascript; charset=utf-8',
+    '.svg': 'image/svg+xml',
+    '.png': 'image/png',
+    '.ico': 'image/x-icon',
+}
+
+
+def html_escape(s):
+    return (str(s).replace('&', '&amp;').replace('<', '&lt;')
+            .replace('>', '&gt;'))
+
+
+def bundle(html, css, js):
+    """One self-contained page - the same replacement embed.cmake does,
+    so `--dump` / `--bundle` show exactly what the daemon serves."""
+    for tag, rep in ((CSS_TAG, '<style>\n' + css + '</style>'),
+                     (JS_TAG, '<script>\n' + js + '</script>')):
+        if tag not in html:
+            raise ValueError('index.html lacks the marker %s' % tag)
+        html = html.replace(tag, rep, 1)
+    return html
 
 
 class Panel:
-    """The extracted page, cached by ui.c stamp; a watcher thread bumps
-    the version and wakes long-poll waiters when the file changes."""
+    """The files under src/ui/. A watcher thread stamps the directory and
+    wakes the long-poll waiters when anything in it changes."""
 
-    def __init__(self, path):
-        self.path = path
+    def __init__(self, ui_dir):
+        self.dir = ui_dir
         self.cond = threading.Condition()
         self.version = self._stamp()
-        self._lock = threading.Lock()
-        self._cache_key = None
-        self._cache = (None, 'not read yet')   # (html, error)
         t = threading.Thread(target=self._watch, daemon=True)
         t.start()
 
     def _stamp(self):
+        parts = []
         try:
-            st = os.stat(self.path)
-            return '%d-%d' % (st.st_mtime_ns, st.st_size)
+            names = sorted(os.listdir(self.dir))
         except OSError:
             return 'missing'
+        for n in names:
+            try:
+                st = os.stat(os.path.join(self.dir, n))
+            except OSError:
+                continue
+            parts.append('%s:%d:%d' % (n, st.st_mtime_ns, st.st_size))
+        return hashlib.sha1('|'.join(parts).encode()).hexdigest()[:16]
 
     def _watch(self):
         while True:
@@ -324,67 +256,44 @@ class Panel:
                     self.version = v
                     self.cond.notify_all()
 
-    def client_version(self):
-        """What the page embeds and polls: the file stamp, marked with
-        '!' while the file does not extract - so a fixed literal (or a
-        save that completes after a half-written read) reloads the
-        error page too."""
-        _, err = self.raw()
-        return self.version + ('!' if err else '')
-
     def wait_change(self, seen, timeout):
-        """Block until the client version differs from `seen` or the
-        timeout passes; returns the current client version. In the
-        error state the extraction is retried every second."""
-        deadline = time.time() + timeout
-        while True:
-            cur = self.client_version()
-            if cur != seen:
-                return cur
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                return cur
-            with self.cond:
-                self.cond.wait(min(remaining,
-                                   1.0 if cur.endswith('!') else remaining))
+        """Block until the version differs from `seen` or the timeout
+        passes; returns the current version."""
+        with self.cond:
+            if self.version == seen:
+                self.cond.wait(timeout)
+            return self.version
 
-    def raw(self):
-        """(html, error): the extracted page, or the extraction error.
-        Cached by file stamp; an error is never cached, so a partial
-        read during a save is retried on the next call."""
-        with self._lock:
-            key = self._stamp()
-            if key != self._cache_key or self._cache[1] is not None:
-                try:
-                    with open(self.path, encoding='utf-8') as f:
-                        src = f.read()
-                    self._cache = (extract_html(src), None)
-                except (OSError, PanelError, ValueError) as e:
-                    self._cache = (None, str(e))
-                self._cache_key = key
-            return self._cache
+    def path(self, name):
+        """Absolute path of a file in src/ui/, or None if `name` is not a
+        plain file there (no traversal, no dotfiles)."""
+        if not name or '/' in name or '\\' in name or name.startswith('.'):
+            return None
+        p = os.path.join(self.dir, name)
+        return p if os.path.isfile(p) else None
 
-    def render(self, token, label, mock):
-        html, err = self.raw()
-        reload_js = RELOAD_JS % {'ver': json.dumps(self.client_version())}
-        if err:
-            return (ERROR_HTML % {'err': html_escape(err),
-                                  'reload': reload_js}), err
-        page = html.replace('__FFTOKEN__', token or '')
+    def read(self, name):
+        with open(os.path.join(self.dir, name), 'rb') as f:
+            return f.read()
+
+    def text(self, name):
+        return self.read(name).decode('utf-8')
+
+    def page(self, bundled):
+        """index.html as text: the three files linked (dev default, real
+        file names and line numbers in the browser) or inlined."""
+        html = self.text('index.html')
+        if bundled:
+            html = bundle(html, self.text('panel.css'), self.text('panel.js'))
+        return html
+
+    def render(self, token, label, mock, bundled):
+        page = self.page(bundled).replace(TOKEN_MARK, token or '', 1)
         badge = BADGE_HTML % {'bg': '#c7760a' if mock else '#3d854d',
                               'label': html_escape(label)}
-        inject = badge + reload_js
+        inject = badge + (RELOAD_JS % {'ver': json.dumps(self.version)})
         k = page.rfind('</body>')
-        if k < 0:
-            page += inject
-        else:
-            page = page[:k] + inject + page[k:]
-        return page, None
-
-
-def html_escape(s):
-    return (str(s).replace('&', '&amp;').replace('<', '&lt;')
-            .replace('>', '&gt;'))
+        return page + inject if k < 0 else page[:k] + inject + page[k:]
 
 
 # ------------------------------------------------------------- mock
@@ -703,6 +612,7 @@ class Handler(BaseHTTPRequestHandler):
     panel = None
     mock = None
     verbose = False
+    bundled = False
 
     # -- entry points
     def do_GET(self):
@@ -736,6 +646,10 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == '/' and 'action' not in q and \
                     self.command in ('GET', 'HEAD'):
                 return self._panel()
+            if self.command in ('GET', 'HEAD') and not self.bundled and \
+                    os.path.splitext(u.path)[1] in CONTENT_TYPES and \
+                    self.panel.path(u.path[1:]):
+                return self._file(u.path[1:])
             if self.cfg.mock:
                 return self._mock(u.path, q)
             return self._proxy(u)
@@ -761,22 +675,41 @@ class Handler(BaseHTTPRequestHandler):
         v = self.panel.wait_change(seen, WATCH_HOLD_S)
         self._json(200, {'v': v})
 
-    def _panel(self):
+    def _token_label(self):
         if self.cfg.mock:
-            token, label = self.mock.token, 'mock backend'
-        else:
-            token = self.cfg.token
-            label = self.cfg.upstream()[2]
-            if not token:
-                label += ' (no GF_TOKEN: writes will be refused)'
-        page, err = self.panel.render(token, label, self.cfg.mock)
-        if err:
-            self._say('panel: %s' % err)
-        elif self.verbose:
-            self._say('panel: served %d bytes' % len(page))
-        self._send(200 if not err else 500,
-                   {'Content-Type': 'text/html; charset=utf-8'},
+            return self.mock.token, 'mock backend'
+        token = self.cfg.token
+        label = self.cfg.upstream()[2]
+        if not token:
+            label += ' (no GF_TOKEN: writes will be refused)'
+        return token, label
+
+    def _panel(self):
+        token, label = self._token_label()
+        try:
+            page = self.panel.render(token, label, self.cfg.mock,
+                                     self.bundled)
+        except (OSError, ValueError) as e:
+            self._say('panel: %s' % e)
+            return self._send(500, {'Content-Type': 'text/plain'},
+                              ('devserver: %s\n' % e).encode())
+        if self.verbose:
+            self._say('panel: served %d bytes%s'
+                      % (len(page), ' (bundled)' if self.bundled else ''))
+        self._send(200, {'Content-Type': 'text/html; charset=utf-8'},
                    page.encode('utf-8'))
+
+    def _file(self, name):
+        """A file from src/ui/, with the token substituted in text."""
+        ext = os.path.splitext(name)[1]
+        data = self.panel.read(name)
+        if ext in ('.html', '.css', '.js'):
+            token = self._token_label()[0]
+            data = data.decode('utf-8').replace(TOKEN_MARK, token or '',
+                                                1).encode('utf-8')
+        if self.verbose:
+            self._say('panel: %s (%d B)' % (name, len(data)))
+        self._send(200, {'Content-Type': CONTENT_TYPES[ext]}, data)
 
     def _read_body(self):
         n = int(self.headers.get('Content-Length') or 0)
@@ -877,31 +810,39 @@ def main():
     ap.add_argument('--mock', action='store_true',
                     help='answer the API from the built-in mock even if '
                          'GF_HOST is set')
+    ap.add_argument('--bundle', action='store_true',
+                    help='serve the page bundled (CSS/JS inlined) as the '
+                         'daemon does, instead of as three files')
     ap.add_argument('--dump', action='store_true',
-                    help='print the extracted HTML and exit')
+                    help='print the bundled page and exit')
     ap.add_argument('-v', '--verbose', action='store_true',
                     help='log every request, including the polls')
     args = ap.parse_args()
 
+    panel = Panel(UI_DIR)
     if args.dump:
-        with open(UI_C, encoding='utf-8') as f:
-            src = f.read()
         try:
-            sys.stdout.write(extract_html(src))
-        except PanelError as e:
+            sys.stdout.buffer.write(panel.page(True).encode('utf-8'))
+        except (OSError, ValueError) as e:
             sys.exit('devserver: %s' % e)
         return
 
     cfg = Config(args)
     Handler.cfg = cfg
-    Handler.panel = Panel(UI_C)
+    Handler.panel = panel
     Handler.mock = Mock(MOCK_TOKEN)
     Handler.verbose = args.verbose
+    Handler.bundled = args.bundle
 
-    html, err = Handler.panel.raw()
+    try:
+        size = len(panel.page(True))
+        state = '%d bytes bundled, served %s' % (
+            size, 'bundled' if args.bundle else 'as files')
+    except (OSError, ValueError) as e:
+        state = 'ERROR: %s' % e
     print('forgectrl panel dev server')
-    print('  panel   %s (%s)' % (os.path.relpath(UI_C, ROOT),
-                                 err or '%d bytes' % len(html)))
+    print('  panel   %s/ (%s)' % (os.path.relpath(UI_DIR, ROOT)
+                                   .replace(os.sep, '/'), state))
     print('  env     %s%s' % (cfg.env_path,
                               '' if os.path.exists(cfg.env_path)
                               else ' (absent)'))

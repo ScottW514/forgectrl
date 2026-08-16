@@ -1,0 +1,570 @@
+<!--
+  index.html - forgectrl: the machine control panel
+  Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+  SPDX-License-Identifier: MIT
+
+  Served at "/" as one self-contained page: the build (src/ui/embed.cmake)
+  inlines panel.css and panel.js in place of the link/script tags below and
+  embeds the result in the daemon; the dev server (tools/devserver.py) serves
+  the three files as they are. ES5 only, no external assets. Design notes are
+  at the top of panel.js.
+-->
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>ForgeFIRM</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <header>
+      <div class="hrow">
+        <svg width="148" height="36" viewBox="0 0 148 36" aria-label="OpenGlow">
+          <g stroke="#e8262a" stroke-linecap="round">
+            <line x1="34" y1="8" x2="146" y2="8" stroke-width="1.2" />
+            <line x1="34" y1="0.5" x2="34" y2="15.5" stroke-width="1.2" />
+            <line x1="26.5" y1="8" x2="41.5" y2="8" stroke-width="1.2" />
+            <line x1="28.7" y1="2.7" x2="39.3" y2="13.3" stroke-width="1.1" />
+            <line x1="39.3" y1="2.7" x2="28.7" y2="13.3" stroke-width="1.1" />
+            <line x1="31.1" y1="1.1" x2="36.9" y2="14.9" stroke-width=".8" />
+            <line x1="36.9" y1="1.1" x2="31.1" y2="14.9" stroke-width=".8" />
+            <line x1="27.1" y1="5.1" x2="40.9" y2="10.9" stroke-width=".8" />
+            <line x1="40.9" y1="5.1" x2="27.1" y2="10.9" stroke-width=".8" />
+          </g>
+          <circle cx="34" cy="8" r="2" fill="#e8262a" />
+          <!-- one line: whitespace between the tspans would render as a space -->
+          <text x="0" y="31" font-size="20" font-family="inherit"><tspan fill="#fff" font-weight="600">Open</tspan><tspan fill="#b9bac9" font-weight="300">Glow</tspan></text></svg
+        ><span class="appname">ForgeFIRM</span><span id="host"></span>
+      </div>
+    </header>
+    <nav>
+      <div class="nrow">
+        <a href="#status" id="t-status">Status</a><a href="#machine" id="t-machine">Machine</a
+        ><a href="#gfcloud" id="t-gfcloud">GF Cloud</a><a href="#grbl" id="t-grbl">GRBL</a
+        ><a href="#diag" id="t-diag">Diagnostics</a><a href="#logs" id="t-logs">Logs</a
+        ><a href="#system" id="t-system">System</a>
+      </div>
+    </nav>
+    <main>
+      <div class="safety">
+        <b>Class 4 CO&#8322; laser</b> &mdash; invisible 10.6 &micro;m beam. Never defeat the
+        lid switches or interlock &middot; vent the exhaust outdoors &middot; never cut PVC or
+        chlorinated plastics &middot; never leave a running job unattended &middot; keep a fire
+        extinguisher within reach.
+      </div>
+      <div id="locknote"></div>
+      <section id="s-status">
+        <div id="gfsvc-banner" class="banner" style="display: none"></div>
+        <div class="card">
+          <h2>Controller mode</h2>
+          <div class="seg">
+            <button class="segbtn segon" id="mode-grbl" onclick='setMode("grbl")'>GRBL</button
+            ><button class="segbtn" id="mode-cloud" onclick='setMode("cloud")'>
+              Factory cloud</button
+            ><span class="msg" id="msg-mode"></span>
+          </div>
+          <p class="hint">
+            GRBL serves standard Grbl senders on port 23. Factory cloud runs the machine against
+            the Glowforge web service like stock firmware. The two are mutually exclusive;
+            switching stops one controller and starts the other (machine must be idle) and
+            persists across reboots.
+          </p>
+        </div>
+        <div class="card">
+          <h2>Motion</h2>
+          <div id="motion"></div>
+        </div>
+        <div class="card camwrap">
+          <h2>Lid camera</h2>
+          <img id="cam" alt="lid camera" />
+          <div class="camctl">
+            <button id="live" data-nolock="1" onclick="toggleLive()">Live</button
+            ><button id="snapbtn" data-nolock="1" onclick="refreshSnap()">Refresh</button>
+          </div>
+          <p class="hint" id="cammsg"></p>
+        </div>
+        <div class="grid2">
+          <div class="card">
+            <h2>Cooling</h2>
+            <div id="cooling"></div>
+          </div>
+          <div class="card">
+            <h2>Switches</h2>
+            <div id="switches"></div>
+            <p class="hint">
+              HV enable is the readback of the safety chain's HV_ENABLE output: on only while a
+              run feeds the charge-pump watchdog with the lid closed.
+            </p>
+          </div>
+        </div>
+        <div class="card">
+          <h2>System</h2>
+          <div id="statgrid"></div>
+        </div>
+      </section>
+      <section id="s-machine">
+        <div class="card">
+          <h2>Units</h2>
+          <div class="row">
+            <label for="ui_units">Display units</label
+            ><select id="ui_units" onchange="saveUnits()">
+              <option value="metric">Metric (mm, &deg;C)</option>
+              <option value="imperial">Imperial (in, &deg;F)</option>
+            </select>
+          </div>
+          <p class="hint">
+            Display only &mdash; values are stored and exchanged in metric.
+            <span class="msg" id="msg-u"></span>
+          </p>
+        </div>
+        <div class="card">
+          <h2>Homing</h2>
+          <div class="row">
+            <label for="homing_mode">Method</label
+            ><select id="homing_mode">
+              <option value="none">Disabled</option>
+              <option value="gfcloud">Glowforge web service (cameras)</option>
+              <option value="switches">Limit switches</option>
+            </select>
+          </div>
+          <div class="row">
+            <label for="gfcloud_home_x">Home position X<span class="u ulen">mm</span></label
+            ><input id="gfcloud_home_x" inputmode="decimal" placeholder="0 (origin)" />
+          </div>
+          <div class="row">
+            <label for="gfcloud_home_y">Home position Y<span class="u ulen">mm</span></label
+            ><input id="gfcloud_home_y" inputmode="decimal" placeholder="0 (origin)" />
+          </div>
+          <div class="row">
+            <label for="gfcloud_home_z">Home position Z<span class="u ulen">mm</span></label
+            ><input id="gfcloud_home_z" inputmode="decimal" placeholder="top of travel" />
+          </div>
+          <p class="hint">
+            Machine coordinates the head is at after a completed homing cycle. For Glowforge
+            web-service homing that is the factory home corner (back left) with the lens at the
+            hall reference &mdash; leave blank until a measurement says otherwise. To calibrate:
+            home, jog to a known reference, and enter the measured offsets.
+          </p>
+          <div class="btns">
+            <button class="pri" onclick="saveMachine()">Save</button
+            ><span class="msg" id="msg-m"></span>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Cooling</h2>
+          <div class="grid2">
+            <div class="row">
+              <label for="cool_flow_rise"
+                >Flow fault rise<span class="u utemp">&deg;C</span></label
+              ><input id="cool_flow_rise" inputmode="decimal" placeholder="14.4" />
+            </div>
+            <div class="row">
+              <label for="cool_flow_heater_pct">Check heater duty<span class="u">%</span></label
+              ><input id="cool_flow_heater_pct" inputmode="numeric" placeholder="40" />
+            </div>
+            <div class="row">
+              <label for="cool_flow_check_s">Check window<span class="u">s</span></label
+              ><input id="cool_flow_check_s" inputmode="numeric" placeholder="50" />
+            </div>
+            <div class="row">
+              <label for="cool_recheck_s">Re-check every<span class="u">s</span></label
+              ><input id="cool_recheck_s" inputmode="numeric" placeholder="150" />
+            </div>
+            <div class="row">
+              <label for="cool_confirm_max_s">Suspicion budget<span class="u">s</span></label
+              ><input id="cool_confirm_max_s" inputmode="numeric" placeholder="480" />
+            </div>
+            <div class="row">
+              <label for="cool_temp_max"
+                >Coolant ceiling<span class="u utemp">&deg;C</span></label
+              ><input id="cool_temp_max" inputmode="decimal" placeholder="33" />
+            </div>
+            <div class="row">
+              <label for="cool_temp_resume"
+                >Resume below<span class="u utemp">&deg;C</span></label
+              ><input id="cool_temp_resume" inputmode="decimal" placeholder="31" />
+            </div>
+            <div class="row">
+              <label for="cool_cooldown_s">Smoke clear<span class="u">s</span></label
+              ><input id="cool_cooldown_s" inputmode="numeric" placeholder="15" />
+            </div>
+            <div class="row">
+              <label for="cool_cooldown_max_s">Cooldown limit<span class="u">s</span></label
+              ><input id="cool_cooldown_max_s" inputmode="numeric" placeholder="300" />
+            </div>
+          </div>
+          <p class="hint">
+            Coolant-loop protection: each running job periodically verifies flow by running the
+            loop heater and reading how far the downstream sensor climbs &mdash; past the fault
+            rise means stagnant coolant. Blank fields use the built-in values (placeholders),
+            measured on this machine's factory coolant; changes apply from the next job. These
+            bands are per-machine: after a pump or coolant change, run
+            <a href="#diag">Diagnostics &rarr; Cooling system</a> to verify or re-measure them.
+          </p>
+          <div class="btns">
+            <button class="pri" onclick="saveCooling()">Save</button
+            ><span class="msg" id="msg-c"></span>
+          </div>
+        </div>
+      </section>
+      <section id="s-gfcloud">
+        <div class="card">
+          <h2>Machine identity</h2>
+          <div class="row">
+            <label for="gf_serial">Serial number</label
+            ><input id="gf_serial" inputmode="numeric" placeholder="(factory fuses)" />
+          </div>
+          <div class="row">
+            <label for="gf_password">Password</label
+            ><input id="gf_password" type="password" autocomplete="off" />
+          </div>
+          <p class="hint">
+            Credentials the machine signs in to the Glowforge web service with. Blank fields use
+            the identity burned into the factory fuses &mdash; override only to stand in for
+            another machine (64 hex digit password; the service hostname derives from the
+            serial). Keep credentials secret; they cannot be changed once leaked. A blank
+            password field keeps the current override.
+          </p>
+          <div class="btns">
+            <button class="pri" onclick="saveIdentity()">Save</button
+            ><button onclick="clearIdentity()">Use factory identity</button
+            ><button data-nolock="1" onclick="showFuse()">View fuse identity</button
+            ><span class="msg" id="msg-i"></span>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Homing session</h2>
+          <div class="row">
+            <label for="gfcloud_home_timeout_s"
+              >Session timeout<span class="u">seconds</span></label
+            ><input id="gfcloud_home_timeout_s" inputmode="numeric" placeholder="300" />
+          </div>
+          <p class="hint">
+            Overall budget for one web-service homing run (sign-in, camera uploads, hunt and
+            corner moves). The controller aborts and alarms past this; 30&ndash;3600.
+          </p>
+          <div class="btns">
+            <button class="pri" onclick="saveSession()">Save</button
+            ><span class="msg" id="msg-s"></span>
+          </div>
+        </div>
+      </section>
+      <section id="s-grbl">
+        <div class="card">
+          <h2>Controller</h2>
+          <div id="grblinfo"></div>
+          <p class="hint">
+            The motion controller speaks standard Grbl 1.1 (grblHAL) &mdash; point your sender
+            at the connection above and use its device settings ($$) for the numbered GRBL
+            parameters. The machine-level tunables below are read by the controller from the
+            shared machine settings.
+          </p>
+        </div>
+        <div class="card">
+          <h2>Laser arming</h2>
+          <div class="grid2">
+            <div class="row">
+              <label for="laser_button_timeout_s">Button wait<span class="u">s</span></label
+              ><input id="laser_button_timeout_s" inputmode="numeric" placeholder="300" />
+            </div>
+            <div class="row">
+              <label for="laser_disarm_s">Disarm after idle<span class="u">s</span></label
+              ><input id="laser_disarm_s" inputmode="numeric" placeholder="60" />
+            </div>
+          </div>
+          <p class="hint">
+            A job that fires the laser waits for the physical button (the light comes on) before
+            its first fire; if nobody presses within the button wait the job is refused. Once
+            armed, the window closes after the disarm grace with the laser off, and the next job
+            asks again.
+          </p>
+          <div class="btns">
+            <button class="pri" onclick="saveGrbl()">Save</button
+            ><span class="msg" id="msg-g"></span>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Motor rail</h2>
+          <div class="grid2">
+            <div class="row">
+              <label for="rail_settle_s">Settle before enable<span class="u">s</span></label
+              ><input id="rail_settle_s" inputmode="decimal" placeholder="2.5" />
+            </div>
+          </div>
+          <p class="hint">
+            Off period observed before the 40 V motor rail is re-enabled on a controller
+            takeover, so the stepper drivers always power up from a settled supply. 0 disables.
+          </p>
+          <div class="btns">
+            <button class="pri" onclick="saveRail()">Save</button
+            ><span class="msg" id="msg-r"></span>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Lid lamp</h2>
+          <div class="grid2">
+            <div class="row">
+              <label for="lid_lamp_idle">Idle level<span class="u">0-255</span></label
+              ><input id="lid_lamp_idle" inputmode="numeric" placeholder="236" />
+            </div>
+          </div>
+          <p class="hint">
+            Brightness of the lid lamp while the machine is idle; applied immediately, at every
+            start, and after a mode switch. Cloud mode drives the lamp itself while it runs. 0
+            is dark.
+          </p>
+          <div class="btns">
+            <button class="pri" onclick="saveLamp()">Save</button
+            ><span class="msg" id="msg-lamp"></span>
+          </div>
+        </div>
+      </section>
+      <section id="s-diag">
+        <div class="card">
+          <h2>Cooling system</h2>
+          <p class="hint" style="margin-top: 0">
+            These tools take the machine over: the motion controller is stopped, the loop heater
+            and pump are driven directly, and the controller restarts when the tool finishes.
+            The laser stays locked out throughout. Launch only when idle; all other controls
+            lock until completion.
+          </p>
+          <div class="btns">
+            <button class="pri" onclick='startDiag("flow-verify")'>Verify flow check</button
+            ><button onclick='startDiag("flow-calibrate")'>Calibrate thresholds</button
+            ><button id="diagabort" data-nolock="1" style="display: none" onclick="abortDiag()">
+              Abort</button
+            ><span class="msg" id="msg-d"></span>
+          </div>
+          <p class="hint">
+            &bull; <b>Verify</b> (~10 min): one flow check with the pump running and one with it
+            stopped, judged against the configured fault rise &mdash; proves the threshold
+            separates the two on this machine and coolant.<br />&bull; <b>Calibrate</b> (~30
+            min): three trials per case; measures both bands and recommends a threshold at the
+            midpoint. Run it after replacing the coolant (a different blend carries heat
+            differently), swapping the pump, or a failed verify.
+          </p>
+          <div id="diagpanel"></div>
+          <div id="diaglog"></div>
+          <div id="diagresult"></div>
+        </div>
+      </section>
+      <section id="s-logs">
+        <div class="card">
+          <h2>Log levels</h2>
+          <div id="logpending" class="banner" style="display: none">
+            Changed logging settings take effect at the next reboot.
+            <a href="#logs" onclick="doReboot();return false">Reboot now</a>
+          </div>
+          <table class="logtbl">
+            <thead>
+              <tr>
+                <th>Logger</th>
+                <th>On this machine</th>
+                <th>To remote server</th>
+                <th>On disk</th>
+              </tr>
+            </thead>
+            <tbody id="logrows"></tbody>
+          </table>
+          <div class="btns">
+            <button class="pri" onclick="saveLogLevels()">Save</button
+            ><span class="msg" id="msg-ll"></span>
+          </div>
+          <p class="hint">
+            Every ForgeFIRM logger keeps its own directory under
+            <span class="mono">/data/log/forgefirm</span> (size-capped, rotated). Levels are
+            cumulative &mdash; <b>warning</b> keeps warnings and errors, <b>debug</b> keeps
+            everything, <b>off</b> writes nothing; the two columns are independent.
+            <b>kernel</b> is the glowforge driver and the rest of the kernel (its levels only
+            filter what the kernel emits); <b>system</b> is everything else (SSH, WiFi, time
+            sync). Changes apply at the next reboot.
+          </p>
+        </div>
+        <div class="card">
+          <h2>Remote syslog server</h2>
+          <div class="row">
+            <label for="syslog_server">Server</label
+            ><input id="syslog_server" placeholder="(none - remote logging off)" />
+          </div>
+          <div class="row">
+            <label for="syslog_port">Port</label
+            ><input id="syslog_port" inputmode="numeric" placeholder="514" />
+          </div>
+          <div class="row">
+            <label for="syslog_proto">Protocol</label
+            ><select id="syslog_proto">
+              <option value="udp">UDP</option>
+              <option value="tcp">TCP</option>
+            </select>
+          </div>
+          <p class="hint">
+            Forwards each logger at its remote level as RFC 5424 syslog. Nothing is sent unless
+            a server is set and at least one logger's remote level is on. An unreachable server
+            never holds up the machine: undeliverable messages are dropped. Applied at the next
+            reboot.
+          </p>
+          <div class="btns">
+            <button class="pri" onclick="saveSyslog()">Save</button
+            ><span class="msg" id="msg-ls"></span>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Log viewer</h2>
+          <div class="seg">
+            <select
+              id="logsel"
+              data-nolock="1"
+              style="width: auto"
+              onchange="loadTail(true)"
+            ></select
+            ><select
+              id="loglines"
+              data-nolock="1"
+              style="width: auto"
+              onchange="loadTail(true)"
+            >
+              <option value="100">last 100 lines</option>
+              <option value="200" selected>last 200 lines</option>
+              <option value="500">last 500 lines</option>
+              <option value="1000">last 1000 lines</option></select
+            ><button data-nolock="1" onclick="loadTail(false)">Refresh</button
+            ><button id="logfollow" data-nolock="1" onclick="toggleFollow()">Follow</button
+            ><span class="msg" id="msg-lv"></span>
+          </div>
+          <div id="logview"></div>
+        </div>
+        <div class="card">
+          <h2>Export</h2>
+          <label
+            ><input
+              type="checkbox"
+              id="logsan"
+              data-nolock="1"
+              checked
+              style="width: auto; margin-right: 6px"
+            />Sanitize &mdash; replace the serial number, hostname, credentials, WiFi network,
+            network addresses and e-mail addresses with placeholders</label
+          >
+          <div class="btns">
+            <button class="pri" data-nolock="1" onclick="exportLogs()">Download bundle</button
+            ><span class="msg" id="msg-lx"></span>
+          </div>
+          <p class="hint">
+            A <span class="mono">.tar.gz</span> of every logger's files plus a system snapshot
+            (firmware version, kernel ring buffer, uptime, memory, disk, processes, effective
+            log levels, settings with secrets masked). The sanitized bundle is meant for
+            attaching to a public issue report; placeholders keep the same number for the same
+            value, so hosts can still be told apart. The sanitizer removes what it knows and
+            what it can recognize &mdash; skim the bundle before posting it. Untick to keep
+            everything for your own use.
+          </p>
+        </div>
+      </section>
+      <section id="s-system">
+        <div class="card">
+          <h2>Firmware slots</h2>
+          <div id="slottbl"></div>
+          <p class="hint">
+            The eMMC carries two firmware slots (the factory A/B scheme); the SD card is the
+            development boot medium. <b>Set next boot</b> changes only the saved boot selection
+            &mdash; the machine keeps running until you reboot. Targets are probed first and
+            unbootable ones are refused.<br /><b>Switching to factory firmware:</b> while
+            factory firmware is online it may update itself and overwrite the other slot. Return
+            to ForgeFIRM with <span class="mono">sh /data/ffboot -e&lt;slot&gt;</span> at the
+            factory console.
+          </p>
+          <div class="btns">
+            <button onclick="doReboot()">Reboot now</button
+            ><span class="msg" id="msg-slot"></span>
+          </div>
+        </div>
+        <div class="card">
+          <h2>ForgeFIRM update</h2>
+          <div id="updinfo"></div>
+          <div class="btns">
+            <button class="pri" onclick="checkUpd()">Check for updates</button
+            ><button id="dlbtn" style="display: none" onclick="dlUpd()">Download</button
+            ><span class="msg" id="msg-u"></span>
+          </div>
+          <p class="hint">
+            Downloads are verified against the ForgeFIRM release signing key before anything can
+            be written. Installing writes the selected slot; the running system is untouched
+            until you set next boot and reboot.
+          </p>
+        </div>
+        <div class="card">
+          <h2>Install or restore firmware</h2>
+          <div class="row">
+            <label for="applyslot">Target slot<span class="u">overwritten</span></label
+            ><select id="applyslot" onchange="renderLists()"></select>
+          </div>
+          <p class="hint" style="margin-top: 4px">
+            Every Install and Restore button below writes <b>this</b> slot and re-verifies it.
+            The running system is never touched; the booted slot is not an option. After
+            writing, use <b>Set next boot</b> above and reboot to switch.
+          </p>
+          <h2 style="margin-top: 16px">Install a firmware image</h2>
+          <div id="stagedlist"></div>
+          <div class="btns">
+            <input type="file" id="fwfile" style="width: auto" accept=".fw" /><button
+              onclick="uploadFw()"
+            >
+              Upload .fw</button
+            ><span class="msg" id="msg-up"></span>
+          </div>
+          <p class="hint">
+            Development images upload straight from the browser (dev-key signed &mdash;
+            <span class="mono">release.sh --dev</span>); unsigned images need an extra
+            confirmation.
+          </p>
+          <h2 style="margin-top: 16px">Restore factory firmware</h2>
+          <div id="archlist"></div>
+          <p class="hint">
+            Restores an archived factory image (md5-verified against the archive manifest
+            first). The Glowforge cloud is never required.
+          </p>
+          <span class="msg" id="msg-r"></span>
+        </div>
+        <div class="card">
+          <h2>Update job</h2>
+          <div id="jobpanel" class="kv">no job running</div>
+        </div>
+        <div class="card">
+          <h2>Wireless</h2>
+          <div class="row">
+            <label for="wifi_country">Regulatory region</label
+            ><select id="wifi_country"></select>
+          </div>
+          <p class="hint">
+            Region rules set the WiFi radio's allowed channels and transmit power. Automatic
+            follows the country the access point advertises (802.11d), falling back to the
+            most-restrictive world rules; selecting a country pins it regardless of the AP
+            (2.4&nbsp;GHz channels 12&ndash;13 and the 5&nbsp;GHz bands vary by region). Applied
+            immediately and at every boot. WiFi power save stays off &mdash; on a mains-powered
+            machine it only adds latency.
+          </p>
+          <div class="btns">
+            <button class="pri" onclick="saveWifi()">Save</button
+            ><span class="msg" id="msg-w"></span>
+          </div>
+        </div>
+      </section>
+    </main>
+    <div id="fusewrap">
+      <div class="fusebox">
+        <h2>Fuse identity</h2>
+        <div id="fusekv"></div>
+        <p class="fwarn">
+          Burned into the machine at the factory and unchangeable. Keep these secret &mdash; a
+          leaked identity cannot be rotated, only abandoned.
+        </p>
+        <div class="btns"><button class="pri" onclick="hideFuse()">Close</button></div>
+      </div>
+    </div>
+    <footer>
+      ForgeFIRM is an <a href="https://community.openglow.org">OpenGlow</a> project
+    </footer>
+    <script src="panel.js"></script>
+  </body>
+</html>

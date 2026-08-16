@@ -5,7 +5,7 @@
  *
  * HTTP service (ulfius) exposing the Glowforge cameras as MJPEG:
  *
- *   GET /                        the machine control panel (ui.c)
+ *   GET /                        the machine control panel (src/ui/)
  *   GET /?action=stream          mjpg-streamer-compatible stream (lid)
  *   GET /?action=snapshot        mjpg-streamer-compatible snapshot (lid)
  *   GET /cam/stream?cam=lid|head            multipart MJPEG, 1296x972
@@ -1084,7 +1084,7 @@ static int cb_logs_export(const struct _u_request *req,
     return U_CALLBACK_CONTINUE;
 }
 
-/* "/" serves the UI (ui.c), plus the mjpg-streamer-compatible
+/* "/" serves the UI (src/ui/), plus the mjpg-streamer-compatible
  * ?action=stream / ?action=snapshot aliases many clients expect. */
 static int cb_root(const struct _u_request *req, struct _u_response *res,
                    void *user_data)

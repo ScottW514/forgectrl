@@ -199,12 +199,16 @@ the recipe, which also installs the sysvinit script from `init/`.
 
 ## Developing the panel
 
-The page is the C string in `src/ui.c`. `tools/devserver.py` (Python 3,
-standard library only) serves it with live reload: on every save the
-literals are re-extracted - the same text the compiler would produce - and
-the open browser tab reloads; a literal that does not extract shows the
-error and its `ui.c` line, and the page comes back when it is fixed. API
-calls from the page go to one of two backends:
+The panel is a plain static page under `src/ui/` - `index.html`,
+`panel.css`, `panel.js` (ES5, no external assets). The build bundles the
+three into one self-contained page and embeds it in the daemon
+(`src/ui/embed.cmake`, run by CMake; the bundled page also lands in
+`build/ui/index.html`), so what ships is still a single response with the
+token substituted at serve time. `tools/devserver.py` (Python 3, standard
+library only) serves the files as they are, with live reload: the browser
+sees real file names and line numbers, and the open tab reloads whenever
+anything under `src/ui/` is saved (`--bundle` serves the page inlined the
+way the daemon does). API calls from the page go to one of two backends:
 
 - **A real machine.** `GF_HOST` (IP literal, `:port` if not 8080) and
   `GF_TOKEN` (the panel token, `/data/forgefirm/panel.token` on the
@@ -222,7 +226,7 @@ calls from the page go to one of two backends:
 cp .env.example .env            # then fill in GF_HOST / GF_TOKEN
 python3 tools/devserver.py      # http://127.0.0.1:8081
 python3 tools/devserver.py --mock
-python3 tools/devserver.py --dump > panel.html   # the extracted page
+python3 tools/devserver.py --dump > panel.html   # the bundled page
 ```
 
 `.devcontainer/` packages this for VS Code (Dev Containers, Docker or
