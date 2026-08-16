@@ -32,6 +32,7 @@
  * over the exclusive-open pulse device and the Grbl port.
  */
 #define _GNU_SOURCE
+#include "cam.h"
 #include "cool.h"
 #include "diag.h"
 #include "fflog.h"
@@ -377,6 +378,9 @@ static void spawn_locked(ctl_t ctl)
     generation++;
     fflog(LOG_NOTICE, "super: started %s controller (pid %d)",
           ctl_name(ctl), (int)pid);
+    /* The idle lid lamp is asserted around every spawn: a cloud client
+     * drives its own level while it runs and leaves it behind. */
+    cam_lamp_apply_idle();
 }
 
 /* Reap and, if the death was unexpected, safe the machine and arm the

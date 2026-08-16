@@ -382,6 +382,9 @@ static int valid_button_s(const char *v)   { return valid_range(v, 1, 3600); }
 static int valid_disarm_s(const char *v)   { return valid_range(v, 1, 3600); }
 static int valid_settle_s(const char *v)   { return valid_range(v, 0, 30); }
 
+/* The lid lamp's idle level (PWM 0-255; unset = 236). Applied live. */
+static int valid_lamp(const char *v)       { return valid_range(v, 0, 255); }
+
 /* Logging: per-logger disk and remote levels (each off|error|warning|
  * notice|info|debug) and the remote syslog target. Read at boot by
  * `forgectrl --render-syslog` (rsyslog rules) and by each process for
@@ -414,6 +417,7 @@ static const struct {
     { "laser_button_timeout_s", valid_button_s,    0 },
     { "laser_disarm_s",         valid_disarm_s,    0 },
     { "rail_settle_s",          valid_settle_s,    0 },
+    { "lid_lamp_idle",          valid_lamp,        0 },
     { "log_forgectrl_disk",     logs_valid_level,  0 },
     { "log_forgectrl_remote",   logs_valid_level,  0 },
     { "log_grblhal_disk",       logs_valid_level,  0 },
@@ -767,6 +771,8 @@ static int cb_settings_post(const struct _u_request *req,
     }
     if (setting_param(req, "wifi_country"))
         apply_wifi(1);
+    if (setting_param(req, "lid_lamp_idle"))
+        cam_lamp_apply_idle();
     return reply_settings(res);
 }
 
@@ -1157,6 +1163,7 @@ int main(int argc, char **argv)
     super_init();
     update_init();
     apply_wifi(0);
+    cam_lamp_apply_idle();
 
     struct _u_instance inst;
     if (ulfius_init_instance(&inst, port, NULL, NULL) != U_OK) {

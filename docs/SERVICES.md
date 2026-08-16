@@ -322,7 +322,8 @@ remain only as manual emergency stops.
   adopted); `POST /mode` remains the manual lever.
 - **Motion liveness gates the first spawn** of each broker session: the
   supervisor commands a small probe move through its own fd (+X first,
-  then back — a cable lives at the end of left travel; laser latched) and
+  then back — a cable lives at the end of left travel; laser latched, no
+  axis masked, the run-current step settled before sampling) and
   verifies it physically happened via the head accelerometer. A dead
   verdict runs a rail-off recovery ladder (5/15/30 s — the DRV8825
   drivers can come out of a rail power-up unserviceable and need a true
@@ -502,7 +503,7 @@ Readers are unrestricted.
 | `cnc/enable` / `cnc/disable` (40 V rail) | forgectrl; the controller's enable-at-init is the one residual write (rail policy above) | forgectrl | forgectrl |
 | `cnc/laser_latch` | GRBL controller (locked by forgectrl across handovers and on writer death) | cloud client (same) | — |
 | Button LEDs (`/sys/class/leds/button_led_*`) | GRBL controller (arm flow) | cloud client | — |
-| Head/lid illumination (camera lamps) | forgectrl (`lamp` on snapshot) | forgectrl | forgectrl |
+| Head/lid illumination (camera lamps) | forgectrl (`lamp` on snapshot); the lid lamp's idle level is the `lid_lamp_idle` setting (0-255, default 236), asserted at daemon start, on a settings change, and at every controller spawn | the cloud client drives the lid lamp while it runs (its `LLvl`); forgectrl re-asserts the idle level at the next spawn | forgectrl |
 | Cameras (V4L2, MIPI mux) | forgectrl | forgectrl | forgectrl |
 | `/data/forgefirm.conf` settings | read (re-read per `$H` / run start) | read | read; forgectrl writes (409 while busy) |
 | `/run/grblhal.homed` anchor | GRBL controller writes | — | — |

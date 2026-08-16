@@ -69,4 +69,10 @@ void cam_get_status(struct cam_status *st);
 
 const char *cam_name(cam_id_t cam);
 
+/* The configured idle level of the lid lamp (lid_lamp_idle, default
+ * 236) and its application: written now, or at the current lid
+ * capture's teardown. */
+int cam_lamp_idle_level(void);
+void cam_lamp_apply_idle(void);
+
 #endif

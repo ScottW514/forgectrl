@@ -74,10 +74,14 @@ static int enclosure_open(void)
 #define TICKS_PER_STEP  19                      /* ~10.5 mm/s */
 #define LEAD_TICKS      400
 
-/* Verdict thresholds (bench-characterized 2026-08-11, identical move:
- * dead p2p <= 212, live p2p >= 1040 on X/Y). */
-#define P2P_MOVING      500
+/* Verdict thresholds. Bench-characterized on the identical move: a
+ * live head reads p2p >= 1040 on X/Y (typically 1800-2900), a dead one
+ * <= 250 - but a rail-on or the run-current step just before the move
+ * can add a jolt of a few hundred counts, so the moving threshold sits
+ * well above that band and the current step settles before sampling. */
+#define P2P_MOVING      800
 #define P2P_DEAD        250
+#define CURRENT_SETTLE_US 300000
 
 /* Pulse-byte bits (kernel feeder contract). */
 #define B_X_STEP        0x01
@@ -173,12 +177,16 @@ int liveness_probe(int pulse_fd, char *detail, size_t dlen)
         return -1;
     }
 
-    /* Configure just enough of the machine for a clean X move: x8
+    /* Configure just enough of the machine for a clean X move: no axis
+     * masked (a leftover motor_lock would read as a dead driver), x8
      * microstep mode, slow decay, run current on X. The controller
-     * re-applies its full config at its own start. */
+     * re-applies its full config at its own start. The current step
+     * jolts the head; let it settle before the accelerometer is read. */
+    wr_attr("cnc/motor_lock", "0");
     wr_attr("cnc/x_mode", "8");
     wr_attr("cnc/x_decay", "1");
     wr_attr("pic/x_step_current", "135");
+    usleep(CURRENT_SETTLE_US);
 
     char freq[16];
     snprintf(freq, sizeof(freq), "%d", STEP_FREQ_HZ);
