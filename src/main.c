@@ -385,6 +385,12 @@ static int valid_settle_s(const char *v)   { return valid_range(v, 0, 30); }
 /* The lid lamp's idle level (PWM 0-255; unset = 236). Applied live. */
 static int valid_lamp(const char *v)       { return valid_range(v, 0, 255); }
 
+/* Cloud-mode print pause: pulse ticks retraced (laser off) on the button
+ * press, and the laser-off lead the resume runs before re-enabling
+ * (unset = the factory's 2000 / 1950). The kernel reserves 32 KiB of
+ * ring for the backtrack; both stay well inside it. */
+static int valid_ticks(const char *v)      { return valid_range(v, 0, 30000); }
+
 /* Logging: per-logger disk and remote levels (each off|error|warning|
  * notice|info|debug) and the remote syslog target. Read at boot by
  * `forgectrl --render-syslog` (rsyslog rules) and by each process for
@@ -418,6 +424,8 @@ static const struct {
     { "laser_disarm_s",         valid_disarm_s,    0 },
     { "rail_settle_s",          valid_settle_s,    0 },
     { "lid_lamp_idle",          valid_lamp,        0 },
+    { "cloud_pause_backtrack_ticks", valid_ticks,  0 },
+    { "cloud_resume_lead_ticks",     valid_ticks,  0 },
     { "log_forgectrl_disk",     logs_valid_level,  0 },
     { "log_forgectrl_remote",   logs_valid_level,  0 },
     { "log_grblhal_disk",       logs_valid_level,  0 },

@@ -72,15 +72,23 @@ Who reads what:
 - **The active controller** reads the button directly (the GRBL arm flow waits
   on code 2; the cloud client's event loop does the same in its mode). Button
   *meaning* is mode-specific by design; the reads stay in-process for latency.
+  In cloud mode the button is also the print pause/resume toggle (press:
+  controlled stop plus a laser-off backtrack; press again: resume with a
+  laser-off lead — the `cloud_pause_backtrack_ticks` /
+  `cloud_resume_lead_ticks` settings, factory 2000 / 1950).
 - **The active controller also reads bits 3 and 5 for its own motion gate.**
   In GRBL mode they become the core's safety-door signal — lid open or
   interlock loop open parks a running (or held) job, and a cycle start
-  resumes it once closed. While the core is idle, jogging or homing the
-  signal is hidden from it, so a lid cycle at idle (loading material) never
-  strands the controller in Door; a job started with the lid open parks on
-  the first poll. Bit 4 gates nothing (it is a readback of the chain
-  itself). The cloud client reads the same bits itself and is unaffected
-  (it reports every lid event to the service).
+  resumes it once closed; during the arm wait (button lit) either cancels
+  the job outright. While the core is idle, jogging or homing the signal is
+  hidden from it, so a lid cycle at idle (loading material) never strands
+  the controller in Door; a job started with the lid open parks on the
+  first poll. Bit 4 gates nothing (it is a readback of the chain itself).
+  The cloud client reads the same bits itself: lid or interlock open during
+  a print or motion (or the pre-print button wait) cancels the job with a
+  controlled stop and the print parks with the lid open; a hunt and the
+  park itself ignore the lid; the button pauses/resumes a print. It reports
+  every lid event to the service.
 - **No process takes `EVIOCGRAB`** on the device — the cloud client's reader
   included. Exclusivity of button *meaning* comes from mode selection, and a
   grab starves every other reader of events.

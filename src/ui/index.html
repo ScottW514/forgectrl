@@ -249,6 +249,29 @@
             ><span class="msg" id="msg-s"></span>
           </div>
         </div>
+        <div class="card">
+          <h2>Print pause</h2>
+          <div class="grid2">
+            <div class="row">
+              <label for="cloud_pause_backtrack_ticks">Backtrack<span class="u">ticks</span></label
+              ><input id="cloud_pause_backtrack_ticks" inputmode="numeric" placeholder="2000" />
+            </div>
+            <div class="row">
+              <label for="cloud_resume_lead_ticks">Resume lead<span class="u">ticks</span></label
+              ><input id="cloud_resume_lead_ticks" inputmode="numeric" placeholder="1950" />
+            </div>
+          </div>
+          <p class="hint">
+            Pressing the button during a cloud print pauses it: the head stops and retraces this
+            many pulse ticks with the laser off; the next press resumes, moving forward with the
+            laser off for the resume lead before it re-enables. The factory values are 2000 and
+            1950 (about 0.2 s at 10 kHz); 0&ndash;30000.
+          </p>
+          <div class="btns">
+            <button class="pri" onclick="savePause()">Save</button
+            ><span class="msg" id="msg-p"></span>
+          </div>
+        </div>
       </section>
       <section id="s-grbl">
         <div class="card">
