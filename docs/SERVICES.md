@@ -316,7 +316,10 @@ remain only as manual emergency stops.
   live job. A supervisor that finds an unmanaged controller — at startup,
   or after its own crash-respawn (the init script runs the daemon under a
   respawn wrapper) — stands by and **retakes supervision automatically
-  once the machine is idle**; `POST /mode` remains the manual lever.
+  once the machine is idle**: it stops the unmanaged controller, holds the
+  pulse device, re-probes motion, and starts a supervised controller of the
+  selected mode (a new process — the old one's inherited fd cannot be
+  adopted); `POST /mode` remains the manual lever.
 - **Motion liveness gates the first spawn** of each broker session: the
   supervisor commands a small probe move through its own fd (+X first,
   then back — a cable lives at the end of left travel; laser latched) and
