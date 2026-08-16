@@ -300,11 +300,33 @@
             A job that fires the laser waits for the physical button (the light comes on) before
             its first fire; if nobody presses within the button wait the job is refused. Once
             armed, the window closes after the disarm grace with the laser off, and the next job
-            asks again.
+            asks again. While a job runs the button pauses it, and pressing again resumes.
           </p>
           <div class="btns">
             <button class="pri" onclick="saveGrbl()">Save</button
             ><span class="msg" id="msg-g"></span>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Lid and interlock</h2>
+          <div class="row">
+            <label for="lid_policy">Opened during a job</label
+            ><select id="lid_policy">
+              <option value="cancel">Cancel the job and return to its start (factory)</option>
+              <option value="hold">Hold the job; Resume continues it once closed</option>
+            </select>
+          </div>
+          <p class="hint">
+            The beam is cut by the hardware the instant the lid or the interlock loop opens,
+            whatever is chosen here; this decides what the job does. Cancel is what the factory
+            firmware does: the head stops, the job ends for the sender, and the head goes back to
+            where the job started, lid open or not &mdash; the next job asks for the button again.
+            Hold keeps the stock Grbl door behavior; the button still has to be pressed before the
+            beam can return.
+          </p>
+          <div class="btns">
+            <button class="pri" onclick="saveLid()">Save</button
+            ><span class="msg" id="msg-l"></span>
           </div>
         </div>
         <div class="card">

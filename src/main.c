@@ -391,6 +391,11 @@ static int valid_lamp(const char *v)       { return valid_range(v, 0, 255); }
  * ring for the backtrack; both stay well inside it. */
 static int valid_ticks(const char *v)      { return valid_range(v, 0, 30000); }
 
+/* GRBL mode: what a lid or interlock open does to a running job -
+ * "cancel" (the factory's abort + return to the job start; unset = this)
+ * or "hold" (stock grblHAL door hold, cycle start resumes). */
+static int valid_lid_policy(const char *v) { return !strcmp(v, "cancel") || !strcmp(v, "hold"); }
+
 /* Logging: per-logger disk and remote levels (each off|error|warning|
  * notice|info|debug) and the remote syslog target. Read at boot by
  * `forgectrl --render-syslog` (rsyslog rules) and by each process for
@@ -426,6 +431,7 @@ static const struct {
     { "lid_lamp_idle",          valid_lamp,        0 },
     { "cloud_pause_backtrack_ticks", valid_ticks,  0 },
     { "cloud_resume_lead_ticks",     valid_ticks,  0 },
+    { "lid_policy",             valid_lid_policy,  0 },
     { "log_forgectrl_disk",     logs_valid_level,  0 },
     { "log_forgectrl_remote",   logs_valid_level,  0 },
     { "log_grblhal_disk",       logs_valid_level,  0 },

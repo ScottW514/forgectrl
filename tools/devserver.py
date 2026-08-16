@@ -330,7 +330,7 @@ class Mock:
             'cool_temp_resume': '', 'cool_cooldown_s': '',
             'cool_cooldown_max_s': '', 'laser_button_timeout_s': '',
             'laser_disarm_s': '', 'rail_settle_s': '', 'lid_lamp_idle': '',
-            'cloud_pause_backtrack_ticks': '', 'cloud_resume_lead_ticks': '',
+            'cloud_pause_backtrack_ticks': '', 'cloud_resume_lead_ticks': '', 'lid_policy': '',
             'syslog_server': '', 'syslog_port': '', 'syslog_proto': '',
             'flow_checks_disabled': False,
             'version': '20260101000000 (mock)', 'machine_id': 'ABC-123',

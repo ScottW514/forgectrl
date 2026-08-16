@@ -408,6 +408,7 @@ function fill() {
   for (var ci = 0; ci < CK.length; ci++) setF(CK[ci], S[CK[ci]]);
   setF('laser_button_timeout_s', S.laser_button_timeout_s);
   setF('laser_disarm_s', S.laser_disarm_s);
+  setF('lid_policy', S.lid_policy || 'cancel');
   setF('rail_settle_s', S.rail_settle_s);
   setF('lid_lamp_idle', S.lid_lamp_idle);
   setF('wifi_country', S.wifi_country || '00');
@@ -478,6 +479,14 @@ function saveGrbl() {
     return;
   }
   post(p, 'msg-g');
+}
+function saveLid() {
+  var p = {};
+  if (!pick(p, ['lid_policy'])) {
+    $('msg-l').textContent = 'no changes';
+    return;
+  }
+  post(p, 'msg-l');
 }
 function saveRail() {
   var p = {};

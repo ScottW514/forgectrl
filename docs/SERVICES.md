@@ -72,18 +72,26 @@ Who reads what:
 - **The active controller** reads the button directly (the GRBL arm flow waits
   on code 2; the cloud client's event loop does the same in its mode). Button
   *meaning* is mode-specific by design; the reads stay in-process for latency.
-  In cloud mode the button is also the print pause/resume toggle (press:
-  controlled stop plus a laser-off backtrack; press again: resume with a
-  laser-off lead — the `cloud_pause_backtrack_ticks` /
-  `cloud_resume_lead_ticks` settings, factory 2000 / 1950).
+  Outside the arm wait the button is the job pause/resume toggle in both
+  modes: in GRBL mode a press while running is a feed hold and a press while
+  held is a cycle start; in cloud mode a press is a controlled stop plus a
+  laser-off backtrack and the next press resumes with a laser-off lead (the
+  `cloud_pause_backtrack_ticks` / `cloud_resume_lead_ticks` settings, factory
+  2000 / 1950). A held button has no further meaning during a job.
 - **The active controller also reads bits 3 and 5 for its own motion gate.**
-  In GRBL mode they become the core's safety-door signal — lid open or
-  interlock loop open parks a running (or held) job, and a cycle start
-  resumes it once closed; during the arm wait (button lit) either cancels
-  the job outright. While the core is idle, jogging or homing the signal is
-  hidden from it, so a lid cycle at idle (loading material) never strands
-  the controller in Door; a job started with the lid open parks on the
-  first poll. Bit 4 gates nothing (it is a readback of the chain itself).
+  In GRBL mode they become the core's safety-door signal, and what happens
+  next is the `lid_policy` setting: `cancel` (default, the factory's
+  behavior) — the job parks with a planned deceleration and is then
+  cancelled: armed window closed, reason reported, a soft reset ends the
+  sender's stream with the position kept (no alarm), and the head returns
+  on its own to where the job started, lid open or not; `hold` — the stock
+  door hold, a cycle start resumes it once closed. During the arm wait
+  (button lit) either opening cancels the job outright under both
+  policies. While the core is idle, jogging or homing — and during the
+  return-to-start motion after a cancel — the signal is hidden from it, so
+  a lid cycle at idle (loading material) never strands the controller in
+  Door; a job started with the lid open parks (and cancels) on the first
+  poll. Bit 4 gates nothing (it is a readback of the chain itself).
   The cloud client reads the same bits itself: lid or interlock open during
   a print or motion (or the pre-print button wait) cancels the job with a
   controlled stop and the print parks with the lid open; a hunt and the
