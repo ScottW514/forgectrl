@@ -310,11 +310,6 @@ function renderMotion() {
       M.laser.emission_samples > 0 ? 'EMITTING' : 'dark',
       M.laser.emission_samples > 0 ? 'b-run' : 'b-ok'
     );
-    g += txt(
-      'Laser power',
-      M.laser.pgood_samples > 128 ? 'good' : 'not good',
-      M.laser.pgood_samples > 128 ? 'b-ok' : 'b-dim'
-    );
   }
   if (typeof M.faults !== 'undefined' && M.faults > 0)
     g += txt('Stepper faults', 'mask ' + M.faults, 'b-bad');
