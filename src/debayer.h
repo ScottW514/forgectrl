@@ -6,7 +6,19 @@
 #ifndef FORGECTRL_DEBAYER_H
 #define FORGECTRL_DEBAYER_H
 
+#include <stddef.h>
 #include <stdint.h>
+
+/* Narrow a frame of 16-bit raw samples to the 8-bit samples every demosaic
+ * below takes. `shift` is the right shift from sample to 8-bit value (2 for
+ * a 10-bit sensor); samples are read as little-endian 16-bit words, which is
+ * how the IPU CSI writes V4L2_PIX_FMT_S*16 passthrough frames, and the
+ * result is clamped so an unexpectedly aligned source saturates instead of
+ * wrapping. Returns the largest sample seen before the shift - a caller can
+ * log it to confirm the sample alignment on a sensor it has not measured.
+ * `n` is the pixel count; `src` holds 2*n bytes and `dst` n bytes. */
+uint16_t debayer_narrow16(const uint8_t *src, uint8_t *dst, size_t n,
+                          int shift);
 
 /* Full-resolution bilinear demosaic of a BGGR frame. rgb must hold w*h*3
  * bytes. hflip mirrors the output horizontally (the factory image

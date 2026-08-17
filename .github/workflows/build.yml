@@ -22,3 +22,9 @@ jobs:
         run: ./build/status_idle_test
       - name: Log-export sanitizer
         run: ./build/sanitize_test
+      - name: Raw-frame narrowing and Bayer phase
+        run: ./build/debayer_test
+      - name: Camera privacy gate fails closed
+        run: ./build/lid_gate_test
+      - name: Capture frame-health ladder
+        run: ./build/camhealth_test

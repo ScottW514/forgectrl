@@ -507,6 +507,90 @@ put a safety, job, or timeout decision on the wall clock.**
 
 ---
 
+## Camera privacy gate [implemented]
+
+**Neither camera captures unless the lid is closed.** The lid camera faces the
+room once the lid is raised, and in cloud mode the capture request comes from a
+remote service, so the enclosure being shut is the precondition for any image.
+
+The signal is EV_SW bit 3 (`doors`, the series combination both lid switches
+feed - the same one the hardware safety chain uses); `machine_lid_closed()` in
+`src/status.c` reads it and **fails closed**, so an unreadable lid refuses
+capture. There is no setting to disable the gate.
+
+Enforced in two places, because two processes can reach a sensor:
+
+| Owner | Covers | Behavior |
+|---|---|---|
+| forgectrl `src/cam.c` | the panel, `/cam/stream`, `/cam/snapshot`, the mjpg-streamer aliases, LightBurn, and the cloud client's normal path | refuses to start capture, refuses stream and snapshot up front (HTTP 409), and re-checks every frame so a lid opened mid-capture tears the pipeline down |
+| `gfhardware.cam.capture()` | the cloud client's direct-V4L2 fallback when forgectrl is unreachable, and the capture utility | raises `gfhardware.cam.LidOpen` before configuring the pipeline or touching a lamp |
+
+Both check before any side effect, so a refused capture leaves the lamps and
+the media graph as they were. `/cam/status` reports `capture_allowed` (the live
+lid reading) and `stopped_by_lid` (the last capture ended because the lid
+opened rather than going idle).
+
+Consequence for cloud mode: the factory ran focus hunts with the lid open, and
+a hunt includes a head capture. Those captures are now refused, and the action
+runner reports the action as failed rather than leaving the service waiting.
+
+---
+
+## Camera sensors [implemented; OV8856 untested]
+
+Two sensors ship on the shared `camera@36` node, and the capture path follows
+whichever driver bound rather than assuming one. Clients must take the frame
+size from `GET /cam/status` (`sensor`, `snapshot`, `stream`) instead of
+hard-coding it.
+
+| Sensor | Machines | Capture mode | Media bus | Capture pixel format | Snapshot | Stream |
+|---|---|---|---|---|---|---|
+| OV5648 | 5 MP (Basic / Plus / Pro) | 2592x1944 | `SBGGR8_1X8` | `SBGGR8`, 1 byte/sample | 2592x1944 | 1296x972 |
+| OV8856 | 8 MP ("HD") | 3264x2448 | `SBGGR8_1X8` | `SBGGR8`, 1 byte/sample | 3264x2448 | 1632x1224 |
+
+Both are read as 8-bit BGGR, so one demosaic and one capture word serve both
+and the only thing that changes with the sensor is the geometry. Both widths
+are multiples of 32, so both take the NEON superpixel path.
+
+The OV8856's stock RAW10 full-resolution mode is *not* reachable on this SoC:
+it runs the link at 1.44 Gbps/lane and the i.MX6 CSI-2 D-PHY stops at 1 Gbps,
+so `imx6-mipi-csi2` refuses to program the receiver. Full resolution comes
+instead from a RAW8 mode carried at 360 MHz, added to the driver by the
+BSP - 8-bit samples need half the link rate for the same frame, and at
+180 Mpx/s the mode runs 15 fps. Its control set still differs from the
+OV5648's: exposure counts whole lines and is capped by the frame length
+(2482), gain is `analogue_gain` with 128 = 1x, and it publishes no
+auto-exposure, auto-gain or white-balance controls, so white balance is
+uncorrected. The exposure and gain defaults are the OV5648 values translated
+into those units and have never been measured on real 8 MP hardware.
+
+### Frame health
+
+The capture queue flags a buffer `V4L2_BUF_FLAG_ERROR` when the frame in it is
+short, torn, or arrived after the receiver lost CSI-2 sync. Such a frame is
+never demosaiced - a snapshot built from one is a corrupt image presented as a
+picture of the bed. The engine drops it, and escalates if they persist: four
+consecutive errored frames cycle the capture queue (which re-synchronizes the
+receiver), and three cycles with no usable frame between them stop the engine,
+so clients reconnect and the whole pipeline setup runs again. The ladder is
+`src/camhealth.c`, covered by a host test.
+
+`GET /cam/status` carries the running totals since the daemon started:
+
+```json
+"health": { "captured": 41230, "corrupt": 0, "restarts": 0 }
+```
+
+A nonzero `corrupt` on a machine that is otherwise working is a real signal - a
+marginal camera ribbon, a mistimed D-PHY - even though those frames never
+reached a client.
+
+Two frames are also dropped after every stream start: they were already in
+flight while the sensor was being programmed, so they predate its exposure
+settling and a snapshot could otherwise be handed one.
+
+---
+
 ## Hardware ownership [contract]
 
 Single-writer rule: each attr group has exactly one writing process per mode.
@@ -520,7 +604,7 @@ Readers are unrestricted.
 | `cnc/laser_latch` | GRBL controller (locked by forgectrl across handovers and on writer death) | cloud client (same) | — |
 | Button LEDs (`/sys/class/leds/button_led_*`) | GRBL controller (arm flow) | cloud client | — |
 | Head/lid illumination (camera lamps) | forgectrl (`lamp` on snapshot); the lid lamp's idle level is the `lid_lamp_idle` setting (0-255, default 236), asserted at daemon start, on a settings change, and at every controller spawn | the cloud client drives the lid lamp while it runs (its `LLvl`); forgectrl re-asserts the idle level at the next spawn | forgectrl |
-| Cameras (V4L2, MIPI mux) | forgectrl | forgectrl | forgectrl |
+| Cameras (V4L2, MIPI mux) | forgectrl; capture only with the lid closed (privacy gate above) | forgectrl, same gate — including the cloud client's direct-capture fallback | forgectrl, same gate |
 | `/data/forgefirm.conf` settings | read (re-read per `$H` / run start) | read | read; forgectrl writes (409 while busy) |
 | `/run/grblhal.homed` anchor | GRBL controller writes | — | — |
 | `/run/forgefirm/cooling.state` | forgectrl writes, controllers read | forgectrl writes, controllers read | forgectrl writes |

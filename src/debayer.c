@@ -16,6 +16,23 @@ static inline int clampi(int v, int lo, int hi)
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
+uint16_t debayer_narrow16(const uint8_t *src, uint8_t *dst, size_t n,
+                          int shift)
+{
+    uint16_t peak = 0;
+
+    if (shift < 0)
+        shift = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned v = (unsigned)src[2 * i] | ((unsigned)src[2 * i + 1] << 8);
+        if (v > peak)
+            peak = (uint16_t)v;
+        v >>= shift;
+        dst[i] = (uint8_t)(v > 255 ? 255 : v);
+    }
+    return peak;
+}
+
 void debayer_bggr_bilinear(const uint8_t *raw, uint8_t *rgb,
                            int w, int h, int hflip)
 {

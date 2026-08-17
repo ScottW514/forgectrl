@@ -20,6 +20,13 @@ int machine_status_json(char *buf, size_t len);
  * takeovers are only allowed while idle. */
 int machine_is_idle(void);
 
+/* True only when the lid is positively reported closed (the EV_SW
+ * `doors` bit, the series combination of both lid switches that the
+ * hardware safety chain itself uses). Fails closed: any read failure
+ * reports NOT closed, so the camera privacy gate keeps the sensors dark
+ * rather than capturing on a bad read. */
+int machine_lid_closed(void);
+
 /* Factory coolant-thermistor conversion (shared with the diagnostics
  * runner). Raw 10-bit ADC count -> degrees C; out-of-range input maps
  * to -273.15. */

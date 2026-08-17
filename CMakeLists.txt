@@ -23,6 +23,7 @@ add_executable(forgectrl
   src/main.c
   src/auth.c
   src/cam.c
+  src/camhealth.c
   src/cool.c
   src/debayer.c
   src/diag.c
@@ -56,6 +57,26 @@ target_link_libraries(status_idle_test m)
 # A sanitized bundle is what gets attached to public issue reports.
 add_executable(sanitize_test tests/sanitize_test.c src/sanitize.c)
 target_compile_options(sanitize_test PRIVATE -Wall -Wextra)
+
+# Host unit test for the camera privacy gate's lid read: every way it
+# can fail must land on "not closed", or the cameras could capture with
+# the enclosure open. CI runs it after the build.
+add_executable(lid_gate_test tests/lid_gate_test.c src/status.c)
+target_compile_options(lid_gate_test PRIVATE -Wall -Wextra)
+target_link_libraries(lid_gate_test m)
+
+# Host unit test for the raw-frame front end: the 10-bit -> 8-bit
+# narrowing the 8 MP (OV8856) capture path depends on, and the Bayer
+# phase surviving it. CI runs it after the build.
+add_executable(debayer_test tests/debayer_test.c src/debayer.c)
+target_compile_options(debayer_test PRIVATE -Wall -Wextra)
+
+# Host unit test for the capture frame-health ladder: a frame the queue
+# flagged errored must never be demosaiced, a run of them must escalate to
+# a stream restart and then stop being retried, and one usable frame must
+# put the ladder back at the bottom. CI runs it after the build.
+add_executable(camhealth_test tests/camhealth_test.c src/camhealth.c)
+target_compile_options(camhealth_test PRIVATE -Wall -Wextra)
 
 # Emitter half of the host end-to-end logging check (tests/fflog_e2e.sh
 # drives it against a private rsyslogd; manual, not CI).

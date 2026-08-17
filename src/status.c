@@ -78,6 +78,20 @@ static const char *gf_sysfs_root(void)
     return root;
 }
 
+/* Same test seam for the switch device: GF_SWITCH_DEV lets a host test
+ * point the reader at a path that is missing or is not an input device,
+ * which is how the fail-closed contract of machine_lid_closed() is
+ * proven without hardware. */
+static const char *switch_dev(void)
+{
+    static const char *dev;
+    if (!dev) {
+        const char *d = getenv("GF_SWITCH_DEV");
+        dev = (d && *d) ? d : SWITCH_DEV;
+    }
+    return dev;
+}
+
 static int rd_attr(const char *attr, char *buf, size_t len)
 {
     char path[128];
@@ -184,7 +198,7 @@ static int read_position(double *x, double *y, double *z, int *homed)
 static unsigned long read_switches(void)
 {
     unsigned long bits = 0;
-    int fd = open(SWITCH_DEV, O_RDONLY | O_NONBLOCK);
+    int fd = open(switch_dev(), O_RDONLY | O_NONBLOCK);
     if (fd < 0)
         return 0;
     uint8_t buf[2] = {0};
@@ -192,6 +206,19 @@ static unsigned long read_switches(void)
         bits = buf[0] | ((unsigned long)buf[1] << 8);
     close(fd);
     return bits;
+}
+
+int machine_lid_closed(void)
+{
+    /* Bit 3 (`doors`) is the series combination of both lid switches -
+     * the same signal the hardware safety chain uses, so it cannot read
+     * closed while either switch says otherwise.
+     *
+     * Fails CLOSED for privacy: read_switches() returns 0 bits on any
+     * failure (device missing, not an input device, fd exhaustion), and
+     * 0 means "not closed" here, so an unreadable lid keeps the cameras
+     * dark rather than letting them capture on a bad read. */
+    return (read_switches() & (1u << 3)) != 0;
 }
 
 /* Pull one "key":"value" string out of the small gf-latest.json the

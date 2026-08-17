@@ -235,6 +235,13 @@ $('cam').onerror = function () {
       return r.json();
     })
     .then(function (s) {
+      // An open lid is the privacy gate, not a fault: say so and stop
+      // retrying, because retrying cannot succeed until the lid closes.
+      if (s.capture_allowed === false) {
+        $('cammsg').textContent = 'lid open \u2014 the cameras are off';
+        toggleLive();
+        return;
+      }
       if (s.cam === 'lid' && retries++ < 5) {
         $('cammsg').textContent = 'stream retrying\u2026';
         setTimeout(function () {
@@ -362,10 +369,14 @@ function renderStat() {
     'Controller',
     "<span class='mono'>" + esc(location.hostname) + ':23</span> (Grbl 1.1)'
   );
-  if (CS.running)
+  var sensor = CS.sensor && CS.sensor !== 'unknown' ? CS.sensor + ', ' : '';
+  if (CS.capture_allowed === false)
+    g += txt('Camera engine', sensor + 'off — lid open (privacy)');
+  else if (CS.running)
     g += txt(
       'Camera engine',
-      CS.cam +
+      sensor +
+        CS.cam +
         ' camera, ' +
         (CS.fps || 0).toFixed(1) +
         ' fps, ' +
@@ -375,7 +386,7 @@ function renderStat() {
         ' viewer' +
         (CS.clients === 1 ? '' : 's')
     );
-  else g += txt('Camera engine', 'idle');
+  else g += txt('Camera engine', sensor ? sensor + 'idle' : 'idle');
   $('statgrid').innerHTML = g;
 }
 function renderGrbl() {

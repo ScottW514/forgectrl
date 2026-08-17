@@ -8,10 +8,15 @@
  *   GET /                        the machine control panel (src/ui/)
  *   GET /?action=stream          mjpg-streamer-compatible stream (lid)
  *   GET /?action=snapshot        mjpg-streamer-compatible snapshot (lid)
- *   GET /cam/stream?cam=lid|head            multipart MJPEG, 1296x972
+ *   GET /cam/stream?cam=lid|head            multipart MJPEG, half sensor res
  *   GET /cam/snapshot?cam=&res=full|half&q=&lamp=  single JPEG (full res;
  *                                lamp overrides the scene lamp for the shot)
- *   GET /cam/status                         JSON engine status
+ *   GET /cam/status                         JSON engine status, including
+ *                                the bound sensor, its frame geometry, and
+ *                                whether the lid currently permits capture
+ *
+ * The cameras only capture with the lid closed (a privacy rule, enforced
+ * in cam.c): stream and snapshot answer 409 while it is open.
  *   GET /status                             JSON machine operational status
  *   GET /settings                           JSON machine settings
  *   POST /settings?key=value                update machine settings
@@ -151,12 +156,22 @@ static void stream_free_cb(void *cls)
     free(sc);
 }
 
+/* Camera failures that reflect machine state rather than a fault answer
+ * 409 (the request conflicts with how the machine is right now, and the
+ * fix is to change that): the mux is held by another viewer, or the lid
+ * is open and the privacy gate refuses to capture. Everything else is a
+ * 503 - the camera could not be brought up. */
+static unsigned cam_err_status(const char *err)
+{
+    return (strstr(err, "busy") || !strcmp(err, CAM_ERR_LID)) ? 409 : 503;
+}
+
 static int do_stream(cam_id_t cam, struct _u_response *res)
 {
     char err[256];
     cam_client_t *cl = cam_client_open(cam, err, sizeof(err));
     if (!cl)
-        return reply_error(res, strstr(err, "busy") ? 409 : 503, err);
+        return reply_error(res, cam_err_status(err), err);
 
     struct stream_ctx *sc = calloc(1, sizeof(*sc));
     if (!sc) {
@@ -180,7 +195,7 @@ static int do_snapshot(cam_id_t cam, int full, int quality, int lamp,
     size_t len = 0;
     char err[256];
     if (cam_snapshot(cam, full, quality, lamp, &jpg, &len, err, sizeof(err)))
-        return reply_error(res, strstr(err, "busy") ? 409 : 503, err);
+        return reply_error(res, cam_err_status(err), err);
     ulfius_set_binary_body_response(res, 200, (const char *)jpg, len);
     ulfius_add_header_to_response(res, "Content-Type", "image/jpeg");
     ulfius_add_header_to_response(res, "Cache-Control", "no-store");
@@ -245,17 +260,25 @@ static int cb_status(const struct _u_request *req, struct _u_response *res,
         return U_CALLBACK_COMPLETE;
     struct cam_status st;
     cam_get_status(&st);
-    char body[320];
+    char body[576];
     snprintf(body, sizeof(body),
              "{\"running\":%s,\"cam\":\"%s\",\"clients\":%d,"
              "\"frames\":%llu,\"fps\":%.1f,\"fps_cap\":%.1f,"
-             "\"encoder\":\"%s\",\"buffers\":\"%s\","
-             "\"stream\":{\"width\":1296,\"height\":972},"
-             "\"snapshot\":{\"width\":2592,\"height\":1944}}",
+             "\"encoder\":\"%s\",\"buffers\":\"%s\",\"sensor\":\"%s\","
+             "\"stream\":{\"width\":%d,\"height\":%d},"
+             "\"snapshot\":{\"width\":%d,\"height\":%d},"
+             "\"health\":{\"captured\":%llu,\"corrupt\":%llu,"
+             "\"restarts\":%u},"
+             "\"capture_allowed\":%s,\"stopped_by_lid\":%s}",
              st.running ? "true" : "false", cam_name(st.cam), st.clients,
              (unsigned long long)st.seq, st.fps, st.fps_cap,
              st.vpu ? "vpu" : "software",
-             st.cached ? "cached" : "uncached");
+             st.cached ? "cached" : "uncached", st.sensor,
+             st.stream_w, st.stream_h, st.snap_w, st.snap_h,
+             (unsigned long long)st.frames, (unsigned long long)st.corrupt,
+             st.recoveries,
+             st.lid_closed ? "true" : "false",
+             st.lid_stopped ? "true" : "false");
     ulfius_set_string_body_response(res, 200, body);
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
     return U_CALLBACK_CONTINUE;

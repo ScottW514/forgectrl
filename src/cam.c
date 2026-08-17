@@ -3,13 +3,25 @@
  * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
  * SPDX-License-Identifier: MIT
  *
- * Pipeline model (mainline imx-media): both OV5648 sensors feed one
- * video-mux -> MIPI CSI-2 -> IPU CSI path to the 'ipu1_csi0 capture' video
- * node. Camera selection is which mux sink link is enabled; sensor controls
- * live on the sensor subdev; illumination is the per-camera LED driven via
- * sysfs. Links and pad formats are configured with media-ctl / v4l2-ctl
- * (the same sequences python3-gfhardware uses for one-shot grabs), then the
- * capture node is held open and streamed continuously.
+ * Pipeline model (mainline imx-media): both sensors feed one video-mux ->
+ * MIPI CSI-2 -> IPU CSI path to the 'ipu1_csi0 capture' video node. Camera
+ * selection is which mux sink link is enabled; sensor controls live on the
+ * sensor subdev; illumination is the per-camera LED driven via sysfs. Links
+ * and pad formats are configured with media-ctl / v4l2-ctl (the same
+ * sequences python3-gfhardware uses for one-shot grabs), then the capture
+ * node is held open and streamed continuously.
+ *
+ * Two sensors ship in the field - the 5 MP OV5648 and, in "HD" machines, the
+ * 8 MP OV8856 - and they differ in geometry, bit depth and control set, so
+ * everything downstream of the media graph is driven from the sensor profile
+ * that matches whichever driver bound (see sensor_profiles).
+ *
+ * PRIVACY GATE: neither camera captures unless the lid is closed. An open
+ * lid points the lid camera into the room, and in cloud mode the image
+ * request comes from a remote service, so the check lives here - at the one
+ * process that owns the capture path - rather than at each caller: the
+ * engine refuses to start, and a lid that opens mid-capture stops it. The
+ * check fails closed (see machine_lid_closed()).
  *
  * Threading: a control mutex serializes engine start/stop/switch; the
  * engine lock covers frame data and counters. The worker thread only ever
@@ -18,9 +30,11 @@
  */
 #define _GNU_SOURCE
 #include "cam.h"
+#include "camhealth.h"
 #include "debayer.h"
 #include "fflog.h"
 #include "settings.h"
+#include "status.h"
 #include "vpu_jpeg.h"
 
 #include <errno.h>
@@ -40,10 +54,6 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define CAM_W  2592
-#define CAM_H  1944
-#define HALF_W (CAM_W / 2)
-#define HALF_H (CAM_H / 2)
 #define HFLIP  1          /* factory image orientation (see debayer.h) */
 
 #define N_BUFS          4
@@ -57,21 +67,101 @@
 #define SWITCH_GRACE_S  3   /* wait this long for clients to drain on switch */
 
 #define CAPTURE_ENTITY "ipu1_csi0 capture"
-#define MBUS_FMT       "SBGGR8_1X8/2592x1944 field:none"
 
 struct camdef {
     const char *name;
     int         bus;       /* I2C bus: sensor entity resolved by <bus>-0036 */
     int         muxpad;    /* video-mux sink pad */
     const char *lamp;      /* sysfs illumination attribute */
-    int         exposure;  /* 1/16-line units, frame-length ceiling ~31600 */
-    int         gain;
 };
 
 static const struct camdef camdefs[2] = {
-    [CAM_LID]  = { "lid",  0, 0, "/sys/glowforge/pic/lid_led",    24000,  50 },
-    [CAM_HEAD] = { "head", 3, 1, "/sys/glowforge/head/white_led", 24000, 200 },
+    [CAM_LID]  = { "lid",  0, 0, "/sys/glowforge/pic/lid_led"    },
+    [CAM_HEAD] = { "head", 3, 1, "/sys/glowforge/head/white_led" },
 };
+
+/* ------------------------------------------------------ sensor profiles */
+
+/* Everything that differs between the sensors the machine ships with. The
+ * media entity name carries the driver that bound ("ov5648 0-0036" /
+ * "ov8856 0-0036"), so the profile follows the hardware without a build-time
+ * switch: one image covers both. */
+struct sensor_profile {
+    const char *driver;     /* media entity name prefix */
+    const char *model;      /* reported by /cam/status */
+    int         w, h;       /* raw frame the pipeline is configured for */
+    const char *mbus;       /* media-ctl pad format, geometry appended */
+    uint32_t    pixfmt;     /* V4L2 pixel format at the capture node */
+    int         bpp;        /* bytes per raw sample at the capture node */
+    int         shift;      /* right shift from sample to 8-bit value */
+    /* Manual exposure/gain/white balance on the sensor subdev. */
+    int       (*ctrls)(const char *subdev, cam_id_t cam);
+};
+
+static int ctrls_ov5648(const char *subdev, cam_id_t cam);
+static int ctrls_ov8856(const char *subdev, cam_id_t cam);
+
+static const struct sensor_profile sensor_profiles[] = {
+    {
+        /* 5 MP, 8-bit Bayer straight out of the CSI. */
+        .driver = "ov5648", .model = "OV5648",
+        .w = 2592, .h = 1944,
+        .mbus = "SBGGR8_1X8", .pixfmt = V4L2_PIX_FMT_SBGGR8,
+        .bpp = 1, .shift = 0, .ctrls = ctrls_ov5648,
+    },
+    {
+        /* 8 MP "HD" modules, full frame. The sensor's RAW10 full-resolution
+         * 2-lane mode asks for 1.44 Gbps/lane and the i.MX6 CSI-2 D-PHY
+         * stops at 1 Gbps, but its RAW8 one carries the same frame at half
+         * that - so the capture word, the Bayer order and the whole
+         * downstream path are the OV5648's, only larger.
+         * UNPROVEN: no 8 MP machine has been on the bench. */
+        .driver = "ov8856", .model = "OV8856",
+        .w = 3264, .h = 2448,
+        .mbus = "SBGGR8_1X8", .pixfmt = V4L2_PIX_FMT_SBGGR8,
+        .bpp = 1, .shift = 0, .ctrls = ctrls_ov8856,
+    },
+};
+
+#define N_PROFILES ((int)(sizeof(sensor_profiles) / sizeof(sensor_profiles[0])))
+
+/* Worst case over every profile, so the worker's scratch buffers are sized
+ * once and survive a snapshot borrow of a differently-modeled camera. */
+static size_t max_raw8_bytes(void)
+{
+    size_t m = 0;
+    for (int i = 0; i < N_PROFILES; i++) {
+        size_t n = (size_t)sensor_profiles[i].w * sensor_profiles[i].h;
+        if (n > m)
+            m = n;
+    }
+    return m;
+}
+
+static size_t max_half_rgb_bytes(void)
+{
+    size_t m = 0;
+    for (int i = 0; i < N_PROFILES; i++) {
+        size_t n = (size_t)(sensor_profiles[i].w / 2) *
+                   (sensor_profiles[i].h / 2) * 3;
+        if (n > m)
+            m = n;
+    }
+    return m;
+}
+
+/* "ov8856 3-0036" -> the OV8856 profile. NULL for a driver we have no
+ * profile for (the engine then refuses to start rather than guess). */
+static const struct sensor_profile *profile_for(const char *entity)
+{
+    for (int i = 0; i < N_PROFILES; i++) {
+        size_t n = strlen(sensor_profiles[i].driver);
+        if (!strncmp(entity, sensor_profiles[i].driver, n) &&
+            (entity[n] == ' ' || entity[n] == '\0'))
+            return &sensor_profiles[i];
+    }
+    return NULL;
+}
 
 struct buffer {
     void  *start;
@@ -95,6 +185,11 @@ static struct {
                                  * RIGHT NOW (a borrow flips it briefly) */
     cam_id_t        home_cam;   /* camera the engine serves for streaming -
                                  * what arbitration must compare against */
+    /* Sensor that bound on each camera's I2C bus, last time one was
+     * resolved; NULL until then. `prof` is the profile the pipeline is
+     * configured for RIGHT NOW (it follows eng.cam through a borrow). */
+    const struct sensor_profile *seen[2];
+    const struct sensor_profile *prof;
     int             clients;
     uint64_t        kick_gen;   /* bumped to preempt all current stream
                                  * clients (their streams end cleanly) */
@@ -124,9 +219,22 @@ static struct {
     struct buffer   bufs[N_BUFS];
     int             n_bufs;
     int             streaming;
+    int             lid_stopped;    /* the worker exited on an open lid;
+                                     * cleared when an engine start
+                                     * succeeds (which needs a closed lid) */
     int             lamp_prev;      /* -1 = unknown, restore to 0 */
     int             cached_bufs;    /* capture mmaps are CPU-cached
                                      * (non-coherent); no bounce copy */
+    /* Frame-health ladder (camhealth.h). Like the capture resources above
+     * it is written before the worker exists or by the worker itself. */
+    struct cam_health health;
+
+    /* Frame health totals, for /cam/status and the logs. Cumulative since
+     * the daemon started, so a machine with a marginal camera cable shows
+     * up as a nonzero corrupt count days later. */
+    uint64_t        frames;         /* dequeued */
+    uint64_t        corrupt;        /* of those, flagged errored */
+    unsigned        recoveries;     /* stream restarts */
 
     /* config */
     int             stream_quality;
@@ -317,10 +425,16 @@ static int sensor_entity(int bus, char *out, size_t outlen)
  * mux sink link may be enabled, so the other camera's link (if that sensor
  * exists) is disabled first. */
 static int configure_pipeline(cam_id_t cam, const char *sensor,
-                              const char *other_sensor)
+                              const char *other_sensor,
+                              const struct sensor_profile *p)
 {
     const struct camdef *c = &camdefs[cam];
     const struct camdef *o = &camdefs[cam == CAM_LID ? CAM_HEAD : CAM_LID];
+    char fmt[64];
+
+    /* 'field:none' is mandatory - without it link validation rejects
+     * STREAMON with -EPIPE. */
+    snprintf(fmt, sizeof(fmt), "%s/%dx%d field:none", p->mbus, p->w, p->h);
 
     if (other_sensor[0] &&
         run("media-ctl -l '\"%s\":0 -> \"video-mux\":%d [0]'",
@@ -335,15 +449,15 @@ static int configure_pipeline(cam_id_t cam, const char *sensor,
         run("media-ctl -l '\"ipu1_csi0\":2 -> \"" CAPTURE_ENTITY "\":0 [1]'"))
         return -1;
 
-    if (run("media-ctl -V '\"%s\":0 [fmt:" MBUS_FMT "]'", sensor) ||
-        run("media-ctl -V '\"video-mux\":%d [fmt:" MBUS_FMT "]'", c->muxpad) ||
-        run("media-ctl -V '\"video-mux\":2 [fmt:" MBUS_FMT "]'") ||
-        run("media-ctl -V '\"imx6-mipi-csi2\":0 [fmt:" MBUS_FMT "]'") ||
-        run("media-ctl -V '\"imx6-mipi-csi2\":1 [fmt:" MBUS_FMT "]'") ||
-        run("media-ctl -V '\"ipu1_csi0_mux\":0 [fmt:" MBUS_FMT "]'") ||
-        run("media-ctl -V '\"ipu1_csi0_mux\":5 [fmt:" MBUS_FMT "]'") ||
-        run("media-ctl -V '\"ipu1_csi0\":0 [fmt:" MBUS_FMT "]'") ||
-        run("media-ctl -V '\"ipu1_csi0\":2 [fmt:" MBUS_FMT "]'"))
+    if (run("media-ctl -V '\"%s\":0 [fmt:%s]'", sensor, fmt) ||
+        run("media-ctl -V '\"video-mux\":%d [fmt:%s]'", c->muxpad, fmt) ||
+        run("media-ctl -V '\"video-mux\":2 [fmt:%s]'", fmt) ||
+        run("media-ctl -V '\"imx6-mipi-csi2\":0 [fmt:%s]'", fmt) ||
+        run("media-ctl -V '\"imx6-mipi-csi2\":1 [fmt:%s]'", fmt) ||
+        run("media-ctl -V '\"ipu1_csi0_mux\":0 [fmt:%s]'", fmt) ||
+        run("media-ctl -V '\"ipu1_csi0_mux\":5 [fmt:%s]'", fmt) ||
+        run("media-ctl -V '\"ipu1_csi0\":0 [fmt:%s]'", fmt) ||
+        run("media-ctl -V '\"ipu1_csi0\":2 [fmt:%s]'", fmt))
         return -1;
     return 0;
 }
@@ -351,20 +465,61 @@ static int configure_pipeline(cam_id_t cam, const char *sensor,
 /* Manual exposure/gain/white-balance on the sensor subdev (factory values).
  * The auto-clusters must go manual before the manual values take effect.
  * The sensor flips stay off: HFLIP breaks imx-media CSI capture, so the
- * factory mirror is applied in software (debayer). */
-static int configure_sensor(const char *sensor, const struct camdef *c)
+ * factory mirror is applied in software (debayer).
+ *
+ * Exposure is in 1/16-line units and cannot exceed the frame length: the
+ * 2592x1944 mode is 1984 lines, so the usable ceiling is ~31600. Gain is in
+ * 1/16 steps (16 = 1x). */
+static int ctrls_ov5648(const char *subdev, cam_id_t cam)
 {
-    char subdev[64];
-    if (run_read(subdev, sizeof(subdev), "media-ctl -e '%s'", sensor))
-        return -1;
+    static const struct { int exposure, gain; } d[2] = {
+        [CAM_LID]  = { 24000,  50 },
+        [CAM_HEAD] = { 24000, 200 },
+    };
+
     if (run("v4l2-ctl -d %s -c auto_exposure=1 -c gain_automatic=0"
             " -c white_balance_automatic=0", subdev))
         return -1;
     if (run("v4l2-ctl -d %s -c exposure=%d -c gain=%d -c red_balance=1100"
             " -c blue_balance=1400 -c horizontal_flip=0 -c vertical_flip=0",
-            subdev, c->exposure, c->gain))
+            subdev, d[cam].exposure, d[cam].gain))
         return -1;
     return 0;
+}
+
+/* The OV8856 driver exposes a different set: exposure counts whole lines
+ * (it shifts into the 1/16-line register itself) and is capped by the frame
+ * length - 2482 lines in the 3264x2448 mode - analogue gain is 128 = 1x,
+ * and there are no auto-exposure, auto-gain or white-balance controls to
+ * switch off, so the sensor comes up manual. The flips are still forced off
+ * for the same reason as the OV5648.
+ *
+ * UNPROVEN: these are the OV5648 defaults translated into the OV8856's
+ * units - the same fraction of the frame (76%) and the same gain multiple
+ * (3.1x lid, 12.5x head). They are a starting point for commissioning on a
+ * real 8 MP machine, not measured values, and the driver publishes no
+ * red/blue balance controls at all, so white balance is uncorrected. */
+static int ctrls_ov8856(const char *subdev, cam_id_t cam)
+{
+    static const struct { int exposure, gain; } d[2] = {
+        [CAM_LID]  = { 1886,  400 },
+        [CAM_HEAD] = { 1886, 1600 },
+    };
+
+    if (run("v4l2-ctl -d %s -c exposure=%d -c analogue_gain=%d"
+            " -c digital_gain=1024 -c horizontal_flip=0 -c vertical_flip=0",
+            subdev, d[cam].exposure, d[cam].gain))
+        return -1;
+    return 0;
+}
+
+static int configure_sensor(const char *sensor, const struct sensor_profile *p,
+                            cam_id_t cam)
+{
+    char subdev[64];
+    if (run_read(subdev, sizeof(subdev), "media-ctl -e '%s'", sensor))
+        return -1;
+    return p->ctrls(subdev, cam);
 }
 
 /* ------------------------------------------------------- jpeg encoding */
@@ -428,6 +583,37 @@ static void release_capture(void)
     }
 }
 
+/* Stop and restart the capture queue on the open node, leaving the media
+ * graph, the sensor and the lamp alone. This is the recovery for a sensor
+ * that has lost CSI-2 sync: the frames it produces come back flagged
+ * errored until the receiver is re-synchronized, and cycling the queue is
+ * what re-synchronizes it. Worker thread only. */
+static int restream(void)
+{
+    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+    if (xioctl(eng.fd, VIDIOC_STREAMOFF, &type) < 0)
+        return -1;
+    eng.streaming = 0;
+    /* STREAMOFF returns every buffer to the dequeued state. */
+    for (int i = 0; i < eng.n_bufs; i++) {
+        struct v4l2_buffer buf = {0};
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+        buf.index = (unsigned)i;
+        if (xioctl(eng.fd, VIDIOC_QBUF, &buf) < 0)
+            return -1;
+    }
+    if (xioctl(eng.fd, VIDIOC_STREAMON, &type) < 0)
+        return -1;
+    eng.streaming = 1;
+    cam_health_restarted(&eng.health);
+    pthread_mutex_lock(&eng.lock);
+    eng.recoveries++;
+    pthread_mutex_unlock(&eng.lock);
+    return 0;
+}
+
 /* Configure the media graph and sensor, light the lamp, and bring up the
  * V4L2 capture node streaming. Called with ctl held, engine not running. */
 static int start_capture(cam_id_t cam, char *err, size_t errlen)
@@ -435,18 +621,30 @@ static int start_capture(cam_id_t cam, char *err, size_t errlen)
     const struct camdef *c = &camdefs[cam];
     char sensor[64], other[64] = "";
 
+    /* Privacy gate, checked before the media graph is touched and before
+     * the lamp is raised, so an open lid leaves no trace of an attempt. */
+    if (!machine_lid_closed()) {
+        snprintf(err, errlen, "%s", CAM_ERR_LID);
+        return -1;
+    }
+
     if (sensor_entity(c->bus, sensor, sizeof(sensor))) {
         snprintf(err, errlen, "no camera sensor on i2c-%d", c->bus);
+        return -1;
+    }
+    const struct sensor_profile *p = profile_for(sensor);
+    if (!p) {
+        snprintf(err, errlen, "unsupported camera sensor '%s'", sensor);
         return -1;
     }
     (void)sensor_entity(camdefs[cam == CAM_LID ? CAM_HEAD : CAM_LID].bus,
                         other, sizeof(other));
 
-    if (configure_pipeline(cam, sensor, other)) {
+    if (configure_pipeline(cam, sensor, other, p)) {
         snprintf(err, errlen, "media pipeline configuration failed");
         return -1;
     }
-    if (configure_sensor(sensor, c)) {
+    if (configure_sensor(sensor, p, cam)) {
         snprintf(err, errlen, "sensor configuration failed");
         return -1;
     }
@@ -459,6 +657,9 @@ static int start_capture(cam_id_t cam, char *err, size_t errlen)
 
     pthread_mutex_lock(&eng.lock);
     eng.cam = cam;
+    eng.prof = p;
+    eng.seen[cam] = p;
+    eng.lid_stopped = 0;    /* reaching here means the lid read closed */
     pthread_mutex_unlock(&eng.lock);
 
     /* Scene lighting for the duration; the previous level is restored at
@@ -479,12 +680,21 @@ static int start_capture(cam_id_t cam, char *err, size_t errlen)
 
     struct v4l2_format fmt = {0};
     fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    fmt.fmt.pix.width = CAM_W;
-    fmt.fmt.pix.height = CAM_H;
-    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_SBGGR8;
+    fmt.fmt.pix.width = (unsigned)p->w;
+    fmt.fmt.pix.height = (unsigned)p->h;
+    fmt.fmt.pix.pixelformat = p->pixfmt;
     fmt.fmt.pix.field = V4L2_FIELD_NONE;
     if (xioctl(eng.fd, VIDIOC_S_FMT, &fmt) < 0) {
         snprintf(err, errlen, "S_FMT: %s", strerror(errno));
+        release_capture();
+        return -1;
+    }
+    if ((int)fmt.fmt.pix.width != p->w || (int)fmt.fmt.pix.height != p->h ||
+        fmt.fmt.pix.pixelformat != p->pixfmt) {
+        snprintf(err, errlen, "capture node gave %ux%u fourcc %.4s, "
+                 "not %dx%d for %s", fmt.fmt.pix.width, fmt.fmt.pix.height,
+                 (const char *)&fmt.fmt.pix.pixelformat, p->w, p->h,
+                 p->model);
         release_capture();
         return -1;
     }
@@ -510,7 +720,8 @@ static int start_capture(cam_id_t cam, char *err, size_t errlen)
     pthread_mutex_lock(&eng.lock);
     eng.cached_bufs = cached;
     pthread_mutex_unlock(&eng.lock);
-    fflog(LOG_INFO, "cam: capture buffers %s",
+    fflog(LOG_INFO, "cam: %s on %s, %dx%d %s, capture buffers %s",
+          p->model, c->name, p->w, p->h, p->mbus,
           cached ? "cached (non-coherent)" : "uncached (bounce copy)");
 
     for (eng.n_bufs = 0; eng.n_bufs < (int)req.count; eng.n_bufs++) {
@@ -554,15 +765,17 @@ static int start_capture(cam_id_t cam, char *err, size_t errlen)
         return -1;
     }
     eng.streaming = 1;
+    cam_health_started(&eng.health);
     return 0;
 }
 
 /* ---------------------------------------------------------- worker loop */
 
 /* Encode the pending snapshot request from a raw frame and deliver the
- * result (success or failure) to the waiter. */
+ * result (success or failure) to the waiter. `raw` is 8-bit BGGR at the
+ * geometry of the profile the pipeline is running (eng.prof). */
 static void deliver_snap(const uint8_t *raw, uint8_t *rgb_half,
-                         uint8_t **prgb_full)
+                         uint8_t **prgb_full, size_t *prgb_full_cap)
 {
     uint8_t *jpg = NULL;
     size_t len = 0;
@@ -571,21 +784,26 @@ static void deliver_snap(const uint8_t *raw, uint8_t *rgb_half,
     pthread_mutex_lock(&eng.lock);
     int full = eng.snap_full;
     int q = eng.snap_quality;
+    const struct sensor_profile *p = eng.prof;
     pthread_mutex_unlock(&eng.lock);
 
+    const int w = p->w, h = p->h;
+
     if (full) {
-        if (!*prgb_full)
-            *prgb_full = malloc((size_t)CAM_W * CAM_H * 3);
+        size_t need = (size_t)w * h * 3;
+        if (*prgb_full_cap < need) {
+            free(*prgb_full);
+            *prgb_full = malloc(need);
+            *prgb_full_cap = *prgb_full ? need : 0;
+        }
         ok = *prgb_full != NULL;
         if (ok) {
-            debayer_bggr_bilinear(raw, *prgb_full, CAM_W, CAM_H, HFLIP);
-            ok = jpeg_encode_rgb(*prgb_full, CAM_W, CAM_H, q, 0,
-                                 &jpg, &len) == 0;
+            debayer_bggr_bilinear(raw, *prgb_full, w, h, HFLIP);
+            ok = jpeg_encode_rgb(*prgb_full, w, h, q, 0, &jpg, &len) == 0;
         }
     } else {
-        debayer_bggr_half(raw, rgb_half, CAM_W, CAM_H, HFLIP);
-        ok = jpeg_encode_rgb(rgb_half, HALF_W, HALF_H, q, 0,
-                             &jpg, &len) == 0;
+        debayer_bggr_half(raw, rgb_half, w, h, HFLIP);
+        ok = jpeg_encode_rgb(rgb_half, w / 2, h / 2, q, 0, &jpg, &len) == 0;
     }
 
     pthread_mutex_lock(&eng.lock);
@@ -609,14 +827,68 @@ static void fail_snap(void)
     pthread_mutex_unlock(&eng.lock);
 }
 
-/* Capture one frame from the currently-started pipeline and feed it to
- * deliver_snap. Used by the borrow path. The first `skip` dequeued
- * frames are requeued unused (frames already in flight predate a
- * just-changed lamp level). */
-static int grab_one_snap(uint8_t *raw_cached, uint8_t *rgb_half,
-                         uint8_t **prgb_full, int skip)
+/* Present a dequeued capture buffer as the 8-bit BGGR frame every demosaic
+ * takes. An 8-bit sensor on cached buffers needs nothing (the mapping is
+ * read directly); an 8-bit sensor on uncached buffers is bulk-copied,
+ * because byte reads from a coherent mapping each cost a bus transaction
+ * (demosaicing in place measures ~340 ms/frame); a 10-bit sensor is
+ * narrowed into `scratch`, which is also the copy. */
+static const uint8_t *prepare_raw8(const void *cap, uint8_t *scratch,
+                                   const struct sensor_profile *p)
 {
-    for (int tries = 0; tries < MAX_DQ_TIMEOUTS; tries++) {
+    size_t n = (size_t)p->w * p->h;
+
+    if (p->bpp == 1) {
+        if (eng.cached_bufs)
+            return (const uint8_t *)cap;
+        memcpy(scratch, cap, n);
+        return scratch;
+    }
+
+    uint16_t peak = debayer_narrow16(cap, scratch, n, p->shift);
+    /* One line per engine start: on a sensor whose sample alignment has
+     * not been measured, the peak says whether the shift is right (a lit
+     * 10-bit frame peaks near 1023, not near 65535 or near 255). */
+    static const struct sensor_profile *logged;
+    if (logged != p) {
+        logged = p;
+        fflog(LOG_DEBUG, "cam: %s raw peak sample %u (>>%d)",
+              p->model, peak, p->shift);
+    }
+    return scratch;
+}
+
+/* Count a dequeued frame and say what to do with it (camhealth.h). */
+static cam_frame_action_t classify(const struct v4l2_buffer *buf)
+{
+    int errored = (buf->flags & V4L2_BUF_FLAG_ERROR) != 0;
+
+    pthread_mutex_lock(&eng.lock);
+    eng.frames++;
+    if (errored)
+        eng.corrupt++;
+    pthread_mutex_unlock(&eng.lock);
+
+    return cam_health_frame(&eng.health, errored);
+}
+
+/* Capture one frame from the currently-started pipeline and feed it to
+ * deliver_snap. Used by the borrow path. The first `skip` dequeued frames
+ * are requeued unused (frames already in flight predate a just-changed lamp
+ * level), as are the stream's warm-up frames and any frame the queue flags
+ * errored. A borrow that cannot get a clean frame fails the snapshot rather
+ * than restarting anything: the caller tears the borrowed pipeline down
+ * either way. */
+static int grab_one_snap(uint8_t *raw_cached, uint8_t *rgb_half,
+                         uint8_t **prgb_full, size_t *prgb_full_cap,
+                         int skip)
+{
+    /* Enough iterations for the lamp drain, the warm-up drain and the bad
+     * frames the ladder tolerates, plus MAX_DQ_TIMEOUTS empty waits. */
+    int budget = skip + CAM_WARMUP_FRAMES + CAM_MAX_BAD_FRAMES +
+                 MAX_DQ_TIMEOUTS;
+
+    for (int tries = 0; tries < MAX_DQ_TIMEOUTS && budget-- > 0; tries++) {
         fd_set fds;
         FD_ZERO(&fds);
         FD_SET(eng.fd, &fds);
@@ -636,19 +908,25 @@ static int grab_one_snap(uint8_t *raw_cached, uint8_t *rgb_half,
                 continue;
             return -1;
         }
+        cam_frame_action_t act = classify(&buf);
+        if (act == CAM_FRAME_RESTART || act == CAM_FRAME_ABORT) {
+            xioctl(eng.fd, VIDIOC_QBUF, &buf);
+            return -1;
+        }
+        if (act != CAM_FRAME_USE) {     /* WARMUP or DROP */
+            tries--;
+            xioctl(eng.fd, VIDIOC_QBUF, &buf);
+            continue;
+        }
         if (skip > 0) {
             skip--;
             tries--;
             xioctl(eng.fd, VIDIOC_QBUF, &buf);
             continue;
         }
-        if (eng.cached_bufs) {
-            deliver_snap(eng.bufs[buf.index].start, rgb_half, prgb_full);
-        } else {
-            memcpy(raw_cached, eng.bufs[buf.index].start,
-                   (size_t)CAM_W * CAM_H);
-            deliver_snap(raw_cached, rgb_half, prgb_full);
-        }
+        deliver_snap(prepare_raw8(eng.bufs[buf.index].start, raw_cached,
+                                  eng.prof),
+                     rgb_half, prgb_full, prgb_full_cap);
         xioctl(eng.fd, VIDIOC_QBUF, &buf);
         return 0;
     }
@@ -658,15 +936,15 @@ static int grab_one_snap(uint8_t *raw_cached, uint8_t *rgb_half,
 static void *worker(void *arg)
 {
     (void)arg;
-    uint8_t *rgb_half = malloc((size_t)HALF_W * HALF_H * 3);
-    uint8_t *rgb_full = NULL;   /* allocated on first full-res snapshot */
-    /* Bounce buffer for the uncached-capture fallback: coherent V4L2 MMAP
-     * buffers are uncached, and byte reads from one cost a bus transaction
-     * each (demosaicing in place measures ~340 ms/frame), so the frame is
-     * bulk-copied here first to be read at cached speed. With non-coherent
-     * (cached) capture buffers the demosaic reads the capture buffer
-     * directly and this buffer sits idle. */
-    uint8_t *raw_cached = malloc((size_t)CAM_W * CAM_H);
+    /* Sized for the largest profile so a snapshot borrow of a
+     * differently-modeled camera reuses them. */
+    uint8_t *rgb_half = malloc(max_half_rgb_bytes());
+    uint8_t *rgb_full = NULL;   /* grown on first full-res snapshot */
+    size_t rgb_full_cap = 0;
+    /* The 8-bit BGGR frame the demosaic paths read - the narrowing target
+     * for a 10-bit sensor and the bounce buffer for an 8-bit one on
+     * uncached capture buffers (see prepare_raw8). */
+    uint8_t *raw_cached = malloc(max_raw8_bytes());
     double stat_dq_ms = 0, stat_copy_ms = 0, stat_conv_ms = 0,
            stat_enc_ms = 0;
     unsigned stat_n = 0;
@@ -703,6 +981,18 @@ static void *worker(void *arg)
         if (stop || idle)
             break;
 
+        /* Privacy gate, re-checked every frame: a lid opened mid-capture
+         * tears the pipeline down within one frame time, so streams end
+         * and the sensors stop rather than filming the room. A pending
+         * snapshot fails with the same refusal (see the exit path). */
+        if (!machine_lid_closed()) {
+            fflog(LOG_INFO, "cam: lid opened, stopping capture");
+            pthread_mutex_lock(&eng.lock);
+            eng.lid_stopped = 1;
+            pthread_mutex_unlock(&eng.lock);
+            break;
+        }
+
         /* Same-camera snapshot with a lamp override: relight, then let
          * the in-flight frames drain before delivering; the engine level
          * is restored after delivery (or if the requester gives up). */
@@ -727,7 +1017,8 @@ static void *worker(void *arg)
                     sysfs_write_int(camdefs[borrow_cam].lamp, snap_lamp);
                     skip = LAMP_SKIP_FRAMES;
                 }
-                if (grab_one_snap(raw_cached, rgb_half, &rgb_full, skip))
+                if (grab_one_snap(raw_cached, rgb_half, &rgb_full,
+                                  &rgb_full_cap, skip))
                     fail_snap();
                 release_capture();
             } else {
@@ -778,6 +1069,34 @@ static void *worker(void *arg)
         now_ts(&c1);
         dq_timeouts = 0;
 
+        /* An errored frame is short, torn or off-sync; demosaicing it would
+         * publish a corrupt image. The ladder drops it, cycles the queue if
+         * they keep coming, and gives up if cycling stops helping. */
+        cam_frame_action_t act = classify(&buf);
+        if (act != CAM_FRAME_USE) {
+            xioctl(eng.fd, VIDIOC_QBUF, &buf);
+            if (act == CAM_FRAME_WARMUP || act == CAM_FRAME_DROP)
+                continue;
+            if (act == CAM_FRAME_ABORT) {
+                fflog(LOG_ERR, "cam: corrupt frames persist after %d stream "
+                      "restarts, stopping engine", CAM_MAX_RECOVERIES);
+                break;
+            }
+            if (restream()) {
+                fflog(LOG_ERR, "cam: stream restart failed: %s",
+                      strerror(errno));
+                break;
+            }
+            pthread_mutex_lock(&eng.lock);
+            unsigned n = eng.recoveries;
+            uint64_t nbad = eng.corrupt, nall = eng.frames;
+            pthread_mutex_unlock(&eng.lock);
+            fflog(LOG_WARNING, "cam: corrupt frames, restarted the stream "
+                  "(%u restarts, %llu of %llu frames bad)", n,
+                  (unsigned long long)nbad, (unsigned long long)nall);
+            continue;
+        }
+
         /* FPS cap: a frame arriving before the next due time is requeued
          * without demosaic/encode (a pending snapshot still rides on it;
          * the sensor keeps its own pace). */
@@ -793,13 +1112,12 @@ static void *worker(void *arg)
             }
         }
 
+        const struct sensor_profile *p = eng.prof;
+        const int raw_w = p->w, raw_h = p->h;
+        const int half_w = raw_w / 2, half_h = raw_h / 2;
         const uint8_t *raw = NULL;
         if (snap || encode)
-            raw = eng.cached_bufs ? (const uint8_t *)eng.bufs[buf.index].start
-                                  : raw_cached;
-        if (raw == raw_cached)
-            memcpy(raw_cached, eng.bufs[buf.index].start,
-                   (size_t)CAM_W * CAM_H);
+            raw = prepare_raw8(eng.bufs[buf.index].start, raw_cached, p);
         now_ts(&c2);
 
         /* Snapshot request rides on the same raw frame (after any
@@ -808,7 +1126,7 @@ static void *worker(void *arg)
             if (lamp_skip > 0) {
                 lamp_skip--;
             } else {
-                deliver_snap(raw, rgb_half, &rgb_full);
+                deliver_snap(raw, rgb_half, &rgb_full, &rgb_full_cap);
                 if (lamp_restore >= 0) {
                     sysfs_write_int(camdefs[orig_cam].lamp, lamp_restore);
                     lamp_restore = -1;
@@ -824,12 +1142,22 @@ static void *worker(void *arg)
             struct timespec e0, e1, e2;
             now_ts(&e0);
 
+            /* The encoder is opened for a fixed geometry, so a switch to a
+             * differently-modeled sensor reopens it. */
+            static int vpu_w, vpu_h;
+            if (vpu && (vpu_w != half_w || vpu_h != half_h)) {
+                vpu_jpeg_close(vpu);
+                vpu = NULL;
+            }
             if (!vpu_disabled && !vpu) {
-                vpu = vpu_jpeg_open(HALF_W, HALF_H, eng.stream_quality);
+                vpu = vpu_jpeg_open(half_w, half_h, eng.stream_quality);
                 if (!vpu) {
                     vpu_disabled = 1;
                     fflog(LOG_WARNING, "cam: no VPU JPEG encoder, "
                           "using software encode");
+                } else {
+                    vpu_w = half_w;
+                    vpu_h = half_h;
                 }
             }
             static int vpu_hard_fails;
@@ -838,7 +1166,7 @@ static void *worker(void *arg)
                 uint8_t *yp, *up, *vp;
                 int ys, uvs;
                 vpu_jpeg_planes(vpu, &yp, &up, &vp, &ys, &uvs);
-                debayer_bggr_half_yuv420(raw, CAM_W, CAM_H, HFLIP,
+                debayer_bggr_half_yuv420(raw, raw_w, raw_h, HFLIP,
                                          yp, ys, up, vp, uvs);
 #ifdef __ARM_NEON
                 /* One-shot NEON-vs-scalar equivalence check on a live
@@ -847,13 +1175,13 @@ static void *worker(void *arg)
                 static int neon_checked;
                 if (!neon_checked && getenv("FORGECTRL_NEON_CHECK")) {
                     neon_checked = 1;
-                    size_t ysz = (size_t)ys * HALF_H;
-                    size_t usz = (size_t)uvs * (HALF_H / 2);
+                    size_t ysz = (size_t)ys * half_h;
+                    size_t usz = (size_t)uvs * (half_h / 2);
                     uint8_t *ry = malloc(ysz);
                     uint8_t *ru = malloc(usz);
                     uint8_t *rv = malloc(usz);
                     if (ry && ru && rv) {
-                        debayer_bggr_half_yuv420_scalar(raw, CAM_W, CAM_H,
+                        debayer_bggr_half_yuv420_scalar(raw, raw_w, raw_h,
                                                         HFLIP, ry, ys,
                                                         ru, rv, uvs);
                         fflog(LOG_DEBUG, "cam: NEON/scalar compare: %s",
@@ -885,9 +1213,9 @@ static void *worker(void *arg)
                 }
             }
             if (!via_vpu && vpu_rc < 0) {
-                debayer_bggr_half(raw, rgb_half, CAM_W, CAM_H, HFLIP);
+                debayer_bggr_half(raw, rgb_half, raw_w, raw_h, HFLIP);
                 now_ts(&e1);
-                if (jpeg_encode_rgb(rgb_half, HALF_W, HALF_H,
+                if (jpeg_encode_rgb(rgb_half, half_w, half_h,
                                     eng.stream_quality, 1, &jpg, &len))
                     jpg = NULL;
             }
@@ -1065,6 +1393,19 @@ void cam_engine_init(void)
         vpu_disabled = 1;
     if (getenv("FORGECTRL_NO_CACHED_BUFS"))
         cached_disabled = 1;
+
+    /* Resolve which sensor bound on each bus now, so /cam/status can name
+     * the model and its geometry before the engine has ever run. Absent or
+     * unrecognized is not an error here - start_capture is where that
+     * matters. Refreshed on every engine start. */
+    for (int i = 0; i < 2; i++) {
+        char entity[64];
+        if (sensor_entity(camdefs[i].bus, entity, sizeof(entity)))
+            continue;
+        eng.seen[i] = profile_for(entity);
+        fflog(LOG_INFO, "cam: %s camera is %s", camdefs[i].name,
+              eng.seen[i] ? eng.seen[i]->model : entity);
+    }
 }
 
 void cam_engine_shutdown(void)
@@ -1092,6 +1433,15 @@ void cam_engine_shutdown(void)
 int cam_snapshot(cam_id_t cam, int full, int quality, int lamp,
                  uint8_t **jpeg, size_t *len, char *err, size_t errlen)
 {
+    /* Refuse before taking the control mutex: an open lid is answered
+     * immediately, not after the snapshot timeout. start_capture() and
+     * the worker enforce the same rule, so a lid that opens during the
+     * wait still ends the request. */
+    if (!machine_lid_closed()) {
+        snprintf(err, errlen, "%s", CAM_ERR_LID);
+        return -1;
+    }
+
     pthread_mutex_lock(&eng.ctl);
 
     /* If the engine is streaming the OTHER camera for active clients,
@@ -1132,6 +1482,13 @@ int cam_snapshot(cam_id_t cam, int full, int quality, int lamp,
         eng.snap_jpg = NULL;
         eng.snap_len = 0;
         eng.snap_pending = 0;
+    } else if (eng.lid_stopped) {
+        /* The lid opened while this snapshot was in flight: report the
+         * refusal rather than a generic failure, so the caller sees the
+         * same answer it would have got a moment earlier. */
+        snprintf(err, errlen, "%s", CAM_ERR_LID);
+        eng.snap_pending = 0;
+        rc = -1;
     } else {
         if (eng.snap_pending == 1 || eng.snap_pending == 3)
             snprintf(err, errlen, rc == ETIMEDOUT ?
@@ -1156,6 +1513,10 @@ struct cam_client {
 
 cam_client_t *cam_client_open(cam_id_t cam, char *err, size_t errlen)
 {
+    if (!machine_lid_closed()) {
+        snprintf(err, errlen, "%s", CAM_ERR_LID);
+        return NULL;
+    }
     pthread_mutex_lock(&eng.ctl);
     if (ensure_engine(cam, err, errlen)) {
         pthread_mutex_unlock(&eng.ctl);
@@ -1236,5 +1597,19 @@ void cam_get_status(struct cam_status *st)
     st->fps_cap = eng.fps_cap;
     st->vpu = eng.vpu_active;
     st->cached = eng.cached_bufs;
+    /* Geometry follows the sensor the served camera actually carries. */
+    const struct sensor_profile *p = eng.seen[eng.home_cam];
+    st->sensor = p ? p->model : "unknown";
+    st->snap_w = p ? p->w : 0;
+    st->snap_h = p ? p->h : 0;
+    st->stream_w = p ? p->w / 2 : 0;
+    st->stream_h = p ? p->h / 2 : 0;
+    st->lid_stopped = eng.lid_stopped;
+    st->frames = eng.frames;
+    st->corrupt = eng.corrupt;
+    st->recoveries = eng.recoveries;
     pthread_mutex_unlock(&eng.lock);
+    /* Read outside the lock: it opens a device, and nothing else here
+     * depends on it being sampled at the same instant as the counters. */
+    st->lid_closed = machine_lid_closed();
 }
