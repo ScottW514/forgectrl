@@ -414,6 +414,14 @@ static int valid_lamp(const char *v)       { return valid_range(v, 0, 255); }
  * ring for the backtrack; both stay well inside it. */
 static int valid_ticks(const char *v)      { return valid_range(v, 0, 30000); }
 
+/* Cloud-mode download guards: bytes of pulse body the client will hold in
+ * memory (unset = 32 MiB warn, 128 MiB refuse; 0 lifts either). The body is
+ * the job as the service compressed it, tens to one, so these bound this
+ * machine's memory and not the length of a job: a job longer than the ring
+ * is fed as it plays. A gigabyte is well past any real ceiling and is here
+ * so a typo cannot ask for one. */
+static int valid_pulse_bytes(const char *v) { return valid_range(v, 0, 1073741824); }
+
 /* GRBL mode: what a lid or interlock open does to a running job -
  * "cancel" (the factory's abort + return to the job start; unset = this)
  * or "hold" (stock grblHAL door hold, cycle start resumes). */
@@ -454,6 +462,8 @@ static const struct {
     { "lid_lamp_idle",          valid_lamp,        0 },
     { "cloud_pause_backtrack_ticks", valid_ticks,  0 },
     { "cloud_resume_lead_ticks",     valid_ticks,  0 },
+    { "pulse_warn_threshold_bytes",   valid_pulse_bytes, 0 },
+    { "pulse_reject_threshold_bytes", valid_pulse_bytes, 0 },
     { "lid_policy",             valid_lid_policy,  0 },
     { "log_forgectrl_disk",     logs_valid_level,  0 },
     { "log_forgectrl_remote",   logs_valid_level,  0 },

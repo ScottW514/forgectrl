@@ -270,6 +270,29 @@
             ><span class="msg" id="msg-p"></span>
           </div>
         </div>
+        <div class="card">
+          <h2>Job size</h2>
+          <div class="grid2">
+            <div class="row">
+              <label for="pulse_warn_threshold_bytes">Warn at<span class="u">bytes</span></label
+              ><input id="pulse_warn_threshold_bytes" inputmode="numeric" placeholder="33554432" />
+            </div>
+            <div class="row">
+              <label for="pulse_reject_threshold_bytes">Refuse past<span class="u">bytes</span></label
+              ><input id="pulse_reject_threshold_bytes" inputmode="numeric" placeholder="134217728" />
+            </div>
+          </div>
+          <p class="hint">
+            A cloud print arrives as one compressed file, held in memory and fed to the machine as
+            it plays, so these bound memory rather than how long a job may be. The service
+            compresses tens to one, which puts an hours-long print at a few megabytes: the defaults
+            warn at 32 MiB and refuse past 128 MiB. 0 lifts either; 0&ndash;1073741824.
+          </p>
+          <div class="btns">
+            <button class="pri" onclick="saveJobSize()">Save</button
+            ><span class="msg" id="msg-js"></span>
+          </div>
+        </div>
       </section>
       <section id="s-grbl">
         <div class="card">
