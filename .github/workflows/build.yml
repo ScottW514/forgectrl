@@ -28,3 +28,5 @@ jobs:
         run: ./build/lid_gate_test
       - name: Capture frame-health ladder
         run: ./build/camhealth_test
+      - name: Gate settings table
+        run: ./build/cool_gate_test

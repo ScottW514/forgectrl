@@ -332,7 +332,6 @@ class Mock:
             'laser_disarm_s': '', 'rail_settle_s': '', 'lid_lamp_idle': '',
             'cloud_pause_backtrack_ticks': '', 'cloud_resume_lead_ticks': '', 'lid_policy': '',
             'syslog_server': '', 'syslog_port': '', 'syslog_proto': '',
-            'flow_checks_disabled': False,
             'version': '20260101000000 (mock)', 'machine_id': 'ABC-123',
         }
         for lg in ('forgectrl', 'grblhal', 'gfcloud', 'gfhome', 'kernel',
@@ -351,6 +350,7 @@ class Mock:
             'coolant': {'down_c': 22.4, 'up_c': 22.3, 'pump': True,
                         'tec': False},
             'gfsvc': {'latest': '2.6.0', 'tested': '2.6.0'},
+            'gates_off': [],
             'switches': {'lid': True, 'button': False, 'interlock_ok': True,
                          'head': False, 'hv_enable': False},
         }
@@ -460,6 +460,38 @@ class Mock:
         self.logtext['forgectrl'] += 'Jan  1 %s forgectrl: %s\n' % (
             time.strftime('%H:%M:%S'), line)
 
+    # The gate settings as forgectrl's gates.c publishes them (a mirror of
+    # its table): legal range, recommended band, off end, and the state of
+    # the stored value. The panel renders its warnings from this.
+    GATES = (
+        ('cool_temp_max', 'coolant_max', 33.0, 5.0, 60.0, 25.0, 38.0, 'high'),
+        ('cool_temp_resume', None, 31.0, 5.0, 59.0, 20.0, 36.0, 'none'),
+        ('cool_flow_check_s', 'flow', 50.0, 0.0, 300.0, 30.0, 120.0, 'low'),
+        ('cool_flow_rise', None, 14.4, 1.0, 40.0, 8.0, 16.0, 'none'),
+    )
+
+    def settings_reply(self):
+        out = dict(self.settings)
+        gates = {}
+        for key, gate, default, lo, hi, blo, bhi, off in self.GATES:
+            try:
+                v = float(self.settings.get(key) or default)
+            except ValueError:
+                v = default
+            if (off == 'low' and v <= lo) or (off == 'high' and v >= hi):
+                state = 'off'
+            elif v < blo or v > bhi:
+                state = 'warn'
+            else:
+                state = 'ok'
+            gates[key] = {'gate': gate, 'def': default, 'lo': lo, 'hi': hi,
+                          'band': [blo, bhi], 'off': off, 'value': v,
+                          'state': state}
+        out['gates'] = gates
+        self.status['gates_off'] = [g['gate'] for g in gates.values()
+                                    if g['gate'] and g['state'] == 'off']
+        return out
+
     # -- dispatch: returns (status, headers dict, body bytes)
     def handle(self, method, path, q, headers, body):
         with self.lock:
@@ -470,7 +502,7 @@ class Mock:
                                json.dumps(obj).encode())
         if method == 'GET':
             if path == '/settings':
-                return J(200, self.settings)
+                return J(200, self.settings_reply())
             if path == '/status':
                 s = dict(self.status)
                 s['diag'] = self.diag['running']
@@ -531,9 +563,7 @@ class Mock:
                     self.settings[k] = v
                 elif k == 'gf_password':
                     self.settings['gf_password_set'] = bool(v)
-            self.settings['flow_checks_disabled'] = \
-                self.settings['cool_flow_check_s'] == '0'
-            return J(200, self.settings)
+            return J(200, self.settings_reply())
         if path == '/mode':
             m = form.get('controller', '')
             if m not in ('grbl', 'gfcloud', 'none'):

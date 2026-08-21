@@ -52,6 +52,12 @@
  *   it recovers (resume_ok) once the temp is back under the resume
  *   gate. The upstream sensor gates because it reads the coolant
  *   entering the tube.
+ * - GATE SETTINGS (gates.c): the ceiling, its resume gate, the flow
+ *   window and the flow rise are plain settings with a wide legal
+ *   range, a recommended band and an off end; a ceiling at its top or
+ *   a flow window of zero turns that gate off by value. An off gate is
+ *   skipped, still measured, logged at every run start, and published
+ *   as gates_off.
  * - Physical-evidence witnesses (1 Hz, alongside the loop): the
  *   kernel's sampled LASER_ON count is the ground truth of emission
  *   (the gated output of the hardware AND-gate, not a commanded
@@ -81,6 +87,7 @@
 #include "cool.h"
 #include "diag.h"
 #include "fflog.h"
+#include "gates.h"
 #include "settings.h"
 #include "status.h"
 
@@ -300,6 +307,15 @@ static int diag_had = 0;            /* diagnostics held the hardware */
 static long run_duty[3] = {-1, -1, -1};
 static unsigned long verdict_seq = 0;
 
+/* Gate settings at their off end (gates.c): the coolant ceiling at its
+ * top and the flow window at zero. An off gate is skipped, not
+ * evaluated, and still measured: the first reading in a run session
+ * that would have tripped the shipped default is logged once. */
+static int gate_coolant_off = 0;
+static int gate_flow_off = 0;
+static int off_would_warned = 0;
+static char pub_gates_off[128] = "[]";
+
 static double wall_s(void)
 {
     struct timespec ts;
@@ -471,6 +487,58 @@ static struct {
       FIRE_IR_DELTA,          NULL,             &fire_ir_delta, 0 },
 };
 
+/* The engine's resolved value for a gate setting (env > settings >
+ * default), for the gates table. */
+static double engine_gate_value(const gate_setting_t *g, void *ctx)
+{
+    (void)ctx;
+    if (!strcmp(g->key, "cool_temp_max"))
+        return temp_max_c;
+    if (!strcmp(g->key, "cool_temp_resume"))
+        return temp_resume_c;
+    if (!strcmp(g->key, "cool_flow_check_s"))
+        return flow_check_s;
+    if (!strcmp(g->key, "cool_flow_rise"))
+        return flow_fault_rise;
+    return g->def;
+}
+
+/* Classify every gate setting from the resolved tunables, publish the
+ * gates that are off, and say so in the log: one line per setting,
+ * at warning level when it is off or outside its band, so a machine
+ * running without a gate says so at every run start. */
+static void gates_apply(void)
+{
+    size_t n;
+    const gate_setting_t *t = gate_settings(&n);
+    for (size_t i = 0; i < n; i++) {
+        double v = engine_gate_value(&t[i], NULL);
+        gate_state_t st = gate_state(&t[i], v);
+        if (t[i].gate && !strcmp(t[i].gate, "coolant_max"))
+            gate_coolant_off = st == Gate_Off;
+        if (t[i].gate && !strcmp(t[i].gate, "flow"))
+            gate_flow_off = st == Gate_Off;
+        if (st == Gate_Off)
+            fflog(LOG_WARNING, "cool: gate %s OFF: %s = %g (the %s end of "
+                  "%g to %g; recommended %g to %g, default %g)",
+                  t[i].gate, t[i].key, v,
+                  t[i].off_end < 0 ? "low" : "high", t[i].lo, t[i].hi,
+                  t[i].band_lo, t[i].band_hi, t[i].def);
+        else if (st == Gate_Warn)
+            fflog(LOG_WARNING, "cool: %s = %g is outside the recommended "
+                  "%g to %g (default %g)", t[i].key, v,
+                  t[i].band_lo, t[i].band_hi, t[i].def);
+        else
+            fflog(LOG_INFO, "cool: %s = %g", t[i].key, v);
+    }
+    char off[sizeof(pub_gates_off)];
+    if (gates_off_json(off, sizeof(off), engine_gate_value, NULL) < 0)
+        snprintf(off, sizeof(off), "[]");
+    pthread_mutex_lock(&mu);
+    snprintf(pub_gates_off, sizeof(pub_gates_off), "%s", off);
+    pthread_mutex_unlock(&mu);
+}
+
 static void conf_reload(void)
 {
     for (size_t i = 0; i < sizeof(tunables) / sizeof(tunables[0]); i++) {
@@ -489,6 +557,7 @@ static void conf_reload(void)
         else
             *tunables[i].u = f < 0.0f ? 0 : (uint32_t)f;
     }
+    gates_apply();
 }
 
 /* ------------------------------------------------------ verdict file */
@@ -557,6 +626,10 @@ static void flood_apply(int on, double now)
 {
     if (on) {
         conf_reload();              /* GUI changes apply per job */
+        off_would_warned = 0;
+        if (gate_flow_off)
+            fflog(LOG_WARNING, "cool: coolant flow is not verified this "
+                  "job (cool_flow_check_s = 0)");
         cool_state = Cool_Run;
         fans_run();
         if (flow_verdict == Flow_Suspect)
@@ -784,7 +857,28 @@ static void engine_tick(void)
     int have_down = read_temp("pic/water_temp_1", &down);
     int have_up = read_temp("pic/water_temp_2", &up);
 
-    if (have_up) {
+    if (have_up && gate_coolant_off) {
+        /* The ceiling is at its off end: no gate, and no hold from it.
+         * The reading is still watched against the shipped default so
+         * a machine running without the gate leaves a record of what
+         * it would have done. */
+        if (over_temp_gate) {
+            over_temp_gate = 0;
+            pthread_mutex_lock(&mu);
+            pub_reason[0] = '\0';
+            pthread_mutex_unlock(&mu);
+            if (forced_cool) {
+                forced_cool = 0;
+                fans_apply_phase();
+            }
+        }
+        if (up > TEMP_MAX_C_DEFAULT && !off_would_warned) {
+            off_would_warned = 1;
+            fflog(LOG_WARNING, "cool: gate coolant_max is OFF and would "
+                  "have tripped at the default %.0f C (coolant %.1f C)",
+                  TEMP_MAX_C_DEFAULT, up);
+        }
+    } else if (have_up) {
         /* Fire gate with hysteresis: gated over the run ceiling, back
          * in service under the resume gate. The hold request rides the
          * same gate: the controller holds while it stands, resumes
@@ -1105,10 +1199,19 @@ int cool_status_json(char *buf, size_t len)
     snprintf(buf, len,
         "{\"phase\":\"%s\",\"verdict\":\"%s\",\"fire_ok\":%s,"
         "\"hold\":%s,\"reason\":\"%s\",\"down_c\":%.2f,\"up_c\":%.2f,"
-        "\"report_age_s\":%.1f,\"armed\":%s,\"fire_watch\":\"%s\"}",
+        "\"report_age_s\":%.1f,\"armed\":%s,\"fire_watch\":\"%s\","
+        "\"gates_off\":%s}",
         pub_phase, pub_verdict, pub_fire_ok ? "true" : "false",
         pub_hold ? "true" : "false", pub_reason, pub_down, pub_up,
-        age, rep_armed ? "true" : "false", pub_fire_watch);
+        age, rep_armed ? "true" : "false", pub_fire_watch, pub_gates_off);
+    pthread_mutex_unlock(&mu);
+    return 0;
+}
+
+int cool_gates_off_json(char *buf, size_t len)
+{
+    pthread_mutex_lock(&mu);
+    snprintf(buf, len, "%s", pub_gates_off);
     pthread_mutex_unlock(&mu);
     return 0;
 }

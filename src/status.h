@@ -10,8 +10,11 @@
 
 /* Build the /status JSON (motion state, position when homed, fans,
  * coolant, switches) into buf. Always succeeds; unreadable sources are
- * omitted or defaulted. Needs ~512 bytes. */
-int machine_status_json(char *buf, size_t len);
+ * omitted or defaulted. Needs ~512 bytes. extra, when not NULL, is
+ * one or more ready-made `"key":value` members (comma-separated, no
+ * trailing comma) spliced in by the caller that owns them: this file
+ * reads sysfs only, so engine state arrives this way. */
+int machine_status_json(char *buf, size_t len, const char *extra);
 
 /* True only when the motion driver reports the idle state. Fails closed:
  * any read failure - including fd exhaustion under a connection flood

@@ -54,6 +54,7 @@
       <div id="locknote"></div>
       <section id="s-status">
         <div id="gfsvc-banner" class="banner" style="display: none"></div>
+        <div id="gates-banner" class="banner banner-bad" style="display: none"></div>
         <div class="card">
           <h2>Controller mode</h2>
           <div class="seg">
@@ -192,13 +193,19 @@
               ><input id="cool_cooldown_max_s" inputmode="numeric" placeholder="300" />
             </div>
           </div>
+          <div id="gnotes" class="gnotes"></div>
           <p class="hint">
             Coolant-loop protection: each running job periodically verifies flow by running the
-            loop heater and reading how far the downstream sensor climbs &mdash; past the fault
-            rise means stagnant coolant. Blank fields use the built-in values (placeholders),
+            loop heater and reading how far the downstream sensor climbs; past the fault rise
+            means stagnant coolant. Blank fields use the built-in values (placeholders),
             measured on this machine's factory coolant; changes apply from the next job. These
             bands are per-machine: after a pump or coolant change, run
             <a href="#diag">Diagnostics &rarr; Cooling system</a> to verify or re-measure them.
+            The ceiling, the resume gate, the check window and the fault rise accept a wide
+            range on purpose: each has a recommended band, a value outside it is flagged above,
+            and the far end of the range (a ceiling at its maximum, a check window of 0) turns
+            that gate off. A machine with a gate off says so on the Status tab and in its log
+            at every job start.
           </p>
           <div class="btns">
             <button class="pri" onclick="saveCooling()">Save</button

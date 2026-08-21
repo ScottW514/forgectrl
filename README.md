@@ -28,7 +28,9 @@ forgectrl owns everything around them:
   flow-check heater for both modes: coolant-flow verification, over-temp
   hold/resume policy, and per-job fan profiles, fed by controller
   job-state reports (`POST /cool/state`) and publishing a verdict file
-  the controllers enforce in-process.
+  the controllers enforce in-process. Every gate is a plain setting
+  with a wide range whose far end turns it off by value; the panel
+  warns outside the recommended band and while any gate is off.
 - The **web control panel**, **camera service**, **telemetry**,
   **diagnostics**, persisted **machine settings**, the **logging**
   tree (levels, viewer, sanitized export), and the A/B **update
@@ -78,13 +80,13 @@ restarts.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /status` | Machine operational status as JSON (state, position when homed, fans, coolant, switches) |
-| `GET /settings` | Current settings as JSON (plus the system hostname and firmware version) |
+| `GET /status` | Machine operational status as JSON (state, position when homed, fans, coolant, switches, `gates_off`) |
+| `GET /settings` | Current settings as JSON (plus the system hostname, firmware version, and the `gates` table: range, recommended band, off end and state per gate setting) |
 | `POST /settings?key=value&...` | Set any subset of known keys |
 | `GET /mode` | Supervisor state: mode, controller (`running`/`stopped`/`standby`/`motion-fault`), pid, motion verdict |
 | `POST /mode?controller=grbl\|cloud` | Live idle-gated mode switch; also the retry lever after a motion fault |
 | `POST /cool/state` | Controller job-state report (mode, armed, per-job run fan duties), level-triggered ~1 Hz |
-| `GET /cool/status` | Cooling-engine state: phase, verdict, temps, report age |
+| `GET /cool/status` | Cooling-engine state: phase, verdict, temps, report age, `gates_off` |
 
 Position comes from the kernel step counters anchored at the last
 completed homing (`/run/grblhal.homed`, written by the controller) —

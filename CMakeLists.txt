@@ -28,6 +28,7 @@ add_executable(forgectrl
   src/debayer.c
   src/diag.c
   src/fflog.c
+  src/gates.c
   src/liveness.c
   src/logs.c
   src/sanitize.c
@@ -77,6 +78,14 @@ target_compile_options(debayer_test PRIVATE -Wall -Wextra)
 # put the ladder back at the bottom. CI runs it after the build.
 add_executable(camhealth_test tests/camhealth_test.c src/camhealth.c)
 target_compile_options(camhealth_test PRIVATE -Wall -Wextra)
+
+# Host unit test for the gate-settings table the cooling gates, their
+# validators, the settings reply and the panel all read: the legal
+# range, the recommended band, the off end, and the two JSON shapes.
+# CI runs it after the build.
+add_executable(cool_gate_test tests/cool_gate_test.c src/gates.c)
+target_compile_options(cool_gate_test PRIVATE -Wall -Wextra)
+target_link_libraries(cool_gate_test m)
 
 # Emitter half of the host end-to-end logging check (tests/fflog_e2e.sh
 # drives it against a private rsyslogd; manual, not CI).

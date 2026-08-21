@@ -272,7 +272,7 @@ int machine_is_idle(void)
     return strcmp(st, "idle") == 0;
 }
 
-int machine_status_json(char *buf, size_t len)
+int machine_status_json(char *buf, size_t len, const char *extra)
 {
     char state[24] = "";
     rd_attr("cnc/state", state, sizeof(state));
@@ -345,6 +345,8 @@ int machine_status_json(char *buf, size_t len)
      * head reads it inactive; it pulses while the head MCU reboots). */
     char hall[16];
     int head_present = rd_attr("head/hall_sensor", hall, sizeof(hall)) == 0;
+    if (extra && extra[0])
+        append(buf, len, &off, "%s,", extra);
     append(buf, len, &off,
         "\"switches\":{\"lid\":%s,\"button\":%s,\"interlock_ok\":%s,"
         "\"head\":%s,\"hv_enable\":%s}}",

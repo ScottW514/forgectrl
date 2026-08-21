@@ -120,6 +120,94 @@ var PH = {
   cool_temp_resume: [31, 'ta']
 };
 var orig = {};
+/* The gate settings (S.gates, from /settings): each carries its legal
+ * range, recommended band, off end and the state of the stored value.
+ * The notes under the cooling card re-classify the typed value live, in
+ * the panel's units; the Status banner reports any gate that is off. */
+var GN = {
+  cool_temp_max: 'Coolant ceiling',
+  cool_temp_resume: 'Resume gate',
+  cool_flow_check_s: 'Flow check window',
+  cool_flow_rise: 'Flow fault rise'
+};
+var GG = { coolant_max: 'the coolant ceiling', flow: 'coolant flow verification' };
+function gUnit(k) {
+  return FT[k] ? uT() : 's';
+}
+function gDsp(k, v) {
+  return FT[k] ? fnum(FT[k] === 'ta' ? dTa(v) : dTd(v), 1) : String(v);
+}
+function gState(g, v) {
+  if (g.off === 'low' && v <= g.lo) return 'off';
+  if (g.off === 'high' && v >= g.hi) return 'off';
+  if (v < g.band[0] || v > g.band[1]) return 'warn';
+  return 'ok';
+}
+function gValue(k, g) {
+  var t = $(k) ? $(k).value.trim() : '';
+  var v = t === '' ? g.def : parseFloat(backVal(k, t));
+  return isNaN(v) ? g.def : v;
+}
+function renderGateNotes() {
+  var el = $('gnotes'),
+    g = S.gates,
+    k,
+    h = '';
+  if (!el || !g) return;
+  for (k in GN) {
+    if (!g[k]) continue;
+    var v = gValue(k, g[k]),
+      st = gState(g[k], v),
+      band = gDsp(k, g[k].band[0]) + ' to ' + gDsp(k, g[k].band[1]) + ' ' + gUnit(k);
+    if (st === 'off')
+      h +=
+        "<div class='gn-off'>\u26A0 " +
+        GN[k] +
+        ' ' +
+        gDsp(k, v) +
+        ' ' +
+        gUnit(k) +
+        ': this gate is OFF (recommended ' +
+        band +
+        ')</div>';
+    else if (st === 'warn')
+      h +=
+        "<div class='gn-warn'>\u26A0 " +
+        GN[k] +
+        ' ' +
+        gDsp(k, v) +
+        ' ' +
+        gUnit(k) +
+        ' is outside the recommended ' +
+        band +
+        '</div>';
+  }
+  el.innerHTML = h;
+}
+function renderGatesBanner() {
+  var b = $('gates-banner'),
+    g = S.gates,
+    k,
+    off = [];
+  if (!b) return;
+  if (g)
+    for (k in g) if (g[k].gate && g[k].state === 'off') off.push(g[k].gate);
+  if (!off.length) {
+    b.style.display = 'none';
+    return;
+  }
+  var names = [];
+  for (k = 0; k < off.length; k++) names.push(GG[off[k]] || off[k]);
+  b.innerHTML =
+    '\u26A0 Cooling gate off: ' +
+    esc(names.join(', ')) +
+    '. The laser will fire without this protection' +
+    (off.indexOf('flow') >= 0 || off.indexOf('coolant_max') >= 0
+      ? ', so a stopped pump or an overheating loop will not hold a job'
+      : '') +
+    ". Set the value back inside its band on the <a href='#machine'>Machine tab</a>.";
+  b.style.display = '';
+}
 function dspVal(k, raw) {
   var f = parseFloat(raw);
   if (raw === '' || isNaN(f) || !FT[k]) return raw;
@@ -433,8 +521,13 @@ function fill() {
   for (var pk in PH)
     $(pk).placeholder = fnum(PH[pk][1] === 'ta' ? dTa(PH[pk][0]) : dTd(PH[pk][0]), 1);
   $('host').textContent = (S.machine_id || '') + (S.version ? ' \u00b7 ' + S.version : '');
+  renderGateNotes();
+  renderGatesBanner();
   renderStat();
 }
+(function () {
+  for (var k in GN) if ($(k)) $(k).addEventListener('input', renderGateNotes);
+})();
 function post(pairs, msgId) {
   var q = '',
     k;

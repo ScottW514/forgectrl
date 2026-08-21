@@ -190,8 +190,8 @@ pushed state (`/run` anchor files, and the cooling reports below).
 
 ## Cooling service [implemented]
 
-The cooling engine — fan/pump/TEC/heater profiles, coolant-flow verification,
-over-temp policy — lives in forgectrl (`src/cool.c`) as the single owner of the
+The cooling engine (fan/pump/TEC/heater profiles, coolant-flow verification,
+over-temp policy) lives in forgectrl (`src/cool.c`) as the single owner of the
 thermal hardware, serving both controller modes. Tunables are the `cool_*` keys
 in the shared machine settings (re-read at every run start) with `GFCOOL_*` env
 overrides. `GET /cool/status` reports the engine state for the UI and bench
@@ -199,6 +199,45 @@ tooling. Both controllers are clients of it over the two channels below: they
 report job state and enforce the published verdict in-process, and they write
 no thermal hardware except through the emergency fallback described under the
 verdict file.
+
+### Gate settings: range, band, off end
+
+A gate is a comparison the engine makes against a setting. Every gate setting
+is a plain number on the Machine tab, and there is no separate switch for any
+gate: the one table in `src/gates.c` gives each its **legal range** (wide on
+purpose), its **recommended band** (the shipped default with the margin one
+machine's loop was seen to need), and its **off end**, the end of the legal
+range at which the gate never trips. A value outside the band is legal and
+warned about; a value at the off end is legal and reported as the gate being
+off. The validators, the engine, the settings reply and the panel all read
+that table.
+
+| Key | Gate | Default | Legal | Recommended | Off at |
+|---|---|---|---|---|---|
+| `cool_temp_max` | `coolant_max` (the run ceiling) | 33 C | 5 to 60 C | 25 to 38 C | 60 C |
+| `cool_temp_resume` | (follows the ceiling; kept below it) | 31 C | 5 to 59 C | 20 to 36 C | never |
+| `cool_flow_check_s` | `flow` (flow verification) | 50 s | 0 to 300 s | 30 to 120 s | 0 |
+| `cool_flow_rise` | (tunes `flow`; set from flow calibrate) | 14.4 C | 1 to 40 C | 8 to 16 C | never |
+
+What an off gate does: the engine skips the comparison (no verdict, no hold
+from it) and keeps measuring. With `coolant_max` off, the first reading in a
+run session over the shipped default is logged once as what the gate would
+have done; with `flow` off there is no heater interrogation at all and the
+run start says so. What an off gate is not: a way to reach anything that is
+not a thermal gate. The hardware chain, the laser latch, the emission witness,
+the lid IR fire watch, the controller-silence dead-man and the motion-liveness
+gate are not numbers on the Machine tab.
+
+Where it shows: at every run start the engine logs one line per gate setting
+(`cool: gate coolant_max OFF: cool_temp_max = 60 ...`, `cool: cool_temp_max =
+45 is outside the recommended 25 to 38 ...`, or the plain value); `GET
+/settings` carries a `gates` object (per key: `gate`, `def`, `lo`, `hi`,
+`band`, `off`, `value`, `state` of `ok | warn | off`, classified from the
+stored value); `GET /cool/status` and `GET /status` carry `gates_off`, the
+gate names at their off end as the engine resolved them at the last run
+start. The panel warns beside a field outside its band, says "this gate is
+OFF" at the off end, and shows a standing banner on the Status tab while any
+gate is off. None of it is reported to the cloud.
 
 The engine also runs the **physical-evidence witnesses** at its 1 Hz tick:
 
@@ -644,7 +683,10 @@ present:
   smoke; an engine killed mid-flood leaves the run fans held, the heater
   dropped by the client, and the sender warned, with the posture rebuilt from
   level-triggered reports within ~2 s of restart; over-temp hold and
-  auto-resume inside a running cycle.
+  auto-resume inside a running cycle; a ceiling set just over its legal
+  minimum trips at the next run start and a ceiling at its top turns the gate
+  off with `gates_off` and the run-start line saying so
+  (`cooling.gate-off` in the acceptance catalog).
 - **Armed windows:** the fallback rewrites the run duties when the verdict
   goes stale while armed; a controller killed mid-fire drops FIRE with the
   kernel ring's in-flight bytes (tens to ~170 ms, always riding real motion)

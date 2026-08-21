@@ -54,4 +54,10 @@ int cool_status_json(char *buf, size_t len);
  * arrived (the supervisor uses this to see a controller come alive). */
 double cool_report_age(void);
 
+/* The gates whose setting sits at its off end, as a JSON array of gate
+ * names ("[]" when every gate is on), from the engine's resolved
+ * tunables at the last run start. /status carries it beside the
+ * settings reply's per-key state. */
+int cool_gates_off_json(char *buf, size_t len);
+
 #endif

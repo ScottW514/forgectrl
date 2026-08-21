@@ -46,6 +46,7 @@
 #include "cool.h"
 #include "diag.h"
 #include "fflog.h"
+#include "gates.h"
 #include "logs.h"
 #include "settings.h"
 #include "status.h"
@@ -382,18 +383,22 @@ static int valid_range(const char *v, double lo, double hi)
     return end != v && *end == '\0' && f >= lo && f <= hi;
 }
 
-/* The flow-rise threshold must stay below the no-flow rise the bench
- * measured (~16 C over the check window): above it the interrogation can
- * never fault, so the machine would fire with the pump stopped. Capped
- * well under that. The over-temp ceiling is capped near the factory
- * window (~33 C) so it cannot be lifted into a range where the tube runs
- * hot without faulting. */
-static int valid_rise_c(const char *v)     { return valid_range(v, 1, 15); }
+/* The gate settings (the coolant ceiling and its resume gate, the flow
+ * window and its fault rise) validate against the one table in gates.c:
+ * a wide legal range whose far end turns the gate off by value, and a
+ * recommended band the panel warns outside of. The rest of the cooling
+ * keys are bounded to what the engine can mean by them. */
+static int valid_gate(const char *key, const char *v)
+{
+    return gate_parse(gate_setting_find(key), v, NULL);
+}
+static int valid_rise_c(const char *v)     { return valid_gate("cool_flow_rise", v); }
+static int valid_check_s(const char *v)    { return valid_gate("cool_flow_check_s", v); }
+static int valid_temp_max(const char *v)   { return valid_gate("cool_temp_max", v); }
+static int valid_temp_resume(const char *v){ return valid_gate("cool_temp_resume", v); }
 static int valid_heater_pct(const char *v) { return valid_range(v, 0, 100); }
-static int valid_check_s(const char *v)    { return valid_range(v, 0, 300); }
 static int valid_recheck_s(const char *v)  { return valid_range(v, 0, 3600); }
 static int valid_confirm_s(const char *v)  { return valid_range(v, 60, 3600); }
-static int valid_temp_c(const char *v)     { return valid_range(v, 5, 38); }
 static int valid_cool_s(const char *v)     { return valid_range(v, 0, 1800); }
 
 /* GRBL-mode tunables, read by the controller from the same file. The
@@ -452,8 +457,8 @@ static const struct {
     { "cool_flow_check_s",      valid_check_s,     0 },
     { "cool_recheck_s",         valid_recheck_s,   0 },
     { "cool_confirm_max_s",     valid_confirm_s,   0 },
-    { "cool_temp_max",          valid_temp_c,      0 },
-    { "cool_temp_resume",       valid_temp_c,      0 },
+    { "cool_temp_max",          valid_temp_max,    0 },
+    { "cool_temp_resume",       valid_temp_resume, 0 },
     { "cool_cooldown_s",        valid_cool_s,      0 },
     { "cool_cooldown_max_s",    valid_cool_s,      0 },
     { "laser_button_timeout_s", valid_button_s,    0 },
@@ -660,9 +665,20 @@ static void append(char *buf, size_t size, size_t *off, const char *fmt, ...)
         *off = size - 1;                /* truncated; keep off in range */
 }
 
+/* A gate setting's value as the file holds it, or its default. */
+static double setting_gate_value(const gate_setting_t *g, void *ctx)
+{
+    (void)ctx;
+    char v[128];
+    double out;
+    if (settings_get(g->key, v, sizeof(v)) == 0 && gate_parse(g, v, &out))
+        return out;
+    return g->def;
+}
+
 static int reply_settings(struct _u_response *res)
 {
-    char body[4096], val[128], mid[16], fwver[48];
+    char body[6144], val[128], mid[16], fwver[48];
     size_t off = 0;
 
     read_fw_version(fwver, sizeof(fwver));
@@ -682,14 +698,14 @@ static int reply_settings(struct _u_response *res)
             append(body, sizeof(body), &off, "\"%s\":\"%s\",",
                    setting_defs[i].key, have ? val : "");
     }
-    /* A zero flow-check window disables coolant-flow interrogation
-     * entirely - a real machine state the panel must surface loudly
-     * rather than present as a bare "0". */
-    char fcs[128];
-    int flow_off = settings_get("cool_flow_check_s", fcs, sizeof(fcs)) == 0 &&
-                   strtod(fcs, NULL) == 0.0;
-    append(body, sizeof(body), &off,
-           "\"flow_checks_disabled\":%s,", flow_off ? "true" : "false");
+    /* The gate settings with their ranges, bands and states, from the
+     * file's values (the default where unset): what the panel renders
+     * its warnings from, and the record of any gate that is off by
+     * value. The engine reports the same from its resolved tunables in
+     * /cool/status and /status. */
+    char gates[1024];
+    if (gates_json(gates, sizeof(gates), setting_gate_value, NULL) > 0)
+        append(body, sizeof(body), &off, "\"gates\":%s,", gates);
     append(body, sizeof(body), &off,
            "\"version\":\"%s\",\"machine_id\":\"%s\"}", fwver, mid);
     ulfius_set_string_body_response(res, 200, body);
@@ -712,8 +728,11 @@ static int cb_machine_status(const struct _u_request *req,
     (void)user_data;
     if (!auth_read_ok(req, res))
         return U_CALLBACK_COMPLETE;
-    char body[1536];
-    machine_status_json(body, sizeof(body));
+    char body[1536], gates[128];
+    cool_gates_off_json(gates, sizeof(gates));
+    char extra[160];
+    snprintf(extra, sizeof(extra), "\"gates_off\":%s", gates);
+    machine_status_json(body, sizeof(body), extra);
     ulfius_set_string_body_response(res, 200, body);
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
     return U_CALLBACK_CONTINUE;
