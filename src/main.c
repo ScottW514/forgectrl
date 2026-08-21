@@ -959,7 +959,26 @@ static int cb_cool_state(const struct _u_request *req,
         if ((v = setting_param(req, duty_key[i])) != NULL)
             duty[i] = atol(v);
 
-    if (cool_state_report(mode, armed, duty[0], duty[1], duty[2]) != 0)
+    /* The job's limits, when the report carries them (cloud mode): each
+     * a number the engine takes only where it is stricter than its own;
+     * absent or unparsable reads as absent. */
+    cool_limits_t lim = {-1, -1, -1, -1, -1};
+    static const char *lim_key[5] = {"coolant_max_c", "coolant_min_c",
+                                     "exhaust_min_rpm", "intake_min_rpm",
+                                     "air_assist_min_rpm"};
+    double *lim_val[5] = {&lim.coolant_max_c, &lim.coolant_min_c,
+                          &lim.exhaust_min_rpm, &lim.intake_min_rpm,
+                          &lim.air_assist_min_rpm};
+    for (int i = 0; i < 5; i++) {
+        if ((v = setting_param(req, lim_key[i])) == NULL)
+            continue;
+        char *end;
+        double d = strtod(v, &end);
+        if (end != v && *end == '\0')
+            *lim_val[i] = d;
+    }
+
+    if (cool_state_report(mode, armed, duty[0], duty[1], duty[2], &lim) != 0)
         return reply_error(res, 400, "mode must be idle, run or cooldown");
     ulfius_set_string_body_response(res, 200, "{\"ok\":true}");
     ulfius_add_header_to_response(res, "Content-Type", "application/json");

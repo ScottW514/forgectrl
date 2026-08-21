@@ -38,13 +38,27 @@ void cool_init(void);
  * fire-blocked). */
 void cool_shutdown(void);
 
+/* Per-job limits a report may carry (cloud mode passes the pulse
+ * header's envelope; GRBL mode passes none). Each is a value the
+ * engine applies only where it is stricter than its own configured
+ * limit; a field at or below zero is absent. */
+typedef struct {
+    double coolant_max_c;       /* run ceiling, upstream sensor */
+    double coolant_min_c;       /* run floor (no gate yet; logged) */
+    double exhaust_min_rpm;     /* fan floors (no gate yet; logged) */
+    double intake_min_rpm;
+    double air_assist_min_rpm;
+} cool_limits_t;
+
 /* Job-state report from the active controller (POST /cool/state).
  * mode is "idle", "run" or "cooldown"; armed = laser armed (forces the
  * run profile and flow interrogation whatever mode says). The duty
  * arguments override the run fan profile for this job; pass -1 to use
- * the configured/factory values. Returns 0, or -1 on a bad mode. */
+ * the configured/factory values. lim carries the job's limits, or
+ * NULL for none. Returns 0, or -1 on a bad mode. */
 int cool_state_report(const char *mode, int armed,
-                      long air_assist, long exhaust, long intake);
+                      long air_assist, long exhaust, long intake,
+                      const cool_limits_t *lim);
 
 /* Engine state as JSON (verdict, temps, phase, last report age) for
  * the UI and bench tooling. */

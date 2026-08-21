@@ -92,6 +92,15 @@ const char *gate_state_name(gate_state_t s)
     }
 }
 
+double gate_effective(double local, double header, int is_floor, int *from_header)
+{
+    int use = isfinite(header) && header > 0.0 &&
+              (is_floor ? header > local : header < local);
+    if (from_header)
+        *from_header = use;
+    return use ? header : local;
+}
+
 /* %g keeps 33 as 33 and 14.4 as 14.4 without trailing zeros. */
 static int put(char *buf, size_t len, size_t *off, const char *fmt, ...)
 {

@@ -53,6 +53,14 @@ int gate_parse(const gate_setting_t *g, const char *text, double *out);
 gate_state_t gate_state(const gate_setting_t *g, double v);
 const char *gate_state_name(gate_state_t s);     /* "ok" "warn" "off" */
 
+/* The effective limit for one gate: the stricter of the locally
+ * configured value and what a job's header asked for. A ceiling can
+ * only come down, a floor can only go up; a header value that is
+ * absent (not finite, or not above zero) or looser leaves the local
+ * value standing. Returns the effective value and, through *from_header,
+ * whether the header's value is the one in force. */
+double gate_effective(double local, double header, int is_floor, int *from_header);
+
 /* Value source for the JSON helpers: the engine passes its resolved
  * tunables, the settings reply passes the file's values. */
 typedef double (*gate_value_fn)(const gate_setting_t *g, void *ctx);

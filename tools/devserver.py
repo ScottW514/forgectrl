@@ -528,7 +528,12 @@ class Mock:
                 return J(200, d)
             if path == '/cool/status':
                 return J(200, {'state': 'idle', 'pump': True, 'tec': False,
-                               'down_c': 22.4, 'up_c': 22.3})
+                               'down_c': 22.4, 'up_c': 22.3,
+                               'gates_off': self.status.get('gates_off', []),
+                               'limits': {'coolant_max_c': 33.0, 'coolant_resume_c': 31.0,
+                                          'coolant_source': 'local', 'coolant_min_c': 0,
+                                          'exhaust_min_rpm': 0, 'intake_min_rpm': 0,
+                                          'air_assist_min_rpm': 0}})
             if path == '/slots':
                 return J(200, self.slots)
             if path == '/update/status':

@@ -249,6 +249,7 @@ static int engine_run = 0;
 static int rep_mode = 0;               /* 0 idle, 1 run, 2 cooldown */
 static int rep_armed = 0;
 static long rep_duty[3] = {-1, -1, -1}; /* air_assist, exhaust, intake */
+static cool_limits_t rep_lim = {-1, -1, -1, -1, -1}; /* <= 0 = absent */
 static double rep_at = -1.0;           /* CLOCK_MONOTONIC; <0 = never */
 
 /* Published snapshot for cool_status_json. */
@@ -315,6 +316,21 @@ static int gate_coolant_off = 0;
 static int gate_flow_off = 0;
 static int off_would_warned = 0;
 static char pub_gates_off[128] = "[]";
+
+/* Effective limits: the local tunable, tightened by the job's header
+ * where the report carries a stricter value (gate_effective). The
+ * coolant ceiling is the one with a gate behind it today; the floors
+ * are carried, logged and published so the gates that follow find
+ * them in place. eff_resume follows a tightened ceiling down by the
+ * configured gap. Logged whenever the effective set changes. */
+static float eff_temp_max_c = TEMP_MAX_C_DEFAULT;
+static float eff_temp_resume_c = TEMP_RESUME_C_DEFAULT;
+static int eff_from_header = 0;          /* the ceiling is the header's */
+static cool_limits_t eff_lim = {-1, -1, -1, -1, -1};
+static cool_limits_t last_logged_lim = {-2, -2, -2, -2, -2};
+static float last_logged_max = -1.0f;
+static int looser_warned = 0;            /* once per run session */
+static char pub_limits[160] = "{}";
 
 static double wall_s(void)
 {
@@ -539,6 +555,74 @@ static void gates_apply(void)
     pthread_mutex_unlock(&mu);
 }
 
+/* Resolve the effective limits from the local tunables and the
+ * latest fresh report's header limits (absent when the report carried
+ * none, or is stale). The coolant ceiling is the one consumer; a
+ * header ceiling applies only if the local gate is on (an operator
+ * who turned the gate off at its far end is not overruled by a job)
+ * and stricter than the local value, and the resume gate follows it
+ * down by the configured gap. The floors are resolved the same way
+ * and published for the gates that follow. Logged on every change of
+ * the effective set, and a looser header value is named once per run
+ * session. */
+static void limits_apply(const cool_limits_t *hdr, int fresh)
+{
+    cool_limits_t none = {-1, -1, -1, -1, -1};
+    const cool_limits_t *h = fresh && hdr ? hdr : &none;
+    int from = 0;
+    float max_c = temp_max_c, resume_c = temp_resume_c;
+    if (!gate_coolant_off) {
+        max_c = (float)gate_effective(temp_max_c, h->coolant_max_c, 0, &from);
+        if (from)
+            resume_c = max_c - (temp_max_c - temp_resume_c);
+    }
+    cool_limits_t eff;
+    eff.coolant_max_c = max_c;
+    eff.coolant_min_c = gate_effective(0.0, h->coolant_min_c, 1, NULL);
+    eff.exhaust_min_rpm = gate_effective(0.0, h->exhaust_min_rpm, 1, NULL);
+    eff.intake_min_rpm = gate_effective(0.0, h->intake_min_rpm, 1, NULL);
+    eff.air_assist_min_rpm = gate_effective(0.0, h->air_assist_min_rpm, 1, NULL);
+
+    int changed = max_c != last_logged_max ||
+                  memcmp(&eff, &last_logged_lim, sizeof(eff)) != 0 ||
+                  eff_from_header != from;
+    eff_temp_max_c = max_c;
+    eff_temp_resume_c = resume_c;
+    eff_from_header = from;
+    eff_lim = eff;
+    if (changed) {
+        last_logged_max = max_c;
+        last_logged_lim = eff;
+        fflog(LOG_INFO, "cool: effective limits: coolant ceiling %.1f C "
+              "(local %.1f, header %s%.1f) resume %.1f C; floors coolant "
+              "%.1f C, exhaust %.0f rpm, intake %.0f rpm, air assist %.0f rpm "
+              "(from the header, no gate yet)",
+              max_c, temp_max_c, h->coolant_max_c > 0 ? "" : "none ",
+              h->coolant_max_c > 0 ? h->coolant_max_c : 0.0, resume_c,
+              eff.coolant_min_c, eff.exhaust_min_rpm, eff.intake_min_rpm,
+              eff.air_assist_min_rpm);
+        char lim[sizeof(pub_limits)];
+        snprintf(lim, sizeof(lim),
+                 "{\"coolant_max_c\":%.1f,\"coolant_resume_c\":%.1f,"
+                 "\"coolant_source\":\"%s\",\"coolant_min_c\":%.1f,"
+                 "\"exhaust_min_rpm\":%.0f,\"intake_min_rpm\":%.0f,"
+                 "\"air_assist_min_rpm\":%.0f}",
+                 max_c, resume_c, from ? "header" : "local",
+                 eff.coolant_min_c, eff.exhaust_min_rpm, eff.intake_min_rpm,
+                 eff.air_assist_min_rpm);
+        pthread_mutex_lock(&mu);
+        snprintf(pub_limits, sizeof(pub_limits), "%s", lim);
+        pthread_mutex_unlock(&mu);
+    }
+    if (!gate_coolant_off && h->coolant_max_c > 0 && !from && !looser_warned &&
+        h->coolant_max_c >= temp_max_c) {
+        looser_warned = 1;
+        fflog(LOG_INFO, "cool: header coolant ceiling %.1f C is not stricter "
+              "than the local %.1f C; the local one stands",
+              h->coolant_max_c, temp_max_c);
+    }
+}
+
 static void conf_reload(void)
 {
     for (size_t i = 0; i < sizeof(tunables) / sizeof(tunables[0]); i++) {
@@ -627,6 +711,7 @@ static void flood_apply(int on, double now)
     if (on) {
         conf_reload();              /* GUI changes apply per job */
         off_would_warned = 0;
+        looser_warned = 0;
         if (gate_flow_off)
             fflog(LOG_WARNING, "cool: coolant flow is not verified this "
                   "job (cool_flow_check_s = 0)");
@@ -709,9 +794,11 @@ static void engine_tick(void)
     int mode = rep_mode, armed = rep_armed;
     double at = rep_at;
     long duty[3] = {rep_duty[0], rep_duty[1], rep_duty[2]};
+    cool_limits_t hdr = rep_lim;
     pthread_mutex_unlock(&mu);
 
     int fresh = at >= 0 && now - at <= REPORT_TIMEOUT_S;
+    limits_apply(&hdr, fresh);
     if (!fresh) {
         /* Dead-man for a HUNG controller, not just a dead one (the
          * supervisor covers deaths): a reporter that went silent with
@@ -884,12 +971,13 @@ static void engine_tick(void)
          * same gate: the controller holds while it stands, resumes
          * (its call) once resume_ok returns. */
         int was = over_temp_gate;
-        over_temp_gate = up > (over_temp_gate ? temp_resume_c : temp_max_c);
+        over_temp_gate = up > (over_temp_gate ? eff_temp_resume_c : eff_temp_max_c);
         if (over_temp_gate && !was) {
             char msg[96];
             snprintf(msg, sizeof(msg),
-                     "coolant %.1f C over %.0f C limit - hold until %.0f C",
-                     up, temp_max_c, temp_resume_c);
+                     "coolant %.1f C over %.0f C limit%s - hold until %.0f C",
+                     up, eff_temp_max_c, eff_from_header ? " (the job's)" : "",
+                     eff_temp_resume_c);
             warn(msg);
             if (cool_state != Cool_Run) {
                 fans_cool();
@@ -1161,7 +1249,8 @@ void cool_shutdown(void)
 }
 
 int cool_state_report(const char *mode, int armed,
-                      long air_assist, long exhaust, long intake)
+                      long air_assist, long exhaust, long intake,
+                      const cool_limits_t *lim)
 {
     int m;
     if (!strcmp(mode, "idle"))
@@ -1179,6 +1268,12 @@ int cool_state_report(const char *mode, int armed,
     rep_duty[0] = air_assist >= 0 && air_assist <= 1023 ? air_assist : -1;
     rep_duty[1] = exhaust >= 0 && exhaust <= 65535 ? exhaust : -1;
     rep_duty[2] = intake >= 0 && intake <= 65535 ? intake : -1;
+    if (lim)
+        rep_lim = *lim;
+    else {
+        cool_limits_t none = {-1, -1, -1, -1, -1};
+        rep_lim = none;
+    }
     rep_at = wall_s();
     pthread_mutex_unlock(&mu);
     return 0;
@@ -1200,10 +1295,11 @@ int cool_status_json(char *buf, size_t len)
         "{\"phase\":\"%s\",\"verdict\":\"%s\",\"fire_ok\":%s,"
         "\"hold\":%s,\"reason\":\"%s\",\"down_c\":%.2f,\"up_c\":%.2f,"
         "\"report_age_s\":%.1f,\"armed\":%s,\"fire_watch\":\"%s\","
-        "\"gates_off\":%s}",
+        "\"gates_off\":%s,\"limits\":%s}",
         pub_phase, pub_verdict, pub_fire_ok ? "true" : "false",
         pub_hold ? "true" : "false", pub_reason, pub_down, pub_up,
-        age, rep_armed ? "true" : "false", pub_fire_watch, pub_gates_off);
+        age, rep_armed ? "true" : "false", pub_fire_watch, pub_gates_off,
+        pub_limits);
     pthread_mutex_unlock(&mu);
     return 0;
 }

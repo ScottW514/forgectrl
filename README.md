@@ -85,8 +85,8 @@ restarts.
 | `POST /settings?key=value&...` | Set any subset of known keys |
 | `GET /mode` | Supervisor state: mode, controller (`running`/`stopped`/`standby`/`motion-fault`), pid, motion verdict |
 | `POST /mode?controller=grbl\|cloud` | Live idle-gated mode switch; also the retry lever after a motion fault |
-| `POST /cool/state` | Controller job-state report (mode, armed, per-job run fan duties), level-triggered ~1 Hz |
-| `GET /cool/status` | Cooling-engine state: phase, verdict, temps, report age, `gates_off` |
+| `POST /cool/state` | Controller job-state report (mode, armed, per-job run fan duties and limits), level-triggered ~1 Hz |
+| `GET /cool/status` | Cooling-engine state: phase, verdict, temps, report age, `gates_off`, the effective `limits` |
 
 Position comes from the kernel step counters anchored at the last
 completed homing (`/run/grblhal.homed`, written by the controller) —

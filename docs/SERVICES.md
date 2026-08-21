@@ -268,6 +268,8 @@ The engine also runs the **physical-evidence witnesses** at its 1 Hz tick:
 ```
 mode=idle|run|cooldown & armed=0|1
     [ & air_assist=0..1023 & exhaust=0..65535 & intake=0..65535 ]
+    [ & coolant_max_c=<C> & coolant_min_c=<C>
+      & exhaust_min_rpm=<rpm> & intake_min_rpm=<rpm> & air_assist_min_rpm=<rpm> ]
 ```
 
 - **Level-triggered, repeated at ~1 Hz** while the controller runs — not
@@ -277,6 +279,24 @@ mode=idle|run|cooldown & armed=0|1
 - The duty parameters are the optional per-job run fan profile (cloud mode
   passes the factory pulse-header duties; GRBL mode omits them →
   configured/factory defaults). Out-of-range values fall back to defaults.
+- The limit parameters are the job's envelope, the pulse header's
+  `CMrx`/`CMrn` (millidegrees, sent as degrees) and the tach maximum
+  periods `EFrx`/`IFrx`/`AArx` (sent as the minimum speed they mean in
+  the kernel's units: ns at 2 pulses/rev for exhaust and intake, us at 8
+  for the air assist). The client drops a tag that is absent, a sentinel
+  (0, 1023, the signed extremes, the unsigned rail) or absurd. **Tighten
+  only:** the engine resolves each limit as the stricter of its own
+  configured value and the header's, a ceiling only ever comes down and a
+  floor only ever goes up, a looser header value is named once per run
+  session and ignored, and a gate the operator set to its off end stays
+  off whatever a header says. The coolant ceiling is the one limit with a
+  gate behind it today; when a header tightens it the resume gate follows
+  it down by the configured gap. The floors are resolved, logged and
+  published for the gates that follow. Level-triggered like the duties:
+  the limits ride every report while the job is loaded and leave with it.
+  The engine logs `cool: effective limits: ...` whenever the effective set
+  changes and carries it in `GET /cool/status` as `limits` (`coolant_max_c`,
+  `coolant_resume_c`, `coolant_source` of `local | header`, and the floors).
 - Silence: if the active controller stops reporting past a timeout (5 s), the
   engine publishes `fire_ok=false` immediately and stands down through the
   normal cooldown path (smoke clear is the right physical behavior for a job

@@ -12,6 +12,7 @@
  */
 #include "../src/gates.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -105,6 +106,21 @@ int main(void)
     CHECK(!strcmp(gate_state_name(Gate_Ok), "ok") &&
           !strcmp(gate_state_name(Gate_Warn), "warn") &&
           !strcmp(gate_state_name(Gate_Off), "off"), "state names");
+
+    printf("effective\n");
+    int from = -1;
+    CHECK(gate_effective(33.0, 30.0, 0, &from) == 30.0 && from == 1, "a stricter header ceiling applies");
+    CHECK(gate_effective(33.0, 33.0, 0, &from) == 33.0 && from == 0, "an equal header ceiling is the local one");
+    CHECK(gate_effective(33.0, 40.0, 0, &from) == 33.0 && from == 0, "a looser header ceiling is ignored");
+    CHECK(gate_effective(33.0, -1.0, 0, &from) == 33.0 && from == 0, "an absent header ceiling (-1) is ignored");
+    CHECK(gate_effective(33.0, 0.0, 0, &from) == 33.0 && from == 0, "a zero header ceiling is absent");
+    CHECK(gate_effective(33.0, NAN, 0, &from) == 33.0 && from == 0, "a NaN header ceiling is absent");
+    CHECK(gate_effective(33.0, INFINITY, 0, &from) == 33.0 && from == 0, "an infinite header ceiling is absent");
+    CHECK(gate_effective(900.0, 1200.0, 1, &from) == 1200.0 && from == 1, "a stricter header floor applies");
+    CHECK(gate_effective(900.0, 600.0, 1, &from) == 900.0 && from == 0, "a looser header floor is ignored");
+    CHECK(gate_effective(0.0, 116.0, 1, &from) == 116.0 && from == 1, "a floor with no local value takes the header's");
+    CHECK(gate_effective(0.0, -1.0, 1, &from) == 0.0 && from == 0, "a floor with nothing anywhere stays zero");
+    CHECK(gate_effective(33.0, 30.0, 0, NULL) == 30.0, "a NULL from_header is accepted");
 
     printf("json\n");
     char buf[1024];
