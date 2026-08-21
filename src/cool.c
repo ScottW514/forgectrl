@@ -329,7 +329,7 @@ static int eff_from_header = 0;          /* the ceiling is the header's */
 static cool_limits_t eff_lim = {-1, -1, -1, -1, -1};
 static cool_limits_t last_logged_lim = {-2, -2, -2, -2, -2};
 static float last_logged_max = -1.0f;
-static int looser_warned = 0;            /* once per run session */
+static double looser_warned_c = -1.0;    /* header ceiling already named */
 static char pub_limits[160] = "{}";
 
 static double wall_s(void)
@@ -614,9 +614,14 @@ static void limits_apply(const cool_limits_t *hdr, int fresh)
         snprintf(pub_limits, sizeof(pub_limits), "%s", lim);
         pthread_mutex_unlock(&mu);
     }
-    if (!gate_coolant_off && h->coolant_max_c > 0 && !from && !looser_warned &&
-        h->coolant_max_c >= temp_max_c) {
-        looser_warned = 1;
+    /* A header ceiling that does not tighten is named once per value:
+     * the limits arrive with the job load, before the run session, and
+     * leave with the job, so the value itself is the session. */
+    if (h->coolant_max_c <= 0)
+        looser_warned_c = -1.0;
+    if (!gate_coolant_off && h->coolant_max_c > 0 && !from &&
+        h->coolant_max_c != looser_warned_c && h->coolant_max_c >= temp_max_c) {
+        looser_warned_c = h->coolant_max_c;
         fflog(LOG_INFO, "cool: header coolant ceiling %.1f C is not stricter "
               "than the local %.1f C; the local one stands",
               h->coolant_max_c, temp_max_c);
@@ -711,7 +716,6 @@ static void flood_apply(int on, double now)
     if (on) {
         conf_reload();              /* GUI changes apply per job */
         off_would_warned = 0;
-        looser_warned = 0;
         if (gate_flow_off)
             fflog(LOG_WARNING, "cool: coolant flow is not verified this "
                   "job (cool_flow_check_s = 0)");
