@@ -45,7 +45,7 @@ int main(void)
     const gate_setting_t *t = gate_settings(&n);
 
     printf("table shape\n");
-    CHECK(n == 4, "four gate settings");
+    CHECK(n == 9, "nine gate settings");
     for (size_t i = 0; i < n; i++) {
         char msg[128];
         snprintf(msg, sizeof(msg), "%s: lo <= band_lo <= def <= band_hi <= hi", t[i].key);
@@ -69,6 +69,23 @@ int main(void)
     CHECK(!rise->gate && rise->off_end == 0, "the flow rise is not a gate of its own");
     CHECK(tres->hi < tmax->hi, "the resume range tops out under the ceiling range");
     CHECK(tmax->band_hi == 38.0, "the ceiling band tops out at the former hard cap");
+    const gate_setting_t *exh = gate_setting_find("cool_tach_exhaust_min_rpm");
+    const gate_setting_t *inl = gate_setting_find("cool_tach_intake_min_rpm");
+    const gate_setting_t *air = gate_setting_find("cool_tach_air_assist_min_rpm");
+    const gate_setting_t *prg = gate_setting_find("cool_purge_min_current");
+    const gate_setting_t *grc = gate_setting_find("cool_fan_grace_s");
+    CHECK(exh && inl && air && prg && grc, "every airflow key resolves");
+    CHECK(exh->gate && !strcmp(exh->gate, "exhaust") && exh->off_end < 0 && exh->lo == 0.0,
+          "the exhaust floor is the exhaust gate, off at zero");
+    CHECK(inl->gate && !strcmp(inl->gate, "intake") && inl->off_end < 0,
+          "the intake floor is the intake gate, off at zero");
+    CHECK(air->gate && !strcmp(air->gate, "air_assist") && air->off_end < 0,
+          "the air-assist floor is the air_assist gate, off at zero");
+    CHECK(prg->gate && !strcmp(prg->gate, "purge") && prg->off_end < 0 && prg->hi == 1023.0,
+          "the purge current floor is the purge gate, off at zero, capped at the ADC rail");
+    CHECK(!grc->gate && grc->off_end == 0, "the grace window is not a gate of its own");
+    CHECK(gate_state(exh, 0.0) == Gate_Off && gate_state(exh, 1.0) == Gate_Warn &&
+          gate_state(exh, 3700.0) == Gate_Ok, "an exhaust floor of zero is off, of one is warned");
 
     printf("parse\n");
     double v = 0;
@@ -123,7 +140,7 @@ int main(void)
     CHECK(gate_effective(33.0, 30.0, 0, NULL) == 30.0, "a NULL from_header is accepted");
 
     printf("json\n");
-    char buf[1024];
+    char buf[2048];
     int r = gates_json(buf, sizeof(buf), value_default, NULL);
     CHECK(r > 0 && buf[0] == '{' && buf[r - 1] == '}', "gates_json is an object");
     CHECK(strstr(buf, "\"cool_temp_max\":{\"gate\":\"coolant_max\",\"def\":33,\"lo\":5,"
@@ -137,6 +154,8 @@ int main(void)
     CHECK(strstr(buf, "\"cool_flow_check_s\":{\"gate\":\"flow\",\"def\":50,\"lo\":0,"
                       "\"hi\":300,\"band\":[30,120],\"off\":\"low\",") != NULL,
           "the flow row says its off end is low");
+    CHECK(strstr(buf, "\"cool_tach_exhaust_min_rpm\":{\"gate\":\"exhaust\",\"def\":3700,") != NULL,
+          "the exhaust row is there");
     CHECK(gates_json(buf, 16, value_default, NULL) == -1, "a short buffer reports -1");
 
     const char *all_default[] = { NULL };
@@ -148,6 +167,11 @@ int main(void)
     const char *both_off[] = { "cool_temp_max", "60", "cool_flow_check_s", "0", NULL };
     r = gates_off_json(buf, sizeof(buf), value_from_table, (void *)both_off);
     CHECK(r == 2 && !strcmp(buf, "[\"coolant_max\",\"flow\"]"), "both off, in table order");
+    const char *fans_off[] = { "cool_tach_exhaust_min_rpm", "0", "cool_purge_min_current", "0",
+                               "cool_fan_grace_s", "0", NULL };
+    r = gates_off_json(buf, sizeof(buf), value_from_table, (void *)fans_off);
+    CHECK(r == 2 && !strcmp(buf, "[\"exhaust\",\"purge\"]"),
+          "fan floors at zero are off; a zero grace is not a gate");
     const char *warn_only[] = { "cool_temp_max", "45", "cool_flow_rise", "40", NULL };
     r = gates_off_json(buf, sizeof(buf), value_from_table, (void *)warn_only);
     CHECK(r == 0 && !strcmp(buf, "[]"), "warned values are not off");

@@ -58,6 +58,13 @@
  *   a flow window of zero turns that gate off by value. An off gate is
  *   skipped, still measured, logged at every run start, and published
  *   as gates_off.
+ * - AIRFLOW GATES (airflow.c): while the run profile is applied, each
+ *   fan is held to a floor (the exhaust, intakes and air assist by
+ *   tachometer, the purge fan by current) after a spin-up grace;
+ *   three consecutive ticks under the floor trip a fault for the
+ *   rest of the run session (verdict AIRFLOW: hold, fire blocked, no
+ *   resume), the fans held at run duty. A header's tach window can
+ *   raise a floor for a job, never lower it.
  * - Physical-evidence witnesses (1 Hz, alongside the loop): the
  *   kernel's sampled LASER_ON count is the ground truth of emission
  *   (the gated output of the hardware AND-gate, not a commanded
@@ -84,6 +91,7 @@
  *   suspends its writes and publishes fire-blocked until they finish.
  */
 #define _GNU_SOURCE
+#include "airflow.h"
 #include "cool.h"
 #include "diag.h"
 #include "fflog.h"
@@ -131,6 +139,12 @@
 #define COOLDOWN_MAX_S         300
 #define TEMP_MAX_C_DEFAULT     33.0f
 #define TEMP_RESUME_C_DEFAULT  31.0f
+/* Airflow floors (gates.c carries the rationale and the ranges). */
+#define TACH_EXHAUST_MIN_RPM     3700.0f
+#define TACH_INTAKE_MIN_RPM      1800.0f
+#define TACH_AIR_ASSIST_MIN_RPM  6000.0f
+#define PURGE_MIN_CURRENT        300.0f
+#define FAN_GRACE_S              15.0f
 
 /* Flow check. Characterized on the machine with the factory
  * temperature curve (forgefirm scripts/bench/flow_characterize.py):
@@ -266,6 +280,11 @@ static uint32_t smoke_s = COOLDOWN_SMOKE_S;
 static uint32_t cooldown_max_s = COOLDOWN_MAX_S;
 static float temp_max_c = TEMP_MAX_C_DEFAULT;
 static float temp_resume_c = TEMP_RESUME_C_DEFAULT;
+static float tach_exhaust_min_rpm = TACH_EXHAUST_MIN_RPM;
+static float tach_intake_min_rpm = TACH_INTAKE_MIN_RPM;
+static float tach_air_assist_min_rpm = TACH_AIR_ASSIST_MIN_RPM;
+static float purge_min_current = PURGE_MIN_CURRENT;
+static float fan_grace_s = FAN_GRACE_S;
 static float flow_fault_rise = FLOW_FAULT_RISE_C;
 static uint32_t flow_heater_pct = FLOW_HEATER_PCT;
 static uint32_t flow_check_s = FLOW_CHECK_S;
@@ -331,6 +350,19 @@ static cool_limits_t last_logged_lim = {-2, -2, -2, -2, -2};
 static float last_logged_max = -1.0f;
 static double looser_warned_c = -1.0;    /* header ceiling already named */
 static char pub_limits[160] = "{}";
+
+/* The airflow gates (airflow.c): one per fan, evaluated while the run
+ * profile is applied, after a grace window from the moment it was
+ * written. A trip is a fault for the rest of the run session. */
+enum { Fan_Exhaust, Fan_Intake1, Fan_Intake2, Fan_AirAssist, Fan_Purge, Fan_N };
+static const char *fan_name[Fan_N] = {"exhaust", "intake_1", "intake_2", "air_assist", "purge"};
+static airflow_fan_t fan_gate[Fan_N];
+static double fan_reading[Fan_N];
+static double fan_floor[Fan_N];
+static double fan_grace_until = 0.0;
+static int airflow_alarm = 0;        /* latched fan fault, this run session */
+static int fan_would_warned = 0;     /* off gate, would have tripped: once */
+static char pub_fan_gates[512] = "{}";
 
 static double wall_s(void)
 {
@@ -501,6 +533,16 @@ static struct {
       FLOW_CONFIRM_MAX_S,     NULL,             &confirm_max_s, 0 },
     { "GFCOOL_FIRE_IR_DELTA",   "cool_fire_ir_delta",
       FIRE_IR_DELTA,          NULL,             &fire_ir_delta, 0 },
+    { "GFCOOL_TACH_EXHAUST_MIN", "cool_tach_exhaust_min_rpm",
+      TACH_EXHAUST_MIN_RPM,   &tach_exhaust_min_rpm, NULL, 0 },
+    { "GFCOOL_TACH_INTAKE_MIN",  "cool_tach_intake_min_rpm",
+      TACH_INTAKE_MIN_RPM,    &tach_intake_min_rpm, NULL, 0 },
+    { "GFCOOL_TACH_AIR_MIN",     "cool_tach_air_assist_min_rpm",
+      TACH_AIR_ASSIST_MIN_RPM, &tach_air_assist_min_rpm, NULL, 0 },
+    { "GFCOOL_PURGE_MIN",        "cool_purge_min_current",
+      PURGE_MIN_CURRENT,      &purge_min_current, NULL, 0 },
+    { "GFCOOL_FAN_GRACE_S",      "cool_fan_grace_s",
+      FAN_GRACE_S,            &fan_grace_s,     NULL, 0 },
 };
 
 /* The engine's resolved value for a gate setting (env > settings >
@@ -516,6 +558,16 @@ static double engine_gate_value(const gate_setting_t *g, void *ctx)
         return flow_check_s;
     if (!strcmp(g->key, "cool_flow_rise"))
         return flow_fault_rise;
+    if (!strcmp(g->key, "cool_tach_exhaust_min_rpm"))
+        return tach_exhaust_min_rpm;
+    if (!strcmp(g->key, "cool_tach_intake_min_rpm"))
+        return tach_intake_min_rpm;
+    if (!strcmp(g->key, "cool_tach_air_assist_min_rpm"))
+        return tach_air_assist_min_rpm;
+    if (!strcmp(g->key, "cool_purge_min_current"))
+        return purge_min_current;
+    if (!strcmp(g->key, "cool_fan_grace_s"))
+        return fan_grace_s;
     return g->def;
 }
 
@@ -579,9 +631,14 @@ static void limits_apply(const cool_limits_t *hdr, int fresh)
     cool_limits_t eff;
     eff.coolant_max_c = max_c;
     eff.coolant_min_c = gate_effective(0.0, h->coolant_min_c, 1, NULL);
-    eff.exhaust_min_rpm = gate_effective(0.0, h->exhaust_min_rpm, 1, NULL);
-    eff.intake_min_rpm = gate_effective(0.0, h->intake_min_rpm, 1, NULL);
-    eff.air_assist_min_rpm = gate_effective(0.0, h->air_assist_min_rpm, 1, NULL);
+    /* A floor the operator set to zero is off and stays off; otherwise
+     * a header floor can only raise it. */
+    eff.exhaust_min_rpm = tach_exhaust_min_rpm <= 0.0f ? 0.0
+        : gate_effective(tach_exhaust_min_rpm, h->exhaust_min_rpm, 1, NULL);
+    eff.intake_min_rpm = tach_intake_min_rpm <= 0.0f ? 0.0
+        : gate_effective(tach_intake_min_rpm, h->intake_min_rpm, 1, NULL);
+    eff.air_assist_min_rpm = tach_air_assist_min_rpm <= 0.0f ? 0.0
+        : gate_effective(tach_air_assist_min_rpm, h->air_assist_min_rpm, 1, NULL);
 
     int changed = max_c != last_logged_max ||
                   memcmp(&eff, &last_logged_lim, sizeof(eff)) != 0 ||
@@ -595,8 +652,8 @@ static void limits_apply(const cool_limits_t *hdr, int fresh)
         last_logged_lim = eff;
         fflog(LOG_INFO, "cool: effective limits: coolant ceiling %.1f C "
               "(local %.1f, header %s%.1f) resume %.1f C; floors coolant "
-              "%.1f C, exhaust %.0f rpm, intake %.0f rpm, air assist %.0f rpm "
-              "(from the header, no gate yet)",
+              "%.1f C (no gate yet), exhaust %.0f rpm, intake %.0f rpm, air "
+              "assist %.0f rpm",
               max_c, temp_max_c, h->coolant_max_c > 0 ? "" : "none ",
               h->coolant_max_c > 0 ? h->coolant_max_c : 0.0, resume_c,
               eff.coolant_min_c, eff.exhaust_min_rpm, eff.intake_min_rpm,
@@ -716,6 +773,11 @@ static void flood_apply(int on, double now)
     if (on) {
         conf_reload();              /* GUI changes apply per job */
         off_would_warned = 0;
+        for (int i = 0; i < Fan_N; i++)
+            airflow_reset(&fan_gate[i]);
+        airflow_alarm = 0;
+        fan_would_warned = 0;
+        fan_grace_until = now + (double)fan_grace_s;
         if (gate_flow_off)
             fflog(LOG_WARNING, "cool: coolant flow is not verified this "
                   "job (cool_flow_check_s = 0)");
@@ -944,6 +1006,76 @@ static void engine_tick(void)
                    : fire_ir_delta > 0 ? "armed" : "watch";
     pthread_mutex_unlock(&mu);
 
+    /* The airflow gates: evaluated while the run profile is applied (the
+     * fans are commanded to run duty), after the spin-up grace. The
+     * exhaust and the intakes report a period in ns at 2 pulses/rev, the
+     * air assist in us at 8, the purge fan a current. The floors are the
+     * effective ones (a header can raise a tach floor for a job). A trip
+     * is a fault for the rest of the session: hold, fire blocked, no
+     * resume; the fans stay at run duty, which is what a stalled
+     * extraction fan needs around it. An off gate (floor 0) still
+     * measures and names the first reading that would have tripped the
+     * shipped default. */
+    {
+        fan_reading[Fan_Exhaust] = airflow_rpm(rd_long("thermal/tach_exhaust"), 1e9, 2);
+        fan_reading[Fan_Intake1] = airflow_rpm(rd_long("thermal/tach_intake_1"), 1e9, 2);
+        fan_reading[Fan_Intake2] = airflow_rpm(rd_long("thermal/tach_intake_2"), 1e9, 2);
+        fan_reading[Fan_AirAssist] = airflow_rpm(rd_long("head/air_assist_tach"), 1e6, 8);
+        long purge = rd_long("head/purge_air_current");
+        fan_reading[Fan_Purge] = purge > 0 ? (double)purge : 0.0;
+        fan_floor[Fan_Exhaust] = eff_lim.exhaust_min_rpm;
+        fan_floor[Fan_Intake1] = eff_lim.intake_min_rpm;
+        fan_floor[Fan_Intake2] = eff_lim.intake_min_rpm;
+        fan_floor[Fan_AirAssist] = eff_lim.air_assist_min_rpm;
+        fan_floor[Fan_Purge] = purge_min_current;
+        static const double fan_default[Fan_N] = {
+            TACH_EXHAUST_MIN_RPM, TACH_INTAKE_MIN_RPM, TACH_INTAKE_MIN_RPM,
+            TACH_AIR_ASSIST_MIN_RPM, PURGE_MIN_CURRENT };
+        int gating = cool_state == Cool_Run;
+        int in_grace = now < fan_grace_until;
+        char fg[sizeof(pub_fan_gates)];
+        size_t off = 0;
+        off += (size_t)snprintf(fg + off, sizeof(fg) - off, "{");
+        for (int i = 0; i < Fan_N; i++) {
+            airflow_state_t st;
+            if (gating) {
+                st = airflow_tick(&fan_gate[i], fan_reading[i], fan_floor[i], in_grace);
+                if (st == Air_Tripped && !airflow_alarm) {
+                    airflow_alarm = 1;
+                    char msg[128];
+                    snprintf(msg, sizeof(msg),
+                             "AIRFLOW: %s %.0f under the %.0f floor for %d s - "
+                             "hold, no resume this job",
+                             fan_name[i], fan_reading[i], fan_floor[i],
+                             AIRFLOW_DEBOUNCE_TICKS);
+                    warn(msg);
+                }
+                if (st == Air_Off && !in_grace && !fan_would_warned &&
+                    fan_reading[i] < fan_default[i]) {
+                    fan_would_warned = 1;
+                    fflog(LOG_WARNING, "cool: gate %s is OFF and would have "
+                          "tripped at the default %.0f (reading %.0f)",
+                          fan_name[i], fan_default[i], fan_reading[i]);
+                }
+            } else {
+                st = fan_gate[i].tripped ? Air_Tripped
+                   : fan_floor[i] <= 0.0 ? Air_Off : Air_Ok;
+            }
+            off += (size_t)snprintf(fg + off, sizeof(fg) - off,
+                "%s\"%s\":{\"reading\":%.0f,\"floor\":%.0f,\"state\":\"%s\"}",
+                i ? "," : "", fan_name[i], fan_reading[i], fan_floor[i],
+                gating ? airflow_state_name(st)
+                       : st == Air_Tripped ? "TRIPPED"
+                       : st == Air_Off ? "off" : "idle");
+            if (off >= sizeof(fg) - 1)
+                break;
+        }
+        snprintf(fg + (off < sizeof(fg) - 1 ? off : sizeof(fg) - 2), 2, "}");
+        pthread_mutex_lock(&mu);
+        snprintf(pub_fan_gates, sizeof(pub_fan_gates), "%s", fg);
+        pthread_mutex_unlock(&mu);
+    }
+
     float down = 0, up = 0;
     int have_down = read_temp("pic/water_temp_1", &down);
     int have_up = read_temp("pic/water_temp_2", &up);
@@ -1161,12 +1293,13 @@ static void engine_tick(void)
      * laser. fire_ok additionally requires a live report: an armed
      * window the engine cannot see must not fire. */
     const char *verdict = fire_alarm ? "FIRE"
+                        : airflow_alarm ? "AIRFLOW"
                         : over_temp_gate ? "OVERTEMP"
                         : flow_verdict == Flow_Fault ? "FAULT"
                         : flow_verdict == Flow_Suspect ? "SUSPECT" : "OK";
-    int hold = fire_alarm || over_temp_gate
+    int hold = fire_alarm || airflow_alarm || over_temp_gate
              || (armed && flow_verdict != Flow_Normal);
-    int fire_ok = fresh && !fire_alarm && !over_temp_gate
+    int fire_ok = fresh && !fire_alarm && !airflow_alarm && !over_temp_gate
                 && flow_verdict != Flow_Fault;
 
     pthread_mutex_lock(&mu);
@@ -1299,11 +1432,11 @@ int cool_status_json(char *buf, size_t len)
         "{\"phase\":\"%s\",\"verdict\":\"%s\",\"fire_ok\":%s,"
         "\"hold\":%s,\"reason\":\"%s\",\"down_c\":%.2f,\"up_c\":%.2f,"
         "\"report_age_s\":%.1f,\"armed\":%s,\"fire_watch\":\"%s\","
-        "\"gates_off\":%s,\"limits\":%s}",
+        "\"gates_off\":%s,\"limits\":%s,\"fan_gates\":%s}",
         pub_phase, pub_verdict, pub_fire_ok ? "true" : "false",
         pub_hold ? "true" : "false", pub_reason, pub_down, pub_up,
         age, rep_armed ? "true" : "false", pub_fire_watch, pub_gates_off,
-        pub_limits);
+        pub_limits, pub_fan_gates);
     pthread_mutex_unlock(&mu);
     return 0;
 }

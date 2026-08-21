@@ -21,6 +21,7 @@ add_custom_command(
 
 add_executable(forgectrl
   src/main.c
+  src/airflow.c
   src/auth.c
   src/cam.c
   src/camhealth.c
@@ -86,6 +87,13 @@ target_compile_options(camhealth_test PRIVATE -Wall -Wextra)
 add_executable(cool_gate_test tests/cool_gate_test.c src/gates.c)
 target_compile_options(cool_gate_test PRIVATE -Wall -Wextra)
 target_link_libraries(cool_gate_test m)
+
+# Host unit test for the per-fan airflow gate: grace, the three-tick
+# debounce, the latch, off by value, and the tach conversions. CI runs
+# it after the build.
+add_executable(airflow_test tests/airflow_test.c src/airflow.c)
+target_compile_options(airflow_test PRIVATE -Wall -Wextra)
+target_link_libraries(airflow_test m)
 
 # Emitter half of the host end-to-end logging check (tests/fflog_e2e.sh
 # drives it against a private rsyslogd; manual, not CI).

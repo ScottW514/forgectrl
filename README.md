@@ -28,7 +28,8 @@ forgectrl owns everything around them:
   flow-check heater for both modes: coolant-flow verification, over-temp
   hold/resume policy, and per-job fan profiles, fed by controller
   job-state reports (`POST /cool/state`) and publishing a verdict file
-  the controllers enforce in-process. Every gate is a plain setting
+  the controllers enforce in-process, plus an airflow floor on every fan
+  (tachometer or current) while the run profile is applied. Every gate is a plain setting
   with a wide range whose far end turns it off by value; the panel
   warns outside the recommended band and while any gate is off.
 - The **web control panel**, **camera service**, **telemetry**,
@@ -86,7 +87,7 @@ restarts.
 | `GET /mode` | Supervisor state: mode, controller (`running`/`stopped`/`standby`/`motion-fault`), pid, motion verdict |
 | `POST /mode?controller=grbl\|cloud` | Live idle-gated mode switch; also the retry lever after a motion fault |
 | `POST /cool/state` | Controller job-state report (mode, armed, per-job run fan duties and limits), level-triggered ~1 Hz |
-| `GET /cool/status` | Cooling-engine state: phase, verdict, temps, report age, `gates_off`, the effective `limits` |
+| `GET /cool/status` | Cooling-engine state: phase, verdict, temps, report age, `gates_off`, the effective `limits`, `fan_gates` |
 
 Position comes from the kernel step counters anchored at the last
 completed homing (`/run/grblhal.homed`, written by the controller) —

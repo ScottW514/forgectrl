@@ -57,7 +57,12 @@ var CK = [
   'cool_temp_max',
   'cool_temp_resume',
   'cool_cooldown_s',
-  'cool_cooldown_max_s'
+  'cool_cooldown_max_s',
+  'cool_tach_exhaust_min_rpm',
+  'cool_tach_intake_min_rpm',
+  'cool_tach_air_assist_min_rpm',
+  'cool_purge_min_current',
+  'cool_fan_grace_s'
 ];
 function $(i) {
   return document.getElementById(i);
@@ -128,11 +133,29 @@ var GN = {
   cool_temp_max: 'Coolant ceiling',
   cool_temp_resume: 'Resume gate',
   cool_flow_check_s: 'Flow check window',
-  cool_flow_rise: 'Flow fault rise'
+  cool_flow_rise: 'Flow fault rise',
+  cool_tach_exhaust_min_rpm: 'Exhaust floor',
+  cool_tach_intake_min_rpm: 'Intake floor',
+  cool_tach_air_assist_min_rpm: 'Air assist floor',
+  cool_purge_min_current: 'Purge current floor',
+  cool_fan_grace_s: 'Spin-up grace'
 };
-var GG = { coolant_max: 'the coolant ceiling', flow: 'coolant flow verification' };
+var GG = {
+  coolant_max: 'the coolant ceiling',
+  flow: 'coolant flow verification',
+  exhaust: 'the exhaust fan',
+  intake: 'the intake fans',
+  air_assist: 'the air assist',
+  purge: 'the purge fan'
+};
+var GU = {
+  cool_tach_exhaust_min_rpm: 'rpm',
+  cool_tach_intake_min_rpm: 'rpm',
+  cool_tach_air_assist_min_rpm: 'rpm',
+  cool_purge_min_current: 'raw'
+};
 function gUnit(k) {
-  return FT[k] ? uT() : 's';
+  return FT[k] ? uT() : GU[k] || 's';
 }
 function gDsp(k, v) {
   return FT[k] ? fnum(FT[k] === 'ta' ? dTa(v) : dTd(v), 1) : String(v);
@@ -204,6 +227,10 @@ function renderGatesBanner() {
     '. The laser will fire without this protection' +
     (off.indexOf('flow') >= 0 || off.indexOf('coolant_max') >= 0
       ? ', so a stopped pump or an overheating loop will not hold a job'
+      : '') +
+    (off.indexOf('exhaust') >= 0 || off.indexOf('intake') >= 0 ||
+    off.indexOf('air_assist') >= 0 || off.indexOf('purge') >= 0
+      ? ', so a stalled fan will not hold a job'
       : '') +
     ". Set the value back inside its band on the <a href='#machine'>Machine tab</a>.";
   b.style.display = '';

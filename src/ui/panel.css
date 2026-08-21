@@ -111,6 +111,14 @@ section.on {
   text-transform: uppercase;
   letter-spacing: 0.9px;
 }
+.card h3 {
+  font-size: 12px;
+  margin: 14px 0 6px;
+  color: var(--dim);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+}
 .grid2 {
   display: grid;
   grid-template-columns: 1fr 1fr;

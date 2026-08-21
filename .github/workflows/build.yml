@@ -30,3 +30,5 @@ jobs:
         run: ./build/camhealth_test
       - name: Gate settings table
         run: ./build/cool_gate_test
+      - name: Airflow gate
+        run: ./build/airflow_test

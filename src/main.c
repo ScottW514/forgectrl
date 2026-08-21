@@ -396,6 +396,11 @@ static int valid_rise_c(const char *v)     { return valid_gate("cool_flow_rise",
 static int valid_check_s(const char *v)    { return valid_gate("cool_flow_check_s", v); }
 static int valid_temp_max(const char *v)   { return valid_gate("cool_temp_max", v); }
 static int valid_temp_resume(const char *v){ return valid_gate("cool_temp_resume", v); }
+static int valid_exhaust_rpm(const char *v) { return valid_gate("cool_tach_exhaust_min_rpm", v); }
+static int valid_intake_rpm(const char *v)  { return valid_gate("cool_tach_intake_min_rpm", v); }
+static int valid_air_rpm(const char *v)     { return valid_gate("cool_tach_air_assist_min_rpm", v); }
+static int valid_purge_cur(const char *v)   { return valid_gate("cool_purge_min_current", v); }
+static int valid_grace_s(const char *v)     { return valid_gate("cool_fan_grace_s", v); }
 static int valid_heater_pct(const char *v) { return valid_range(v, 0, 100); }
 static int valid_recheck_s(const char *v)  { return valid_range(v, 0, 3600); }
 static int valid_confirm_s(const char *v)  { return valid_range(v, 60, 3600); }
@@ -461,6 +466,11 @@ static const struct {
     { "cool_temp_resume",       valid_temp_resume, 0 },
     { "cool_cooldown_s",        valid_cool_s,      0 },
     { "cool_cooldown_max_s",    valid_cool_s,      0 },
+    { "cool_tach_exhaust_min_rpm",    valid_exhaust_rpm, 0 },
+    { "cool_tach_intake_min_rpm",     valid_intake_rpm,  0 },
+    { "cool_tach_air_assist_min_rpm", valid_air_rpm,     0 },
+    { "cool_purge_min_current",       valid_purge_cur,   0 },
+    { "cool_fan_grace_s",             valid_grace_s,     0 },
     { "laser_button_timeout_s", valid_button_s,    0 },
     { "laser_disarm_s",         valid_disarm_s,    0 },
     { "rail_settle_s",          valid_settle_s,    0 },
@@ -703,7 +713,7 @@ static int reply_settings(struct _u_response *res)
      * its warnings from, and the record of any gate that is off by
      * value. The engine reports the same from its resolved tunables in
      * /cool/status and /status. */
-    char gates[1024];
+    char gates[2048];
     if (gates_json(gates, sizeof(gates), setting_gate_value, NULL) > 0)
         append(body, sizeof(body), &off, "\"gates\":%s,", gates);
     append(body, sizeof(body), &off,

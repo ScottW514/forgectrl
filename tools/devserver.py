@@ -328,7 +328,10 @@ class Mock:
             'cool_flow_check_s': '', 'cool_recheck_s': '',
             'cool_confirm_max_s': '', 'cool_temp_max': '',
             'cool_temp_resume': '', 'cool_cooldown_s': '',
-            'cool_cooldown_max_s': '', 'laser_button_timeout_s': '',
+            'cool_cooldown_max_s': '',
+            'cool_tach_exhaust_min_rpm': '', 'cool_tach_intake_min_rpm': '',
+            'cool_tach_air_assist_min_rpm': '', 'cool_purge_min_current': '',
+            'cool_fan_grace_s': '', 'laser_button_timeout_s': '',
             'laser_disarm_s': '', 'rail_settle_s': '', 'lid_lamp_idle': '',
             'cloud_pause_backtrack_ticks': '', 'cloud_resume_lead_ticks': '', 'lid_policy': '',
             'syslog_server': '', 'syslog_port': '', 'syslog_proto': '',
@@ -468,6 +471,11 @@ class Mock:
         ('cool_temp_resume', None, 31.0, 5.0, 59.0, 20.0, 36.0, 'none'),
         ('cool_flow_check_s', 'flow', 50.0, 0.0, 300.0, 30.0, 120.0, 'low'),
         ('cool_flow_rise', None, 14.4, 1.0, 40.0, 8.0, 16.0, 'none'),
+        ('cool_tach_exhaust_min_rpm', 'exhaust', 3700.0, 0.0, 20000.0, 2500.0, 5000.0, 'low'),
+        ('cool_tach_intake_min_rpm', 'intake', 1800.0, 0.0, 20000.0, 1200.0, 2500.0, 'low'),
+        ('cool_tach_air_assist_min_rpm', 'air_assist', 6000.0, 0.0, 30000.0, 4000.0, 8000.0, 'low'),
+        ('cool_purge_min_current', 'purge', 300.0, 0.0, 1023.0, 150.0, 500.0, 'low'),
+        ('cool_fan_grace_s', None, 15.0, 0.0, 120.0, 5.0, 30.0, 'none'),
     )
 
     def settings_reply(self):

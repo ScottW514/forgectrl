@@ -193,6 +193,29 @@
               ><input id="cool_cooldown_max_s" inputmode="numeric" placeholder="300" />
             </div>
           </div>
+          <h3>Airflow gates</h3>
+          <div class="grid2">
+            <div class="row">
+              <label for="cool_tach_exhaust_min_rpm">Exhaust floor<span class="u">rpm</span></label
+              ><input id="cool_tach_exhaust_min_rpm" inputmode="numeric" placeholder="3700" />
+            </div>
+            <div class="row">
+              <label for="cool_tach_intake_min_rpm">Intake floor<span class="u">rpm</span></label
+              ><input id="cool_tach_intake_min_rpm" inputmode="numeric" placeholder="1800" />
+            </div>
+            <div class="row">
+              <label for="cool_tach_air_assist_min_rpm">Air assist floor<span class="u">rpm</span></label
+              ><input id="cool_tach_air_assist_min_rpm" inputmode="numeric" placeholder="6000" />
+            </div>
+            <div class="row">
+              <label for="cool_purge_min_current">Purge current floor<span class="u">raw</span></label
+              ><input id="cool_purge_min_current" inputmode="numeric" placeholder="300" />
+            </div>
+            <div class="row">
+              <label for="cool_fan_grace_s">Spin-up grace<span class="u">s</span></label
+              ><input id="cool_fan_grace_s" inputmode="numeric" placeholder="15" />
+            </div>
+          </div>
           <div id="gnotes" class="gnotes"></div>
           <p class="hint">
             Coolant-loop protection: each running job periodically verifies flow by running the
@@ -201,11 +224,14 @@
             measured on this machine's factory coolant; changes apply from the next job. These
             bands are per-machine: after a pump or coolant change, run
             <a href="#diag">Diagnostics &rarr; Cooling system</a> to verify or re-measure them.
-            The ceiling, the resume gate, the check window and the fault rise accept a wide
-            range on purpose: each has a recommended band, a value outside it is flagged above,
-            and the far end of the range (a ceiling at its maximum, a check window of 0) turns
-            that gate off. A machine with a gate off says so on the Status tab and in its log
-            at every job start.
+            While a job runs, each fan is held to its floor (the exhaust, the intakes and the air
+            assist by tachometer, the purge fan by its current) once the spin-up grace has passed;
+            three seconds under a floor is a fault that holds the job with no resume. The ceiling,
+            the resume gate, the check window, the fault rise and the floors accept a wide range
+            on purpose: each has a recommended band, a value outside it is flagged above, and the
+            far end of the range (a ceiling at its maximum, a check window or a floor of 0) turns
+            that gate off. A machine with a gate off says so on the Status tab and in its log at
+            every job start.
           </p>
           <div class="btns">
             <button class="pri" onclick="saveCooling()">Save</button
