@@ -1042,7 +1042,7 @@ static void engine_tick(void)
                 st = airflow_tick(&fan_gate[i], fan_reading[i], fan_floor[i], in_grace);
                 if (st == Air_Tripped && !airflow_alarm) {
                     airflow_alarm = 1;
-                    char msg[128];
+                    char msg[96];
                     snprintf(msg, sizeof(msg),
                              "AIRFLOW: %s %.0f under the %.0f floor for %d s - "
                              "hold, no resume this job",
