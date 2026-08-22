@@ -459,6 +459,11 @@ function renderCooling() {
   g += txt('TEC', M.coolant.tec ? 'on' : 'off', 'b-dim');
   if (M.temps) {
     g += txt('Chassis', M.temps.chassis_c == null ? '\u2014' : degc(M.temps.chassis_c));
+    g += txt('SoC die', M.temps.soc_c == null ? '\u2014' : degc(M.temps.soc_c),
+             M.temps.soc_c != null && M.temps.soc_c >= 80 ? 'b-warn' : '');
+    var thr = M.temps.soc_throttle;
+    g += txt('SoC throttle', thr == null ? '\u2014' : (thr > 0 ? 'state ' + thr : 'none'),
+             thr > 0 ? 'b-warn' : 'b-dim');
     g += txt('Supply (raw)', M.temps.supply_raw == null ? '\u2014' : String(M.temps.supply_raw), 'b-dim');
   }
   if (M.fans) {

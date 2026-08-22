@@ -307,6 +307,73 @@ static const char *lm75_input(void)
     return path[0] ? path : NULL;
 }
 
+/* A /sys/class/thermal node by what it says it is, never by number:
+ * the zone whose type is the i.MX6 on-die monitor, the cooling device
+ * whose type is the CPU frequency scaler. Each resolved once. */
+static const char *thermal_node(const char *kind, const char *type_prefix,
+                                const char *leaf, char *path, size_t plen,
+                                int *resolved)
+{
+    if (*resolved)
+        return path[0] ? path : NULL;
+    *resolved = 1;
+    DIR *d = opendir("/sys/class/thermal");
+    if (!d)
+        return NULL;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, kind, strlen(kind)) != 0)
+            continue;
+        char np[320], type[48] = "";
+        snprintf(np, sizeof(np), "/sys/class/thermal/%s/type", e->d_name);
+        FILE *f = fopen(np, "r");
+        if (!f)
+            continue;
+        if (!fgets(type, sizeof(type), f))
+            type[0] = '\0';
+        fclose(f);
+        if (strncmp(type, type_prefix, strlen(type_prefix)) == 0) {
+            snprintf(path, plen, "/sys/class/thermal/%s/%s", e->d_name, leaf);
+            break;
+        }
+    }
+    closedir(d);
+    return path[0] ? path : NULL;
+}
+
+static long read_long_file(const char *p, long fallback)
+{
+    if (!p)
+        return fallback;
+    FILE *f = fopen(p, "r");
+    if (!f)
+        return fallback;
+    long v = fallback;
+    if (fscanf(f, "%ld", &v) != 1)
+        v = fallback;
+    fclose(f);
+    return v;
+}
+
+double soc_degc(void)
+{
+    static char path[320];
+    static int resolved = 0;
+    const char *p = thermal_node("thermal_zone", "imx_thermal_zone", "temp",
+                                 path, sizeof(path), &resolved);
+    long milli = read_long_file(p, -1);
+    return milli >= 0 ? milli / 1000.0 : -273.15;
+}
+
+long soc_throttle_state(void)
+{
+    static char path[320];
+    static int resolved = 0;
+    const char *p = thermal_node("cooling_device", "cpufreq-cpu", "cur_state",
+                                 path, sizeof(path), &resolved);
+    return read_long_file(p, -1);
+}
+
 double chassis_degc(void)
 {
     const char *p = lm75_input();
@@ -399,7 +466,20 @@ int machine_status_json(char *buf, size_t len, const char *extra)
         append(buf, len, &off, "null");
     append(buf, len, &off, ",\"supply_raw\":");
     if (supply >= 0)
-        append(buf, len, &off, "%ld},", supply);
+        append(buf, len, &off, "%ld", supply);
+    else
+        append(buf, len, &off, "null");
+    /* The SoC die and whether the kernel is throttling the CPU for it. */
+    double soc = soc_degc();
+    long thr = soc_throttle_state();
+    append(buf, len, &off, ",\"soc_c\":");
+    if (soc > -100)
+        append(buf, len, &off, "%.1f", soc);
+    else
+        append(buf, len, &off, "null");
+    append(buf, len, &off, ",\"soc_throttle\":");
+    if (thr >= 0)
+        append(buf, len, &off, "%ld},", thr);
     else
         append(buf, len, &off, "null},");
     char gf_latest[32], gf_tested[32];

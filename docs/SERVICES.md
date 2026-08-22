@@ -180,9 +180,10 @@ Laser-safety enforcement is the hardware AND-gate; everything below is
 latency-tolerant consumer: the control panel, the cloud client's reporting, and
 anything external. It carries motion state, position (homing-anchored kernel
 counters), fan RPM, coolant temperatures, pump/TEC state, the board
-temperatures (`temps`: `chassis_c` from the LM75, `supply_raw` from
-`pic/pwr_temp` as the count, each `null` when the sensor is absent; watched,
-not gated), and the switch map above.
+temperatures (`temps`: `chassis_c` from the LM75, `soc_c` from the i.MX6
+on-die monitor, `supply_raw` from `pic/pwr_temp` as the count, and
+`soc_throttle`, the kernel's CPU-frequency cooling state, 0 at full speed;
+each `null` when absent; watched, not gated), and the switch map above.
 
 **Never poll the Grbl TCP socket for status.** A connection there displaces the
 sender's session (LightBurn). Controller-side facts reach forgectrl only through
@@ -288,10 +289,16 @@ The engine also runs the **physical-evidence witnesses** at its 1 Hz tick:
   `reading`, `floor`, `state` of `grace | ok | under | TRIPPED | off | unjudged | idle`).
 - **Telemetry**: `cnc/faults` transitions to nonzero during a run window are
   warned; `pic/hv_current` (the only live HV telemetry) is ranged per job in
-  the same log line. The chassis and supply temperatures are ranged over
-  every run session and named once at its end (`cool: temps this job:
-  chassis 24.1..31.8 C, supply raw 401..455`); no gate stands behind either
-  until that record says where one belongs. `/status` exposes the sampled laser evidence, faults, HV,
+  the same log line. The chassis, SoC die and supply temperatures are
+  ranged over every run session and named once at its end (`cool: temps
+  this job: chassis 24.1..31.8 C, soc 42.8..61.0 C, supply raw 401..455`,
+  with `CPU THROTTLED for N s` appended when the kernel's thermal governor
+  throttled the CPU during the job); no gate stands behind any of them
+  until that record says where one belongs. The SoC guards itself: the
+  i.MX6 thermal zone throttles the CPU (and the GPU) at its passive trip
+  and powers the board off at its critical one; the engine names a
+  throttle when it starts and when it ends (`SoC throttled: CPU cooling
+  state N (die T C)`). `/status` exposes the sampled laser evidence, faults, HV,
   and lid IR values; the panel's latch row is labeled *commanded*, with the
   sensed emission row beside it.
 
@@ -737,6 +744,16 @@ kernel-module-glowforge `UAPI.md`, and a live-board spot-check:
 - Sensor conversions verified against live raws: coolant beta-3380 output
   matches the `/status` values; `tec_temp` railed at 1023 as noted; tach
   periods produce plausible RPM in all three unit/pole variants.
+- The gates, on the bench: the coolant ceiling trips and turns off by value
+  (`cooling.gate-off`), every fan floor trips on an unmeetable floor and on
+  an unplugged exhaust fan (`cooling.fan-gate-trips`, the drill), a hunt
+  with its fans off is measured and not judged (`cloud.mode-switch`), the
+  critical line faults over the ceiling's pause on a genuinely rising loop
+  (`cooling.critical-tier`, the drill), and the header's limits reach the
+  engine on a live print (`cloud.pause-resume`). `pwr_temp` stays a raw
+  count by decision: its heatsink cannot be reached with a thermometer
+  while the machine runs, so the conversion is not verified here, and it
+  is never published as degrees.
 
 The channels and ownership rules above are drilled on hardware, operator
 present:

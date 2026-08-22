@@ -42,4 +42,11 @@ double coolant_degc(long raw);
 double chassis_degc(void);
 long supply_temp_raw(void);
 
+/* The SoC die (the i.MX6 on-chip monitor, its thermal zone resolved by
+ * type; -273.15 when absent) and the kernel's CPU-frequency cooling
+ * state (0 = full speed, higher = throttled by the thermal governor;
+ * -1 when there is no such cooling device). */
+double soc_degc(void);
+long soc_throttle_state(void);
+
 #endif

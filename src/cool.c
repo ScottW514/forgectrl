@@ -313,8 +313,11 @@ static int critical_alarm = 0;      /* latched coolant fault, this run session *
 /* The board temperatures, watched over the run session and named once
  * at its end; no gate behind them until the data says where one goes. */
 static double job_chassis_lo, job_chassis_hi;
+static double job_soc_lo, job_soc_hi;
 static long job_supply_lo, job_supply_hi;
 static int job_temps_seen = 0;
+static int job_throttled = 0;       /* ticks the CPU was throttled this job */
+static long throttle_state = 0;     /* the kernel's CPU cooling state last seen */
 static int critical_would_warned = 0;   /* off gate, would have tripped: once */
 static int forced_cool = 0;         /* over-temp overrode the phase fans */
 static int flood_on = 0;            /* effective run window */
@@ -819,6 +822,7 @@ static void flood_apply(int on, double now)
         critical_alarm = 0;
         critical_would_warned = 0;
         job_temps_seen = 0;
+        job_throttled = 0;
         fan_grace_until = now + (double)fan_grace_s;
         if (gate_flow_off)
             fflog(LOG_WARNING, "cool: coolant flow is not verified this "
@@ -881,10 +885,18 @@ static void flood_apply(int on, double now)
             heater_set_pct(0);
         }
         if (job_temps_seen) {
-            char msg[112];
+            char msg[160];
             snprintf(msg, sizeof(msg),
-                     "temps this job: chassis %.1f..%.1f C, supply raw %ld..%ld",
-                     job_chassis_lo, job_chassis_hi, job_supply_lo, job_supply_hi);
+                     "temps this job: chassis %.1f..%.1f C, soc %.1f..%.1f C, "
+                     "supply raw %ld..%ld%s",
+                     job_chassis_lo, job_chassis_hi, job_soc_lo, job_soc_hi,
+                     job_supply_lo, job_supply_hi,
+                     job_throttled ? ", CPU THROTTLED" : "");
+            if (job_throttled) {
+                char more[48];
+                snprintf(more, sizeof(more), " for %d s", job_throttled);
+                strncat(msg, more, sizeof(msg) - strlen(msg) - 1);
+            }
             info(msg);
         }
         /* The commissioning dataset: one line per job of what the fire
@@ -1229,18 +1241,49 @@ static void engine_tick(void)
         }
     }
 
+    /* The SoC's own thermal governor: it throttles the CPU at its
+     * passive trip (85 C on this part) and powers the board off at its
+     * critical one (90 C), with no help from here. A throttle is named
+     * when it starts and when it ends, since a slower CPU reaches the
+     * engine, the camera and the protocol thread before it reaches the
+     * step stream (which has the ring in hand). */
+    {
+        long thr = soc_throttle_state();
+        if (thr > 0 && throttle_state <= 0) {
+            char msg[96];
+            snprintf(msg, sizeof(msg),
+                     "SoC throttled: CPU cooling state %ld (die %.1f C)",
+                     thr, soc_degc());
+            fflog(LOG_WARNING, "cool: %s", msg);
+        } else if (thr == 0 && throttle_state > 0) {
+            char msg[64];
+            snprintf(msg, sizeof(msg),
+                     "SoC throttle released (die %.1f C)", soc_degc());
+            info(msg);
+        }
+        throttle_state = thr;
+        if (cool_state == Cool_Run && thr > 0)
+            job_throttled++;
+    }
+
     /* The board temperatures over the session, for the run-end line. */
     if (cool_state == Cool_Run) {
         double ch = chassis_degc();
+        double soc = soc_degc();
         long sp = supply_temp_raw();
         if (ch > -100 && sp >= 0) {
+            if (soc <= -100)
+                soc = job_temps_seen ? job_soc_hi : -273.15;
             if (!job_temps_seen) {
                 job_chassis_lo = job_chassis_hi = ch;
+                job_soc_lo = job_soc_hi = soc;
                 job_supply_lo = job_supply_hi = sp;
                 job_temps_seen = 1;
             } else {
                 if (ch < job_chassis_lo) job_chassis_lo = ch;
                 if (ch > job_chassis_hi) job_chassis_hi = ch;
+                if (soc < job_soc_lo) job_soc_lo = soc;
+                if (soc > job_soc_hi) job_soc_hi = soc;
                 if (sp < job_supply_lo) job_supply_lo = sp;
                 if (sp > job_supply_hi) job_supply_hi = sp;
             }
