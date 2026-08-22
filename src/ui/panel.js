@@ -457,6 +457,10 @@ function renderCooling() {
   g += txt('Coolant in', degc(M.coolant.up_c));
   g += txt('Pump', M.coolant.pump ? 'on' : 'off', M.coolant.pump ? 'b-ok' : 'b-warn');
   g += txt('TEC', M.coolant.tec ? 'on' : 'off', 'b-dim');
+  if (M.temps) {
+    g += txt('Chassis', M.temps.chassis_c == null ? '\u2014' : degc(M.temps.chassis_c));
+    g += txt('Supply (raw)', M.temps.supply_raw == null ? '\u2014' : String(M.temps.supply_raw), 'b-dim');
+  }
   if (M.fans) {
     g += txt('Air assist', rpm(M.fans.air_assist));
     g += txt('Exhaust', rpm(M.fans.exhaust));

@@ -310,6 +310,11 @@ static uint32_t flow_episodes = 0;  /* cleared suspicions this job */
 static double phase_until;          /* smoke end / thermal timeout */
 static int over_temp_gate = 0;      /* hysteresis: >max sets, <=resume clears */
 static int critical_alarm = 0;      /* latched coolant fault, this run session */
+/* The board temperatures, watched over the run session and named once
+ * at its end; no gate behind them until the data says where one goes. */
+static double job_chassis_lo, job_chassis_hi;
+static long job_supply_lo, job_supply_hi;
+static int job_temps_seen = 0;
 static int critical_would_warned = 0;   /* off gate, would have tripped: once */
 static int forced_cool = 0;         /* over-temp overrode the phase fans */
 static int flood_on = 0;            /* effective run window */
@@ -503,6 +508,27 @@ static void warn(const char *msg)
     snprintf(pub_reason, sizeof(pub_reason), "%s", msg);
     pthread_mutex_unlock(&mu);
     fflog(LOG_WARNING, "cool: %s", msg);
+}
+
+static float last_up_c = 0;         /* the upstream reading the hold was taken on */
+
+/* The ceiling's hold, named: logged on the rising edge, and published
+ * again (no new log line, it is the same hold) when a critical fault
+ * that had overwritten the reason clears. */
+static void overtemp_warn(int log)
+{
+    char msg[96];
+    snprintf(msg, sizeof(msg),
+             "coolant %.1f C over %.0f C limit%s - hold until %.0f C",
+             last_up_c, eff_temp_max_c, eff_from_header ? " (the job's)" : "",
+             eff_temp_resume_c);
+    if (log) {
+        warn(msg);
+        return;
+    }
+    pthread_mutex_lock(&mu);
+    snprintf(pub_reason, sizeof(pub_reason), "%s", msg);
+    pthread_mutex_unlock(&mu);
 }
 
 static void info(const char *msg)
@@ -792,6 +818,7 @@ static void flood_apply(int on, double now)
         fan_would_warned = 0;
         critical_alarm = 0;
         critical_would_warned = 0;
+        job_temps_seen = 0;
         fan_grace_until = now + (double)fan_grace_s;
         if (gate_flow_off)
             fflog(LOG_WARNING, "cool: coolant flow is not verified this "
@@ -833,14 +860,32 @@ static void flood_apply(int on, double now)
         /* The coolant critical fault likewise: the ceiling's pause tier
          * keeps holding while the loop is hot, and the next session
          * judges the critical line afresh. */
-        if (critical_alarm)
+        if (critical_alarm) {
             info("coolant critical fault cleared with the run session; "
                  "the ceiling holds until the loop cools");
+            critical_alarm = 0;
+            /* The reason follows the verdict: the ceiling's hold, if it
+             * stands, names itself again; otherwise nothing does. */
+            if (over_temp_gate)
+                overtemp_warn(0);
+            else {
+                pthread_mutex_lock(&mu);
+                pub_reason[0] = '\0';
+                pthread_mutex_unlock(&mu);
+            }
+        }
         critical_alarm = 0;
         flow_check_pending = 0;
         if (flow_check_active) {    /* run ended before the verdict */
             flow_check_active = 0;
             heater_set_pct(0);
+        }
+        if (job_temps_seen) {
+            char msg[112];
+            snprintf(msg, sizeof(msg),
+                     "temps this job: chassis %.1f..%.1f C, supply raw %ld..%ld",
+                     job_chassis_lo, job_chassis_hi, job_supply_lo, job_supply_hi);
+            info(msg);
         }
         /* The commissioning dataset: one line per job of what the fire
          * and HV sensors saw. */
@@ -1166,12 +1211,8 @@ static void engine_tick(void)
         int was = over_temp_gate;
         over_temp_gate = up > (over_temp_gate ? eff_temp_resume_c : eff_temp_max_c);
         if (over_temp_gate && !was) {
-            char msg[96];
-            snprintf(msg, sizeof(msg),
-                     "coolant %.1f C over %.0f C limit%s - hold until %.0f C",
-                     up, eff_temp_max_c, eff_from_header ? " (the job's)" : "",
-                     eff_temp_resume_c);
-            warn(msg);
+            last_up_c = up;
+            overtemp_warn(1);
             if (cool_state != Cool_Run) {
                 fans_cool();
                 forced_cool = 1;
@@ -1184,6 +1225,24 @@ static void engine_tick(void)
             if (forced_cool) {
                 forced_cool = 0;
                 fans_apply_phase();
+            }
+        }
+    }
+
+    /* The board temperatures over the session, for the run-end line. */
+    if (cool_state == Cool_Run) {
+        double ch = chassis_degc();
+        long sp = supply_temp_raw();
+        if (ch > -100 && sp >= 0) {
+            if (!job_temps_seen) {
+                job_chassis_lo = job_chassis_hi = ch;
+                job_supply_lo = job_supply_hi = sp;
+                job_temps_seen = 1;
+            } else {
+                if (ch < job_chassis_lo) job_chassis_lo = ch;
+                if (ch > job_chassis_hi) job_chassis_hi = ch;
+                if (sp < job_supply_lo) job_supply_lo = sp;
+                if (sp > job_supply_hi) job_supply_hi = sp;
             }
         }
     }

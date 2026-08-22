@@ -35,4 +35,11 @@ int machine_lid_closed(void);
  * to -273.15. */
 double coolant_degc(long raw);
 
+/* The board temperatures, watched and not gated: the chassis LM75 in
+ * degrees C (hwmon, resolved by name; -273.15 when absent) and the
+ * power supply's sensor as the raw 10-bit count (-1 when absent; the
+ * conversion is unverified, so no degrees are published for it). */
+double chassis_degc(void);
+long supply_temp_raw(void);
+
 #endif

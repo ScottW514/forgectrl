@@ -179,8 +179,10 @@ Laser-safety enforcement is the hardware AND-gate; everything below is
 `GET /status` on forgectrl (port 8080) is the machine-state source for every
 latency-tolerant consumer: the control panel, the cloud client's reporting, and
 anything external. It carries motion state, position (homing-anchored kernel
-counters), fan RPM, coolant temperatures, pump/TEC state, and the switch map
-above.
+counters), fan RPM, coolant temperatures, pump/TEC state, the board
+temperatures (`temps`: `chassis_c` from the LM75, `supply_raw` from
+`pic/pwr_temp` as the count, each `null` when the sensor is absent; watched,
+not gated), and the switch map above.
 
 **Never poll the Grbl TCP socket for status.** A connection there displaces the
 sender's session (LightBurn). Controller-side facts reach forgectrl only through
@@ -286,7 +288,10 @@ The engine also runs the **physical-evidence witnesses** at its 1 Hz tick:
   `reading`, `floor`, `state` of `grace | ok | under | TRIPPED | off | unjudged | idle`).
 - **Telemetry**: `cnc/faults` transitions to nonzero during a run window are
   warned; `pic/hv_current` (the only live HV telemetry) is ranged per job in
-  the same log line. `/status` exposes the sampled laser evidence, faults, HV,
+  the same log line. The chassis and supply temperatures are ranged over
+  every run session and named once at its end (`cool: temps this job:
+  chassis 24.1..31.8 C, supply raw 401..455`); no gate stands behind either
+  until that record says where one belongs. `/status` exposes the sampled laser evidence, faults, HV,
   and lid IR values; the panel's latch row is labeled *commanded*, with the
   sensed emission row beside it.
 

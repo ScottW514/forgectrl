@@ -344,6 +344,7 @@ class Mock:
         self.mode = 'grbl'
         self.status = {
             'state': 'idle', 'homed': True, 'diag': False,
+            'temps': {'chassis_c': 29.0, 'supply_raw': 589},
             'pos': {'x': 12.34, 'y': -5.6, 'z': 0.0},
             'laser_locked': True,
             'laser': {'emission_samples': 0, 'pgood_samples': 0},

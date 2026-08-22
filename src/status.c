@@ -20,6 +20,7 @@
 #include "status.h"
 #include "diag.h"
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <linux/input.h>
 #include <math.h>
@@ -272,6 +273,59 @@ int machine_is_idle(void)
     return strcmp(st, "idle") == 0;
 }
 
+/* The chassis LM75 by hwmon name, never by index: hwmon numbering
+ * follows probe order and hwmon0 is the CPU die on current kernels. The
+ * node is resolved once; a board without the sensor resolves to none. */
+static const char *lm75_input(void)
+{
+    static char path[320];
+    static int resolved = 0;
+    if (resolved)
+        return path[0] ? path : NULL;
+    resolved = 1;
+    DIR *d = opendir("/sys/class/hwmon");
+    if (!d)
+        return NULL;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, "hwmon", 5) != 0)
+            continue;
+        char np[320], name[32] = "";
+        snprintf(np, sizeof(np), "/sys/class/hwmon/%s/name", e->d_name);
+        FILE *f = fopen(np, "r");
+        if (!f)
+            continue;
+        if (!fgets(name, sizeof(name), f))
+            name[0] = '\0';
+        fclose(f);
+        if (strncmp(name, "lm75", 4) == 0) {
+            snprintf(path, sizeof(path), "/sys/class/hwmon/%s/temp1_input", e->d_name);
+            break;
+        }
+    }
+    closedir(d);
+    return path[0] ? path : NULL;
+}
+
+double chassis_degc(void)
+{
+    const char *p = lm75_input();
+    if (!p)
+        return -273.15;
+    FILE *f = fopen(p, "r");
+    if (!f)
+        return -273.15;
+    long milli = 0;
+    int ok = fscanf(f, "%ld", &milli) == 1;
+    fclose(f);
+    return ok ? milli / 1000.0 : -273.15;
+}
+
+long supply_temp_raw(void)
+{
+    return rd_attr_long("pic/pwr_temp", -1);
+}
+
 int machine_status_json(char *buf, size_t len, const char *extra)
 {
     char state[24] = "";
@@ -334,6 +388,20 @@ int machine_status_json(char *buf, size_t len, const char *extra)
         coolant_degc(t1), coolant_degc(t2),
         rd_attr_long("thermal/water_pump_on", 0) ? "true" : "false",
         rd_attr_long("thermal/tec_on", 0) ? "true" : "false");
+    /* Watched, not gated: the chassis in degrees, the supply as the raw
+     * count its unverified conversion does not earn a unit for. */
+    double chassis = chassis_degc();
+    long supply = supply_temp_raw();
+    append(buf, len, &off, "\"temps\":{\"chassis_c\":");
+    if (chassis > -100)
+        append(buf, len, &off, "%.1f", chassis);
+    else
+        append(buf, len, &off, "null");
+    append(buf, len, &off, ",\"supply_raw\":");
+    if (supply >= 0)
+        append(buf, len, &off, "%ld},", supply);
+    else
+        append(buf, len, &off, "null},");
     char gf_latest[32], gf_tested[32];
     read_gf_latest(gf_latest, sizeof(gf_latest), gf_tested, sizeof(gf_tested));
     if (gf_latest[0] && gf_tested[0])
