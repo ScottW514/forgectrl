@@ -28,8 +28,10 @@
  *   cross-check.
  * cool_temp_critical_c: the critical line above the ceiling, a fault
  *   with no resume in the run session where the ceiling is a pause.
- *   Kept above the ceiling by the cross-check; 70 C is past anything
- *   the loop reaches, so a line there is the gate off.
+ *   Kept above the ceiling by the cross-check while the ceiling is a
+ *   gate (a ceiling at its off end leaves the line standing alone);
+ *   70 C is past anything the loop reaches, so a line there is the
+ *   gate off.
  * cool_flow_check_s: the flow interrogation window. Zero is no
  *   interrogation at all, the one off-by-value the engine has always
  *   had; the band is the window the characterization found useful.

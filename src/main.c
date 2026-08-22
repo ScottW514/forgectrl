@@ -825,8 +825,12 @@ static int cb_settings_post(const struct _u_request *req,
         return reply_error(res, 400,
             "cool_temp_resume must be below cool_temp_max");
     /* The critical line is the fail tier above the pause tier; at or
-     * below the ceiling it would fail a job the ceiling meant to pause. */
-    if (tcrit <= tmax)
+     * below the ceiling it would fail a job the ceiling meant to pause.
+     * A ceiling at its off end is no ceiling (every gate is off by value
+     * on its own), so the line is only held above a ceiling that gates. */
+    const gate_setting_t *ceil = gate_setting_find("cool_temp_max");
+    int ceiling_off = ceil && ceil->off_end > 0 && tmax >= ceil->hi;
+    if (!ceiling_off && tcrit <= tmax)
         return reply_error(res, 400,
             "cool_temp_critical_c must be above cool_temp_max");
 
