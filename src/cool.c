@@ -805,6 +805,17 @@ static void flood_apply(int on, double now)
     } else if (cool_state == Cool_Run) {
         cool_state = Cool_Smoke;
         phase_until = now + (double)smoke_s;
+        /* A fan fault is the session's: it ends with it, because the next
+         * session re-proves every fan after the grace before anything can
+         * fire. Left standing, the hold would cancel jogs at idle and the
+         * cloud client's print pre-check would refuse the print that
+         * re-proves the fan. */
+        if (airflow_alarm)
+            info("airflow fault cleared with the run session; the next "
+                 "session judges every fan afresh");
+        airflow_alarm = 0;
+        for (int i = 0; i < Fan_N; i++)
+            airflow_reset(&fan_gate[i]);
         flow_check_pending = 0;
         if (flow_check_active) {    /* run ended before the verdict */
             flow_check_active = 0;

@@ -9,8 +9,9 @@
  * to reach speed after the run profile is written, so nothing counts
  * during a grace window; a tach reading wanders, so a trip takes three
  * consecutive ticks under the floor and a good tick clears the count; a
- * trip is a fault, latched until the next run session, because a fan
- * that is not moving the air is not a condition a job resumes through.
+ * trip is a fault for the rest of the run session, because a fan that
+ * is not moving the air is not a condition a job resumes through; it
+ * ends with the session, and the next one judges every fan afresh.
  * A floor at or below zero is the gate turned off by value (gates.c):
  * nothing counts and nothing latches.
  *

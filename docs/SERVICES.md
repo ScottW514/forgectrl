@@ -278,9 +278,10 @@ The engine also runs the **physical-evidence witnesses** at its 1 Hz tick:
   consecutive 1 Hz ticks under the floor
   trip the gate and a reading at or above it clears the count. A trip is a
   fault for the rest of the run session: verdict `AIRFLOW`, `fire_ok=false`,
-  `hold=true`, no `resume_ok` until the next session, the fans held at run
-  duty, the reason naming the fan, the reading and the floor. Outside a run
-  the gates read `idle`. `/cool/status` carries `fan_gates` (per fan:
+  `hold=true`, no `resume_ok` in that session, the fans held at run duty,
+  the reason naming the fan, the reading and the floor; the fault ends with
+  the session (logged), and the next session judges every fan afresh.
+  Outside a run the gates read `idle`. `/cool/status` carries `fan_gates` (per fan:
   `reading`, `floor`, `state` of `grace | ok | under | TRIPPED | off | unjudged | idle`).
 - **Telemetry**: `cnc/faults` transitions to nonzero during a run window are
   warned; `pic/hv_current` (the only live HV telemetry) is ranged per job in
