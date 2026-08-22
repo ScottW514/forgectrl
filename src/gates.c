@@ -26,6 +26,10 @@
  *   its own (it follows the ceiling), so no off end; it is warned
  *   outside its band and kept below the ceiling by the settings
  *   cross-check.
+ * cool_temp_critical_c: the critical line above the ceiling, a fault
+ *   with no resume in the run session where the ceiling is a pause.
+ *   Kept above the ceiling by the cross-check; 70 C is past anything
+ *   the loop reaches, so a line there is the gate off.
  * cool_flow_check_s: the flow interrogation window. Zero is no
  *   interrogation at all, the one off-by-value the engine has always
  *   had; the band is the window the characterization found useful.
@@ -47,6 +51,7 @@
 static const gate_setting_t table[] = {
     { "cool_temp_max",              "coolant_max", 33.0,  5.0,    60.0, 25.0,  38.0, +1 },
     { "cool_temp_resume",           NULL,          31.0,  5.0,    59.0, 20.0,  36.0,  0 },
+    { "cool_temp_critical_c",       "coolant_critical", 38.0, 6.0, 70.0, 36.0, 45.0, +1 },
     { "cool_flow_check_s",          "flow",        50.0,  0.0,   300.0, 30.0, 120.0, -1 },
     { "cool_flow_rise",             NULL,          14.4,  1.0,    40.0,  8.0,  16.0,  0 },
     { "cool_tach_exhaust_min_rpm",  "exhaust",   6400.0,  0.0, 20000.0, 5800.0, 7000.0, -1 },

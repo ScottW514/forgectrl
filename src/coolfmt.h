@@ -35,9 +35,10 @@ _Static_assert(COOL_REASON_MAX + COOL_GATES_OFF_JSON_MAX + COOL_LIMITS_JSON_MAX 
                "the /cool/status fragments outgrew COOL_STATUS_JSON_MAX");
 
 /* The effective limits object. from_header names the source of the
- * coolant ceiling. Returns 0, or -1 with buf = "{}" when it did not fit. */
+ * coolant ceiling; critical_c is the local critical line (no header
+ * carries one). Returns 0, or -1 with buf = "{}" when it did not fit. */
 int coolfmt_limits(char *buf, size_t len, double max_c, double resume_c,
-                   int from_header, const cool_limits_t *eff);
+                   double critical_c, int from_header, const cool_limits_t *eff);
 
 /* One fan's gate row. */
 typedef struct {

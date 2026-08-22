@@ -18,14 +18,15 @@ static int fit(char *buf, size_t len, int n, const char *empty)
 }
 
 int coolfmt_limits(char *buf, size_t len, double max_c, double resume_c,
-                   int from_header, const cool_limits_t *eff)
+                   double critical_c, int from_header, const cool_limits_t *eff)
 {
     int n = snprintf(buf, len,
                      "{\"coolant_max_c\":%.1f,\"coolant_resume_c\":%.1f,"
+                     "\"coolant_critical_c\":%.1f,"
                      "\"coolant_source\":\"%s\",\"coolant_min_c\":%.1f,"
                      "\"exhaust_min_rpm\":%.0f,\"intake_min_rpm\":%.0f,"
                      "\"air_assist_min_rpm\":%.0f}",
-                     max_c, resume_c, from_header ? "header" : "local",
+                     max_c, resume_c, critical_c, from_header ? "header" : "local",
                      eff->coolant_min_c, eff->exhaust_min_rpm,
                      eff->intake_min_rpm, eff->air_assist_min_rpm);
     return fit(buf, len, n, "{}");

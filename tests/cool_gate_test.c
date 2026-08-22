@@ -45,7 +45,7 @@ int main(void)
     const gate_setting_t *t = gate_settings(&n);
 
     printf("table shape\n");
-    CHECK(n == 9, "nine gate settings");
+    CHECK(n == 10, "ten gate settings");
     for (size_t i = 0; i < n; i++) {
         char msg[128];
         snprintf(msg, sizeof(msg), "%s: lo <= band_lo <= def <= band_hi <= hi", t[i].key);
@@ -84,6 +84,13 @@ int main(void)
     CHECK(prg->gate && !strcmp(prg->gate, "purge") && prg->off_end < 0 && prg->hi == 1023.0,
           "the purge current floor is the purge gate, off at zero, capped at the ADC rail");
     CHECK(!grc->gate && grc->off_end == 0, "the grace window is not a gate of its own");
+    const gate_setting_t *crt = gate_setting_find("cool_temp_critical_c");
+    CHECK(crt && crt->gate && !strcmp(crt->gate, "coolant_critical") && crt->off_end > 0 && crt->hi == 70.0,
+          "the critical line is the coolant_critical gate, off at its top of 70 C");
+    CHECK(crt && crt->lo > tmax->lo && crt->hi > tmax->hi && crt->def > tmax->def,
+          "the critical line sits above the ceiling at its floor, its top and its default");
+    CHECK(crt && gate_state(crt, 70.0) == Gate_Off && gate_state(crt, 38.0) == Gate_Ok &&
+          gate_state(crt, 50.0) == Gate_Warn, "a critical line of 70 is off, 38 ok, 50 warned");
     CHECK(gate_state(exh, 0.0) == Gate_Off && gate_state(exh, 1.0) == Gate_Warn &&
           gate_state(exh, 6400.0) == Gate_Ok, "an exhaust floor of zero is off, of one is warned");
 
@@ -167,6 +174,9 @@ int main(void)
     const char *both_off[] = { "cool_temp_max", "60", "cool_flow_check_s", "0", NULL };
     r = gates_off_json(buf, sizeof(buf), value_from_table, (void *)both_off);
     CHECK(r == 2 && !strcmp(buf, "[\"coolant_max\",\"flow\"]"), "both off, in table order");
+    const char *critical_off[] = { "cool_temp_critical_c", "70", NULL };
+    r = gates_off_json(buf, sizeof(buf), value_from_table, (void *)critical_off);
+    CHECK(r == 1 && !strcmp(buf, "[\"coolant_critical\"]"), "critical line at 70: coolant_critical off");
     const char *fans_off[] = { "cool_tach_exhaust_min_rpm", "0", "cool_purge_min_current", "0",
                                "cool_fan_grace_s", "0", NULL };
     r = gates_off_json(buf, sizeof(buf), value_from_table, (void *)fans_off);

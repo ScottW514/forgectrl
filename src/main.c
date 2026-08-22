@@ -396,6 +396,7 @@ static int valid_rise_c(const char *v)     { return valid_gate("cool_flow_rise",
 static int valid_check_s(const char *v)    { return valid_gate("cool_flow_check_s", v); }
 static int valid_temp_max(const char *v)   { return valid_gate("cool_temp_max", v); }
 static int valid_temp_resume(const char *v){ return valid_gate("cool_temp_resume", v); }
+static int valid_temp_critical(const char *v){ return valid_gate("cool_temp_critical_c", v); }
 static int valid_exhaust_rpm(const char *v) { return valid_gate("cool_tach_exhaust_min_rpm", v); }
 static int valid_intake_rpm(const char *v)  { return valid_gate("cool_tach_intake_min_rpm", v); }
 static int valid_air_rpm(const char *v)     { return valid_gate("cool_tach_air_assist_min_rpm", v); }
@@ -464,6 +465,7 @@ static const struct {
     { "cool_confirm_max_s",     valid_confirm_s,   0 },
     { "cool_temp_max",          valid_temp_max,    0 },
     { "cool_temp_resume",       valid_temp_resume, 0 },
+    { "cool_temp_critical_c",   valid_temp_critical, 0 },
     { "cool_cooldown_s",        valid_cool_s,      0 },
     { "cool_cooldown_max_s",    valid_cool_s,      0 },
     { "cool_tach_exhaust_min_rpm",    valid_exhaust_rpm, 0 },
@@ -815,12 +817,18 @@ static int cb_settings_post(const struct _u_request *req,
      * machine can resume into an over-temperature it never leaves. The
      * per-key validators already cap each to a bounded range; this pins
      * their relationship across a multi-key POST. */
-    double tmax, tresume;
+    double tmax, tresume, tcrit;
     effective_temp(req, "cool_temp_max", 33.0, &tmax);
     effective_temp(req, "cool_temp_resume", 31.0, &tresume);
+    effective_temp(req, "cool_temp_critical_c", 38.0, &tcrit);
     if (tresume >= tmax)
         return reply_error(res, 400,
             "cool_temp_resume must be below cool_temp_max");
+    /* The critical line is the fail tier above the pause tier; at or
+     * below the ceiling it would fail a job the ceiling meant to pause. */
+    if (tcrit <= tmax)
+        return reply_error(res, 400,
+            "cool_temp_critical_c must be above cool_temp_max");
 
     /* One atomic write for the whole request: no reader (grblHAL at $H,
      * gfhome at session start) can observe it half-applied, and a

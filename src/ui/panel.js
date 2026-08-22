@@ -56,6 +56,7 @@ var CK = [
   'cool_confirm_max_s',
   'cool_temp_max',
   'cool_temp_resume',
+  'cool_temp_critical_c',
   'cool_cooldown_s',
   'cool_cooldown_max_s',
   'cool_tach_exhaust_min_rpm',
@@ -117,12 +118,14 @@ var FT = {
   gfcloud_home_z: 'len',
   cool_flow_rise: 'td',
   cool_temp_max: 'ta',
-  cool_temp_resume: 'ta'
+  cool_temp_resume: 'ta',
+  cool_temp_critical_c: 'ta'
 };
 var PH = {
   cool_flow_rise: [14.4, 'td'],
   cool_temp_max: [33, 'ta'],
-  cool_temp_resume: [31, 'ta']
+  cool_temp_resume: [31, 'ta'],
+  cool_temp_critical_c: [38, 'ta']
 };
 var orig = {};
 /* The gate settings (S.gates, from /settings): each carries its legal
@@ -132,6 +135,7 @@ var orig = {};
 var GN = {
   cool_temp_max: 'Coolant ceiling',
   cool_temp_resume: 'Resume gate',
+  cool_temp_critical_c: 'Coolant critical',
   cool_flow_check_s: 'Flow check window',
   cool_flow_rise: 'Flow fault rise',
   cool_tach_exhaust_min_rpm: 'Exhaust floor',

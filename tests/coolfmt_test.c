@@ -115,21 +115,22 @@ int main(void)
     printf("limits\n");
     /* Today's defaults: the set that was cut at 160 bytes. */
     cool_limits_t def = {33.0, 0.0, 3700, 1800, 6000};
-    CHECK(coolfmt_limits(lim, sizeof(lim), 33.0, 31.0, 0, &def) == 0, "the default limits fit");
+    CHECK(coolfmt_limits(lim, sizeof(lim), 33.0, 31.0, 38.0, 0, &def) == 0, "the default limits fit");
     CHECK(is_json(lim) && strstr(lim, "\"air_assist_min_rpm\":6000}"), "and end with the air assist floor, closed");
     /* The far ends of the gate table (gates.c): 60/59 C, floors 20000 /
      * 20000 / 30000, plus the header source. */
     cool_limits_t wide = {60.0, 60.0, 20000, 20000, 30000};
-    CHECK(coolfmt_limits(lim, sizeof(lim), 60.0, 59.0, 1, &wide) == 0, "the widest table values fit");
+    CHECK(coolfmt_limits(lim, sizeof(lim), 60.0, 59.0, 70.0, 1, &wide) == 0, "the widest table values fit");
     CHECK(is_json(lim), "and parse");
     /* A header floor tightens past the table: a tach window of the
      * width the factory sends (64500), and an absurd one. */
     cool_limits_t hdr = {60.0, 60.0, 64500, 64500, 64500};
-    CHECK(coolfmt_limits(lim, sizeof(lim), 60.0, 59.0, 1, &hdr) == 0 && is_json(lim), "header-width floors fit");
+    CHECK(coolfmt_limits(lim, sizeof(lim), 60.0, 59.0, 70.0, 1, &hdr) == 0 && is_json(lim), "header-width floors fit");
     cool_limits_t absurd = {60.0, 60.0, 2147483647.0, 2147483647.0, 2147483647.0};
-    CHECK(coolfmt_limits(lim, sizeof(lim), 60.0, 59.0, 1, &absurd) == 0 && is_json(lim), "int32-width floors fit");
+    CHECK(coolfmt_limits(lim, sizeof(lim), 60.0, 59.0, 70.0, 1, &absurd) == 0 && is_json(lim), "int32-width floors fit");
+    CHECK(strstr(lim, "\"coolant_critical_c\":70.0,") != NULL, "the critical line is in the limits");
     char tiny[64];
-    CHECK(coolfmt_limits(tiny, sizeof(tiny), 33.0, 31.0, 0, &def) < 0 && !strcmp(tiny, "{}"), "a fragment that does not fit is refused, and left empty");
+    CHECK(coolfmt_limits(tiny, sizeof(tiny), 33.0, 31.0, 38.0, 0, &def) < 0 && !strcmp(tiny, "{}"), "a fragment that does not fit is refused, and left empty");
     size_t widest_limits = strlen(lim);
 
     printf("fan gates\n");

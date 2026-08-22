@@ -216,6 +216,7 @@ that table.
 |---|---|---|---|---|---|
 | `cool_temp_max` | `coolant_max` (the run ceiling) | 33 C | 5 to 60 C | 25 to 38 C | 60 C |
 | `cool_temp_resume` | (follows the ceiling; kept below it) | 31 C | 5 to 59 C | 20 to 36 C | never |
+| `cool_temp_critical_c` | `coolant_critical` (the fail tier above the ceiling; kept above it) | 38 C | 6 to 70 C | 36 to 45 C | 70 C |
 | `cool_flow_check_s` | `flow` (flow verification) | 50 s | 0 to 300 s | 30 to 120 s | 0 |
 | `cool_flow_rise` | (tunes `flow`; set from flow calibrate) | 14.4 C | 1 to 40 C | 8 to 16 C | never |
 | `cool_tach_exhaust_min_rpm` | `exhaust` | 6400 rpm | 0 to 20000 | 5800 to 7000 | 0 |
@@ -317,10 +318,11 @@ mode=idle|run|cooldown & armed=0|1
   configured value and the header's, a ceiling only ever comes down and a
   floor only ever goes up, a looser header value is named once per run
   session and ignored, and a gate the operator set to its off end stays
-  off whatever a header says. The coolant ceiling is the one limit with a
-  gate behind it today; when a header tightens it the resume gate follows
-  it down by the configured gap. The floors are resolved, logged and
-  published for the gates that follow. Level-triggered like the duties:
+  off whatever a header says. When a header tightens the coolant ceiling
+  the resume gate follows it down by the configured gap; the fan floors
+  feed the airflow gates; the coolant critical line is local only, since
+  no header carries one. The effective set is resolved, logged and
+  published. Level-triggered like the duties:
   the limits ride every report while the job is loaded and leave with it.
   The engine logs `cool: effective limits: ...` whenever the effective set
   changes and carries it in `GET /cool/status` as `limits` (`coolant_max_c`,
@@ -354,12 +356,17 @@ rename) at ~1 Hz and on every verdict change:
   its closing brace is a torn read, not a verdict; an absent `fire_ok`,
   `hold`, or `resume_ok` key takes the fail-safe value (`false`, `true`,
   `false`). The publisher never writes a document longer than its buffer.
-- `verdict`: `OK | SUSPECT | FAULT | OVERTEMP | AIRFLOW | FIRE`. `hold=true`
-  asks the active controller for a feed hold; `resume_ok=true` signals
-  recovery below the resume gate (auto-resume is the controller's call).
-  `AIRFLOW` and `FIRE` are the fail tier: they hold for the rest of the run
-  session and never offer a resume in it. Controllers key on the flags, not
-  the name; an unknown name with `hold=true` holds.
+- `verdict`: `OK | SUSPECT | FAULT | OVERTEMP | CRITICAL | AIRFLOW | FIRE`.
+  `hold=true` asks the active controller for a feed hold; `resume_ok=true`
+  signals recovery below the resume gate (auto-resume is the controller's
+  call). `OVERTEMP` is the pause tier (the coolant over `cool_temp_max`,
+  back in service under the resume gate). `CRITICAL` (the coolant at or
+  over `cool_temp_critical_c` in a run session), `AIRFLOW` and `FIRE` are
+  the fail tier: they hold for the rest of the run session and never offer
+  a resume in it; `CRITICAL` and `AIRFLOW` end with the session (the
+  ceiling's pause tier keeps holding while the loop is hot), `FIRE` holds
+  until the next one starts. Controllers key on the flags, not the name; an
+  unknown name with `hold=true` holds.
 - **Enforcement stays in the controller.** The fire gate and hold/resume
   issuance run in-process in each controller; the verdict file is an input they
   must survive losing. The channel is not fast enough for anything

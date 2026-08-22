@@ -185,6 +185,11 @@
               ><input id="cool_temp_resume" inputmode="decimal" placeholder="31" />
             </div>
             <div class="row">
+              <label for="cool_temp_critical_c"
+                >Coolant critical<span class="u utemp">&deg;C</span></label
+              ><input id="cool_temp_critical_c" inputmode="decimal" placeholder="38" />
+            </div>
+            <div class="row">
               <label for="cool_cooldown_s">Smoke clear<span class="u">s</span></label
               ><input id="cool_cooldown_s" inputmode="numeric" placeholder="15" />
             </div>
@@ -220,7 +225,9 @@
           <p class="hint">
             Coolant-loop protection: each running job periodically verifies flow by running the
             loop heater and reading how far the downstream sensor climbs; past the fault rise
-            means stagnant coolant. Blank fields use the built-in values (placeholders),
+            means stagnant coolant. The coolant ceiling pauses a job until the loop is back
+            under the resume gate; the critical line above it is a fault that holds the job
+            with no resume, like a stopped fan. Blank fields use the built-in values (placeholders),
             measured on this machine's factory coolant; changes apply from the next job. These
             bands are per-machine: after a pump or coolant change, run
             <a href="#diag">Diagnostics &rarr; Cooling system</a> to verify or re-measure them.

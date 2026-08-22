@@ -140,6 +140,7 @@
 #define COOLDOWN_MAX_S         300
 #define TEMP_MAX_C_DEFAULT     33.0f
 #define TEMP_RESUME_C_DEFAULT  31.0f
+#define TEMP_CRITICAL_C_DEFAULT 38.0f
 /* Airflow floors (gates.c carries the rationale and the ranges). */
 #define TACH_EXHAUST_MIN_RPM     6400.0f
 #define TACH_INTAKE_MIN_RPM      2290.0f
@@ -281,6 +282,7 @@ static uint32_t smoke_s = COOLDOWN_SMOKE_S;
 static uint32_t cooldown_max_s = COOLDOWN_MAX_S;
 static float temp_max_c = TEMP_MAX_C_DEFAULT;
 static float temp_resume_c = TEMP_RESUME_C_DEFAULT;
+static float temp_critical_c = TEMP_CRITICAL_C_DEFAULT;
 static float tach_exhaust_min_rpm = TACH_EXHAUST_MIN_RPM;
 static float tach_intake_min_rpm = TACH_INTAKE_MIN_RPM;
 static float tach_air_assist_min_rpm = TACH_AIR_ASSIST_MIN_RPM;
@@ -307,6 +309,8 @@ static double flow_suspect_since;
 static uint32_t flow_episodes = 0;  /* cleared suspicions this job */
 static double phase_until;          /* smoke end / thermal timeout */
 static int over_temp_gate = 0;      /* hysteresis: >max sets, <=resume clears */
+static int critical_alarm = 0;      /* latched coolant fault, this run session */
+static int critical_would_warned = 0;   /* off gate, would have tripped: once */
 static int forced_cool = 0;         /* over-temp overrode the phase fans */
 static int flood_on = 0;            /* effective run window */
 static int silent_warned = 0;
@@ -335,6 +339,7 @@ static unsigned long verdict_seq = 0;
  * evaluated, and still measured: the first reading in a run session
  * that would have tripped the shipped default is logged once. */
 static int gate_coolant_off = 0;
+static int gate_critical_off = 0;
 static int gate_flow_off = 0;
 static int off_would_warned = 0;
 static char pub_gates_off[COOL_GATES_OFF_JSON_MAX] = "[]";
@@ -533,6 +538,8 @@ static struct {
       TEMP_MAX_C_DEFAULT,     &temp_max_c,      NULL, 0 },
     { "GFCOOL_TEMP_RESUME",     "cool_temp_resume",
       TEMP_RESUME_C_DEFAULT,  &temp_resume_c,   NULL, 0 },
+    { "GFCOOL_TEMP_CRITICAL",   "cool_temp_critical_c",
+      TEMP_CRITICAL_C_DEFAULT, &temp_critical_c, NULL, 0 },
     { "GFCOOL_FLOW_RISE",       "cool_flow_rise",
       FLOW_FAULT_RISE_C,      &flow_fault_rise, NULL, 0 },
     { "GFCOOL_CONFIRM_MAX_S",   "cool_confirm_max_s",
@@ -560,6 +567,8 @@ static double engine_gate_value(const gate_setting_t *g, void *ctx)
         return temp_max_c;
     if (!strcmp(g->key, "cool_temp_resume"))
         return temp_resume_c;
+    if (!strcmp(g->key, "cool_temp_critical_c"))
+        return temp_critical_c;
     if (!strcmp(g->key, "cool_flow_check_s"))
         return flow_check_s;
     if (!strcmp(g->key, "cool_flow_rise"))
@@ -590,6 +599,8 @@ static void gates_apply(void)
         gate_state_t st = gate_state(&t[i], v);
         if (t[i].gate && !strcmp(t[i].gate, "coolant_max"))
             gate_coolant_off = st == Gate_Off;
+        if (t[i].gate && !strcmp(t[i].gate, "coolant_critical"))
+            gate_critical_off = st == Gate_Off;
         if (t[i].gate && !strcmp(t[i].gate, "flow"))
             gate_flow_off = st == Gate_Off;
         if (st == Gate_Off)
@@ -665,7 +676,8 @@ static void limits_apply(const cool_limits_t *hdr, int fresh)
               eff.coolant_min_c, eff.exhaust_min_rpm, eff.intake_min_rpm,
               eff.air_assist_min_rpm);
         char lim[sizeof(pub_limits)];
-        if (coolfmt_limits(lim, sizeof(lim), max_c, resume_c, from, &eff) < 0)
+        if (coolfmt_limits(lim, sizeof(lim), max_c, resume_c, temp_critical_c,
+                           from, &eff) < 0)
             fflog(LOG_ERR, "cool: the effective limits do not fit their "
                   "status fragment; publishing none");
         pthread_mutex_lock(&mu);
@@ -778,6 +790,8 @@ static void flood_apply(int on, double now)
             airflow_reset(&fan_gate[i]);
         airflow_alarm = 0;
         fan_would_warned = 0;
+        critical_alarm = 0;
+        critical_would_warned = 0;
         fan_grace_until = now + (double)fan_grace_s;
         if (gate_flow_off)
             fflog(LOG_WARNING, "cool: coolant flow is not verified this "
@@ -816,6 +830,13 @@ static void flood_apply(int on, double now)
         airflow_alarm = 0;
         for (int i = 0; i < Fan_N; i++)
             airflow_reset(&fan_gate[i]);
+        /* The coolant critical fault likewise: the ceiling's pause tier
+         * keeps holding while the loop is hot, and the next session
+         * judges the critical line afresh. */
+        if (critical_alarm)
+            info("coolant critical fault cleared with the run session; "
+                 "the ceiling holds until the loop cools");
+        critical_alarm = 0;
         flow_check_pending = 0;
         if (flow_check_active) {    /* run ended before the verdict */
             flow_check_active = 0;
@@ -1167,6 +1188,31 @@ static void engine_tick(void)
         }
     }
 
+    /* The critical tier: the upstream coolant at or over
+     * cool_temp_critical_c during a run session is a fault, not a pause
+     * (CRITICAL: hold, fire blocked, no resume this session; the session
+     * ends it, like a fan fault, and the ceiling's pause tier keeps the
+     * hold while the loop is hot). Local only: no header carries a
+     * critical line for the coolant. At its far end the gate is off and
+     * still measures against the shipped default. */
+    if (have_up && cool_state == Cool_Run) {
+        if (gate_critical_off) {
+            if (up >= TEMP_CRITICAL_C_DEFAULT && !critical_would_warned) {
+                critical_would_warned = 1;
+                fflog(LOG_WARNING, "cool: gate coolant_critical is OFF and "
+                      "would have tripped at the default %.0f C (coolant "
+                      "%.1f C)", TEMP_CRITICAL_C_DEFAULT, up);
+            }
+        } else if (!critical_alarm && up >= temp_critical_c) {
+            critical_alarm = 1;
+            char msg[96];
+            snprintf(msg, sizeof(msg),
+                     "CRITICAL: coolant %.1f C at or over the %.0f C critical "
+                     "line - hold, no resume this job", up, temp_critical_c);
+            warn(msg);
+        }
+    }
+
     /* One-shot flow check: how far does the downstream sensor climb
      * while the heater runs? Flow carries the heat away (plateau);
      * no flow lets it pile up. The delta is averaged too, but only for
@@ -1330,13 +1376,14 @@ static void engine_tick(void)
      * window the engine cannot see must not fire. */
     const char *verdict = fire_alarm ? "FIRE"
                         : airflow_alarm ? "AIRFLOW"
+                        : critical_alarm ? "CRITICAL"
                         : over_temp_gate ? "OVERTEMP"
                         : flow_verdict == Flow_Fault ? "FAULT"
                         : flow_verdict == Flow_Suspect ? "SUSPECT" : "OK";
-    int hold = fire_alarm || airflow_alarm || over_temp_gate
+    int hold = fire_alarm || airflow_alarm || critical_alarm || over_temp_gate
              || (armed && flow_verdict != Flow_Normal);
-    int fire_ok = fresh && !fire_alarm && !airflow_alarm && !over_temp_gate
-                && flow_verdict != Flow_Fault;
+    int fire_ok = fresh && !fire_alarm && !airflow_alarm && !critical_alarm
+                && !over_temp_gate && flow_verdict != Flow_Fault;
 
     pthread_mutex_lock(&mu);
     pub_phase = cool_state == Cool_Run ? "run"
