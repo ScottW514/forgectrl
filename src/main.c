@@ -1001,8 +1001,9 @@ static int cb_cool_status(const struct _u_request *req,
     (void)user_data;
     if (!auth_read_ok(req, res))
         return U_CALLBACK_COMPLETE;
-    char body[512];
-    cool_status_json(body, sizeof(body));
+    char body[COOL_STATUS_JSON_MAX];
+    if (cool_status_json(body, sizeof(body)) < 0)
+        return reply_error(res, 500, "cool status document too long");
     ulfius_set_string_body_response(res, 200, body);
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
     return U_CALLBACK_CONTINUE;

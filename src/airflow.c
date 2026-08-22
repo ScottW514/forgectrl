@@ -61,3 +61,19 @@ double airflow_rpm(long period, double units_per_second, int pulses_per_rev)
         return 0.0;
     return units_per_second * 60.0 / ((double)period * pulses_per_rev);
 }
+
+long airflow_run_duty(long local, long job, int armed)
+{
+    if (job < 0)
+        return local;
+    if (armed && job < local)
+        return local;
+    return job;
+}
+
+int airflow_judged(int run, int armed, long duty, long local)
+{
+    if (!run)
+        return 0;
+    return armed || duty >= local;
+}

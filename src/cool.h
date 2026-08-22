@@ -60,8 +60,14 @@ int cool_state_report(const char *mode, int armed,
                       long air_assist, long exhaust, long intake,
                       const cool_limits_t *lim);
 
-/* Engine state as JSON (verdict, temps, phase, last report age) for
- * the UI and bench tooling. */
+/* Engine state as JSON (verdict, temps, phase, last report age, the
+ * effective limits and the per-fan gate states) for the UI and bench
+ * tooling. A buffer of COOL_STATUS_JSON_MAX bytes always holds the
+ * whole document (coolfmt.h sizes the fragments, and a fragment that
+ * does not fit is published empty, never cut); returns -1 when the
+ * buffer given was too small, so a caller never serves a cut-off
+ * document as JSON. */
+#define COOL_STATUS_JSON_MAX 1536
 int cool_status_json(char *buf, size_t len);
 
 /* Seconds since the last job-state report, or -1 if none has ever

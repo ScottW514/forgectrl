@@ -197,11 +197,11 @@
           <div class="grid2">
             <div class="row">
               <label for="cool_tach_exhaust_min_rpm">Exhaust floor<span class="u">rpm</span></label
-              ><input id="cool_tach_exhaust_min_rpm" inputmode="numeric" placeholder="3700" />
+              ><input id="cool_tach_exhaust_min_rpm" inputmode="numeric" placeholder="6400" />
             </div>
             <div class="row">
               <label for="cool_tach_intake_min_rpm">Intake floor<span class="u">rpm</span></label
-              ><input id="cool_tach_intake_min_rpm" inputmode="numeric" placeholder="1800" />
+              ><input id="cool_tach_intake_min_rpm" inputmode="numeric" placeholder="2290" />
             </div>
             <div class="row">
               <label for="cool_tach_air_assist_min_rpm">Air assist floor<span class="u">rpm</span></label
@@ -226,7 +226,10 @@
             <a href="#diag">Diagnostics &rarr; Cooling system</a> to verify or re-measure them.
             While a job runs, each fan is held to its floor (the exhaust, the intakes and the air
             assist by tachometer, the purge fan by its current) once the spin-up grace has passed;
-            three seconds under a floor is a fault that holds the job with no resume. The ceiling,
+            three seconds under a floor is a fault that holds the job with no resume. The floors
+            were measured at the cut fan profile, so a fan is judged while the laser is armed or
+            whenever it is commanded at that profile; a cloud hunt, which runs with its extraction
+            fans off, is measured but not judged. The ceiling,
             the resume gate, the check window, the fault rise and the floors accept a wide range
             on purpose: each has a recommended band, a value outside it is flagged above, and the
             far end of the range (a ceiling at its maximum, a check window or a floor of 0) turns

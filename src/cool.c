@@ -93,6 +93,7 @@
 #define _GNU_SOURCE
 #include "airflow.h"
 #include "cool.h"
+#include "coolfmt.h"
 #include "diag.h"
 #include "fflog.h"
 #include "gates.h"
@@ -140,8 +141,8 @@
 #define TEMP_MAX_C_DEFAULT     33.0f
 #define TEMP_RESUME_C_DEFAULT  31.0f
 /* Airflow floors (gates.c carries the rationale and the ranges). */
-#define TACH_EXHAUST_MIN_RPM     3700.0f
-#define TACH_INTAKE_MIN_RPM      1800.0f
+#define TACH_EXHAUST_MIN_RPM     6400.0f
+#define TACH_INTAKE_MIN_RPM      2290.0f
 #define TACH_AIR_ASSIST_MIN_RPM  6000.0f
 #define PURGE_MIN_CURRENT        300.0f
 #define FAN_GRACE_S              15.0f
@@ -267,8 +268,8 @@ static cool_limits_t rep_lim = {-1, -1, -1, -1, -1}; /* <= 0 = absent */
 static double rep_at = -1.0;           /* CLOCK_MONOTONIC; <0 = never */
 
 /* Published snapshot for cool_status_json. */
-static char pub_verdict[12] = "OK";
-static char pub_reason[112];
+static char pub_verdict[COOL_VERDICT_MAX] = "OK";
+static char pub_reason[COOL_REASON_MAX];
 static int pub_fire_ok, pub_hold;
 static double pub_down = -273.15, pub_up = -273.15;
 static const char *pub_phase = "idle";
@@ -325,6 +326,8 @@ static long hv_lo = -1, hv_hi = -1; /* session hv_current range */
 static const char *pub_fire_watch = "watch";
 static int diag_had = 0;            /* diagnostics held the hardware */
 static long run_duty[3] = {-1, -1, -1};
+static long cmd_duty[3] = {-1, -1, -1};   /* what fans_run last wrote */
+static int eff_armed = 0;                 /* the armed window, as reported */
 static unsigned long verdict_seq = 0;
 
 /* Gate settings at their off end (gates.c): the coolant ceiling at its
@@ -334,7 +337,7 @@ static unsigned long verdict_seq = 0;
 static int gate_coolant_off = 0;
 static int gate_flow_off = 0;
 static int off_would_warned = 0;
-static char pub_gates_off[128] = "[]";
+static char pub_gates_off[COOL_GATES_OFF_JSON_MAX] = "[]";
 
 /* Effective limits: the local tunable, tightened by the job's header
  * where the report carries a stricter value (gate_effective). The
@@ -349,7 +352,7 @@ static cool_limits_t eff_lim = {-1, -1, -1, -1, -1};
 static cool_limits_t last_logged_lim = {-2, -2, -2, -2, -2};
 static float last_logged_max = -1.0f;
 static double looser_warned_c = -1.0;    /* header ceiling already named */
-static char pub_limits[160] = "{}";
+static char pub_limits[COOL_LIMITS_JSON_MAX] = "{}";
 
 /* The airflow gates (airflow.c): one per fan, evaluated while the run
  * profile is applied, after a grace window from the moment it was
@@ -362,7 +365,7 @@ static double fan_floor[Fan_N];
 static double fan_grace_until = 0.0;
 static int airflow_alarm = 0;        /* latched fan fault, this run session */
 static int fan_would_warned = 0;     /* off gate, would have tripped: once */
-static char pub_fan_gates[512] = "{}";
+static char pub_fan_gates[COOL_FAN_GATES_JSON_MAX] = "{}";
 
 static double wall_s(void)
 {
@@ -449,14 +452,17 @@ static void fans_idle(void)
 
 /* Run duties: the per-job report profile when given, factory values
  * otherwise. */
+/* The run profile: the configured duties, or the job's own where it
+ * gave one, which may only raise a fan while the laser is armed
+ * (airflow_run_duty). */
 static void fans_run(void)
 {
-    wr_attr_long("head/air_assist_pwm",
-                 run_duty[0] >= 0 ? run_duty[0] : AIR_ASSIST_RUN);
-    wr_attr_long("thermal/exhaust_pwm",
-                 run_duty[1] >= 0 ? run_duty[1] : EXHAUST_RUN);
-    wr_attr_long("thermal/intake_pwm",
-                 run_duty[2] >= 0 ? run_duty[2] : INTAKE_RUN);
+    cmd_duty[0] = airflow_run_duty(AIR_ASSIST_RUN, run_duty[0], eff_armed);
+    cmd_duty[1] = airflow_run_duty(EXHAUST_RUN, run_duty[1], eff_armed);
+    cmd_duty[2] = airflow_run_duty(INTAKE_RUN, run_duty[2], eff_armed);
+    wr_attr_long("head/air_assist_pwm", cmd_duty[0]);
+    wr_attr_long("thermal/exhaust_pwm", cmd_duty[1]);
+    wr_attr_long("thermal/intake_pwm", cmd_duty[2]);
 }
 
 static void fans_cool(void)
@@ -659,14 +665,9 @@ static void limits_apply(const cool_limits_t *hdr, int fresh)
               eff.coolant_min_c, eff.exhaust_min_rpm, eff.intake_min_rpm,
               eff.air_assist_min_rpm);
         char lim[sizeof(pub_limits)];
-        snprintf(lim, sizeof(lim),
-                 "{\"coolant_max_c\":%.1f,\"coolant_resume_c\":%.1f,"
-                 "\"coolant_source\":\"%s\",\"coolant_min_c\":%.1f,"
-                 "\"exhaust_min_rpm\":%.0f,\"intake_min_rpm\":%.0f,"
-                 "\"air_assist_min_rpm\":%.0f}",
-                 max_c, resume_c, from ? "header" : "local",
-                 eff.coolant_min_c, eff.exhaust_min_rpm, eff.intake_min_rpm,
-                 eff.air_assist_min_rpm);
+        if (coolfmt_limits(lim, sizeof(lim), max_c, resume_c, from, &eff) < 0)
+            fflog(LOG_ERR, "cool: the effective limits do not fit their "
+                  "status fragment; publishing none");
         pthread_mutex_lock(&mu);
         snprintf(pub_limits, sizeof(pub_limits), "%s", lim);
         pthread_mutex_unlock(&mu);
@@ -897,17 +898,33 @@ static void engine_tick(void)
     int flood = fresh && (mode == 1 || armed);
     int duty_changed = memcmp(run_duty, duty, sizeof(run_duty)) != 0;
     memcpy(run_duty, duty, sizeof(run_duty));
-    /* Reapply only for a duty change carried by a run report: a
-     * run-ending report drops the per-job profile with it, and writing
-     * the fallback duties from that report would blast the fans on the
-     * way OUT of a job that ran a quiet profile. */
-    if (duty_changed && flood && flood_on && cool_state == Cool_Run && !forced_cool)
+    int armed_rose = armed && !eff_armed;
+    eff_armed = armed;
+    /* Reapply for a duty change carried by a run report, or for the
+     * armed window opening (armed, a job's profile may no longer hold a
+     * fan below run duty). Only those: a run-ending report drops the
+     * per-job profile with it, and writing the fallback duties from that
+     * report would blast the fans on the way OUT of a job that ran a
+     * quiet profile. A fan that just sped up gets its spin-up grace. */
+    if ((duty_changed || armed_rose) && flood && flood_on &&
+        cool_state == Cool_Run && !forced_cool) {
+        long was[3] = {cmd_duty[0], cmd_duty[1], cmd_duty[2]};
         fans_run();     /* per-job profile changed mid-run */
+        for (int i = 0; i < 3; i++)
+            if (cmd_duty[i] > was[i]) {
+                fan_grace_until = now + (double)fan_grace_s;
+                break;
+            }
+    }
 
     if (flood != flood_on) {
         flood_on = flood;
         flood_apply(flood, now);
         if (flood) {
+            /* The session start reloaded the settings: resolve the
+             * effective limits from them now, so this tick's gate rows,
+             * gates_off and the run-start log line agree. */
+            limits_apply(&hdr, fresh);
             pthread_mutex_lock(&mu);
             pub_reason[0] = '\0';   /* new session, stale reason gone */
             pthread_mutex_unlock(&mu);
@@ -1006,16 +1023,19 @@ static void engine_tick(void)
                    : fire_ir_delta > 0 ? "armed" : "watch";
     pthread_mutex_unlock(&mu);
 
-    /* The airflow gates: evaluated while the run profile is applied (the
-     * fans are commanded to run duty), after the spin-up grace. The
-     * exhaust and the intakes report a period in ns at 2 pulses/rev, the
-     * air assist in us at 8, the purge fan a current. The floors are the
-     * effective ones (a header can raise a tach floor for a job). A trip
-     * is a fault for the rest of the session: hold, fire blocked, no
-     * resume; the fans stay at run duty, which is what a stalled
-     * extraction fan needs around it. An off gate (floor 0) still
-     * measures and names the first reading that would have tripped the
-     * shipped default. */
+    /* The airflow gates: a fan is judged while the run profile is
+     * applied and the laser is armed, or the fan is commanded at the run
+     * duty its floor was measured at (airflow_judged); a job that runs a
+     * fan slower unarmed (a hunt, extraction fans off) is measured and
+     * published, not judged. Nothing counts during the spin-up grace.
+     * The exhaust and the intakes report a period in ns at 2 pulses/rev,
+     * the air assist in us at 8, the purge fan a current (no duty: it is
+     * always on, so always judged in run). The floors are the effective
+     * ones (a header can raise a tach floor for a job). A trip is a
+     * fault for the rest of the session: hold, fire blocked, no resume;
+     * the fans stay at run duty, which is what a stalled extraction fan
+     * needs around it. An off gate (floor 0) still measures and names
+     * the first reading that would have tripped the shipped default. */
     {
         fan_reading[Fan_Exhaust] = airflow_rpm(rd_long("thermal/tach_exhaust"), 1e9, 2);
         fan_reading[Fan_Intake1] = airflow_rpm(rd_long("thermal/tach_intake_1"), 1e9, 2);
@@ -1031,14 +1051,17 @@ static void engine_tick(void)
         static const double fan_default[Fan_N] = {
             TACH_EXHAUST_MIN_RPM, TACH_INTAKE_MIN_RPM, TACH_INTAKE_MIN_RPM,
             TACH_AIR_ASSIST_MIN_RPM, PURGE_MIN_CURRENT };
-        int gating = cool_state == Cool_Run;
+        static const int fan_duty_ix[Fan_N] = {1, 2, 2, 0, -1};
+        static const long fan_local[3] = {AIR_ASSIST_RUN, EXHAUST_RUN, INTAKE_RUN};
+        int run = cool_state == Cool_Run;
         int in_grace = now < fan_grace_until;
-        char fg[sizeof(pub_fan_gates)];
-        size_t off = 0;
-        off += (size_t)snprintf(fg + off, sizeof(fg) - off, "{");
+        coolfmt_fan_t rows[Fan_N];
         for (int i = 0; i < Fan_N; i++) {
             airflow_state_t st;
-            if (gating) {
+            int dx = fan_duty_ix[i];
+            int judged = dx < 0 ? airflow_judged(run, armed, 1, 1)
+                       : airflow_judged(run, armed, cmd_duty[dx], fan_local[dx]);
+            if (judged) {
                 st = airflow_tick(&fan_gate[i], fan_reading[i], fan_floor[i], in_grace);
                 if (st == Air_Tripped && !airflow_alarm) {
                     airflow_alarm = 1;
@@ -1061,16 +1084,18 @@ static void engine_tick(void)
                 st = fan_gate[i].tripped ? Air_Tripped
                    : fan_floor[i] <= 0.0 ? Air_Off : Air_Ok;
             }
-            off += (size_t)snprintf(fg + off, sizeof(fg) - off,
-                "%s\"%s\":{\"reading\":%.0f,\"floor\":%.0f,\"state\":\"%s\"}",
-                i ? "," : "", fan_name[i], fan_reading[i], fan_floor[i],
-                gating ? airflow_state_name(st)
-                       : st == Air_Tripped ? "TRIPPED"
-                       : st == Air_Off ? "off" : "idle");
-            if (off >= sizeof(fg) - 1)
-                break;
+            rows[i].name = fan_name[i];
+            rows[i].reading = fan_reading[i];
+            rows[i].floor = fan_floor[i];
+            rows[i].state = judged ? airflow_state_name(st)
+                          : st == Air_Tripped ? "TRIPPED"
+                          : st == Air_Off ? "off"
+                          : run ? "unjudged" : "idle";
         }
-        snprintf(fg + (off < sizeof(fg) - 1 ? off : sizeof(fg) - 2), 2, "}");
+        char fg[sizeof(pub_fan_gates)];
+        if (coolfmt_fan_gates(fg, sizeof(fg), rows, Fan_N) < 0)
+            fflog(LOG_ERR, "cool: the fan gate rows do not fit their status "
+                  "fragment; publishing none");
         pthread_mutex_lock(&mu);
         snprintf(pub_fan_gates, sizeof(pub_fan_gates), "%s", fg);
         pthread_mutex_unlock(&mu);
@@ -1427,18 +1452,17 @@ double cool_report_age(void)
 int cool_status_json(char *buf, size_t len)
 {
     pthread_mutex_lock(&mu);
-    double age = rep_at < 0 ? -1 : wall_s() - rep_at;
-    snprintf(buf, len,
-        "{\"phase\":\"%s\",\"verdict\":\"%s\",\"fire_ok\":%s,"
-        "\"hold\":%s,\"reason\":\"%s\",\"down_c\":%.2f,\"up_c\":%.2f,"
-        "\"report_age_s\":%.1f,\"armed\":%s,\"fire_watch\":\"%s\","
-        "\"gates_off\":%s,\"limits\":%s,\"fan_gates\":%s}",
-        pub_phase, pub_verdict, pub_fire_ok ? "true" : "false",
-        pub_hold ? "true" : "false", pub_reason, pub_down, pub_up,
-        age, rep_armed ? "true" : "false", pub_fire_watch, pub_gates_off,
-        pub_limits, pub_fan_gates);
+    coolfmt_status_t st = {
+        .phase = pub_phase, .verdict = pub_verdict, .reason = pub_reason,
+        .fire_watch = pub_fire_watch, .fire_ok = pub_fire_ok, .hold = pub_hold,
+        .armed = rep_armed, .down_c = pub_down, .up_c = pub_up,
+        .report_age_s = rep_at < 0 ? -1 : wall_s() - rep_at,
+        .gates_off = pub_gates_off, .limits = pub_limits,
+        .fan_gates = pub_fan_gates,
+    };
+    int rc = coolfmt_status(buf, len, &st);
     pthread_mutex_unlock(&mu);
-    return 0;
+    return rc;
 }
 
 int cool_gates_off_json(char *buf, size_t len)

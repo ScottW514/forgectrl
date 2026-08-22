@@ -85,7 +85,7 @@ int main(void)
           "the purge current floor is the purge gate, off at zero, capped at the ADC rail");
     CHECK(!grc->gate && grc->off_end == 0, "the grace window is not a gate of its own");
     CHECK(gate_state(exh, 0.0) == Gate_Off && gate_state(exh, 1.0) == Gate_Warn &&
-          gate_state(exh, 3700.0) == Gate_Ok, "an exhaust floor of zero is off, of one is warned");
+          gate_state(exh, 6400.0) == Gate_Ok, "an exhaust floor of zero is off, of one is warned");
 
     printf("parse\n");
     double v = 0;
@@ -154,7 +154,7 @@ int main(void)
     CHECK(strstr(buf, "\"cool_flow_check_s\":{\"gate\":\"flow\",\"def\":50,\"lo\":0,"
                       "\"hi\":300,\"band\":[30,120],\"off\":\"low\",") != NULL,
           "the flow row says its off end is low");
-    CHECK(strstr(buf, "\"cool_tach_exhaust_min_rpm\":{\"gate\":\"exhaust\",\"def\":3700,") != NULL,
+    CHECK(strstr(buf, "\"cool_tach_exhaust_min_rpm\":{\"gate\":\"exhaust\",\"def\":6400,") != NULL,
           "the exhaust row is there");
     CHECK(gates_json(buf, 16, value_default, NULL) == -1, "a short buffer reports -1");
 

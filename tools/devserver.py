@@ -471,9 +471,9 @@ class Mock:
         ('cool_temp_resume', None, 31.0, 5.0, 59.0, 20.0, 36.0, 'none'),
         ('cool_flow_check_s', 'flow', 50.0, 0.0, 300.0, 30.0, 120.0, 'low'),
         ('cool_flow_rise', None, 14.4, 1.0, 40.0, 8.0, 16.0, 'none'),
-        ('cool_tach_exhaust_min_rpm', 'exhaust', 3700.0, 0.0, 20000.0, 2500.0, 5000.0, 'low'),
-        ('cool_tach_intake_min_rpm', 'intake', 1800.0, 0.0, 20000.0, 1200.0, 2500.0, 'low'),
-        ('cool_tach_air_assist_min_rpm', 'air_assist', 6000.0, 0.0, 30000.0, 4000.0, 8000.0, 'low'),
+        ('cool_tach_exhaust_min_rpm', 'exhaust', 6400.0, 0.0, 20000.0, 5800.0, 7000.0, 'low'),
+        ('cool_tach_intake_min_rpm', 'intake', 2290.0, 0.0, 20000.0, 2100.0, 2500.0, 'low'),
+        ('cool_tach_air_assist_min_rpm', 'air_assist', 6000.0, 0.0, 30000.0, 5500.0, 6600.0, 'low'),
         ('cool_purge_min_current', 'purge', 300.0, 0.0, 1023.0, 150.0, 500.0, 'low'),
         ('cool_fan_grace_s', None, 15.0, 0.0, 120.0, 5.0, 30.0, 'none'),
     )
@@ -540,8 +540,14 @@ class Mock:
                                'gates_off': self.status.get('gates_off', []),
                                'limits': {'coolant_max_c': 33.0, 'coolant_resume_c': 31.0,
                                           'coolant_source': 'local', 'coolant_min_c': 0,
-                                          'exhaust_min_rpm': 0, 'intake_min_rpm': 0,
-                                          'air_assist_min_rpm': 0}})
+                                          'exhaust_min_rpm': 6400, 'intake_min_rpm': 2290,
+                                          'air_assist_min_rpm': 6000},
+                               'fan_gates': {
+                                   'exhaust': {'reading': 0, 'floor': 6400, 'state': 'idle'},
+                                   'intake_1': {'reading': 746, 'floor': 2290, 'state': 'idle'},
+                                   'intake_2': {'reading': 742, 'floor': 2290, 'state': 'idle'},
+                                   'air_assist': {'reading': 1902, 'floor': 6000, 'state': 'idle'},
+                                   'purge': {'reading': 627, 'floor': 300, 'state': 'idle'}}})
             if path == '/slots':
                 return J(200, self.slots)
             if path == '/update/status':

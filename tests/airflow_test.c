@@ -8,7 +8,9 @@
  * clears the count, a trip latches until the next run session whatever
  * the fan does afterward, and a floor of zero is the gate off (no count,
  * no latch, and a standing trip cleared). Plus the tach conversions the
- * floors are measured in.
+ * floors are measured in, and the operating-point rules: a job may not
+ * lower a fan below run duty while armed, and a gate judges a fan only
+ * armed or at run duty (a hunt with its fans off is not judged).
  */
 #include "../src/airflow.h"
 
@@ -68,6 +70,21 @@ int main(void)
     CHECK((long)airflow_rpm(41000000, 1e9, 2) == 731, "intake: 41 ms at 2 pulses/rev is 731 rpm");
     CHECK((long)airflow_rpm(3900, 1e6, 8) == 1923, "air assist: 3900 us at 8 pulses/rev is 1923 rpm");
     CHECK((long)airflow_rpm(64500, 1e6, 8) == 116, "the factory's AArx 64500 us is a 116 rpm floor");
+
+    printf("run duty: a job may only raise a fan while armed\n");
+    CHECK(airflow_run_duty(65535, -1, 0) == 65535 && airflow_run_duty(65535, -1, 1) == 65535, "no job duty: the configured run duty, armed or not");
+    CHECK(airflow_run_duty(65535, 0, 0) == 0, "unarmed, a job's 0 (a hunt) stands");
+    CHECK(airflow_run_duty(65535, 0, 1) == 65535, "armed, a job's 0 is raised to run duty");
+    CHECK(airflow_run_duty(43278, 30000, 1) == 43278, "armed, a lower job duty is raised to run duty");
+    CHECK(airflow_run_duty(43278, 60000, 1) == 60000 && airflow_run_duty(43278, 60000, 0) == 60000, "a higher job duty stands either way");
+
+    printf("judged: armed, or at the run duty the floor was measured at\n");
+    CHECK(!airflow_judged(0, 1, 65535, 65535), "not in run: never judged");
+    CHECK(airflow_judged(1, 1, 0, 65535), "armed: judged whatever the duty says");
+    CHECK(airflow_judged(1, 0, 65535, 65535), "unarmed at run duty (a bare M8): judged");
+    CHECK(airflow_judged(1, 0, 65536, 65535), "unarmed above run duty: judged");
+    CHECK(!airflow_judged(1, 0, 0, 65535), "unarmed with the fan off (a hunt's exhaust): not judged");
+    CHECK(!airflow_judged(1, 0, 204, 1023), "unarmed at idle duty (a hunt's air assist): not judged");
 
     printf("%s: %d failure(s)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;

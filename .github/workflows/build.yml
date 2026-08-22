@@ -32,3 +32,5 @@ jobs:
         run: ./build/cool_gate_test
       - name: Airflow gate
         run: ./build/airflow_test
+      - name: Cooling status document
+        run: ./build/coolfmt_test

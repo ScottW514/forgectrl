@@ -218,9 +218,9 @@ that table.
 | `cool_temp_resume` | (follows the ceiling; kept below it) | 31 C | 5 to 59 C | 20 to 36 C | never |
 | `cool_flow_check_s` | `flow` (flow verification) | 50 s | 0 to 300 s | 30 to 120 s | 0 |
 | `cool_flow_rise` | (tunes `flow`; set from flow calibrate) | 14.4 C | 1 to 40 C | 8 to 16 C | never |
-| `cool_tach_exhaust_min_rpm` | `exhaust` | 3700 rpm | 0 to 20000 | 2500 to 5000 | 0 |
-| `cool_tach_intake_min_rpm` | `intake` (either tach) | 1800 rpm | 0 to 20000 | 1200 to 2500 | 0 |
-| `cool_tach_air_assist_min_rpm` | `air_assist` | 6000 rpm | 0 to 30000 | 4000 to 8000 | 0 |
+| `cool_tach_exhaust_min_rpm` | `exhaust` | 6400 rpm | 0 to 20000 | 5800 to 7000 | 0 |
+| `cool_tach_intake_min_rpm` | `intake` (either tach) | 2290 rpm | 0 to 20000 | 2100 to 2500 | 0 |
+| `cool_tach_air_assist_min_rpm` | `air_assist` | 6000 rpm | 0 to 30000 | 5500 to 6600 | 0 |
 | `cool_purge_min_current` | `purge` (current, raw) | 300 | 0 to 1023 | 150 to 500 | 0 |
 | `cool_fan_grace_s` | (the spin-up window, no gate) | 15 s | 0 to 120 s | 5 to 30 s | never |
 
@@ -264,15 +264,24 @@ The engine also runs the **physical-evidence witnesses** at its 1 Hz tick:
 - **Airflow gates** (`src/airflow.c`): while the run profile is applied,
   the exhaust, both intakes and the air assist are held to a floor by
   tachometer and the purge-air fan by its current, each floor the effective
-  one (a header's tach window can raise it for a job). A grace of
-  `cool_fan_grace_s` runs from the moment the run profile is written and
-  nothing counts inside it; three consecutive 1 Hz ticks under the floor
+  one (a header's tach window can raise it for a job). The floors were
+  measured at the configured run duties, so a fan is judged at that
+  operating point: always while the laser is armed, when a job's own
+  profile (`POST /cool/state` duties) may raise a fan but never lower it
+  below the configured run duty; unarmed, whenever the fan is commanded at
+  or above the run duty. A fan a job runs slower unarmed (a cloud hunt:
+  exhaust and intake duty 0, air assist at idle) is measured and published
+  as `unjudged`. The purge fan has no duty and is judged in every run. A
+  grace of `cool_fan_grace_s` runs from the moment the run profile is
+  written, and again when a fan is commanded faster mid-run (the armed
+  window opening raises a lowered fan), and nothing counts inside it; three
+  consecutive 1 Hz ticks under the floor
   trip the gate and a reading at or above it clears the count. A trip is a
   fault for the rest of the run session: verdict `AIRFLOW`, `fire_ok=false`,
   `hold=true`, no `resume_ok` until the next session, the fans held at run
   duty, the reason naming the fan, the reading and the floor. Outside a run
   the gates read `idle`. `/cool/status` carries `fan_gates` (per fan:
-  `reading`, `floor`, `state` of `grace | ok | under | TRIPPED | off | idle`).
+  `reading`, `floor`, `state` of `grace | ok | under | TRIPPED | off | unjudged | idle`).
 - **Telemetry**: `cnc/faults` transitions to nonzero during a run window are
   warned; `pic/hv_current` (the only live HV telemetry) is ranged per job in
   the same log line. `/status` exposes the sampled laser evidence, faults, HV,

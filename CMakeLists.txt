@@ -26,6 +26,7 @@ add_executable(forgectrl
   src/cam.c
   src/camhealth.c
   src/cool.c
+  src/coolfmt.c
   src/debayer.c
   src/diag.c
   src/fflog.c
@@ -94,6 +95,14 @@ target_link_libraries(cool_gate_test m)
 add_executable(airflow_test tests/airflow_test.c src/airflow.c)
 target_compile_options(airflow_test PRIVATE -Wall -Wextra)
 target_link_libraries(airflow_test m)
+
+# Host unit test for the /cool/status document: the widest legal
+# rendering of every fragment fits the buffer the engine uses, the
+# widest document fits COOL_STATUS_JSON_MAX and parses, and an oversize
+# value set is refused rather than served cut off.
+add_executable(coolfmt_test tests/coolfmt_test.c src/coolfmt.c)
+target_compile_options(coolfmt_test PRIVATE -Wall -Wextra)
+target_link_libraries(coolfmt_test m)
 
 # Emitter half of the host end-to-end logging check (tests/fflog_e2e.sh
 # drives it against a private rsyslogd; manual, not CI).

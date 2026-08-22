@@ -33,11 +33,12 @@
  *   from flow calibrate; the bench's no-flow rise is about 16 C, so a
  *   value above the band can never fault and is warned as such. Not a
  *   gate of its own (flow is), so no off end.
- * cool_tach_*_min_rpm: the airflow floors, in rpm at run duty, each a
- *   fraction of the speed the bench machine's fan reaches at the run
- *   profile (exhaust about 6750, the intakes about 3300, the air assist
- *   about 11000); zero is the gate off. A pulse header's tach window
- *   can raise a floor for a job, never lower it.
+ * cool_tach_*_min_rpm: the airflow floors, in rpm at run duty, 55
+ *   percent of the steady speed the bench machine's fans reach at the
+ *   run profile (exhaust 11640, the intakes 4160, the air assist
+ *   11050; the bands are 50 to 60 percent); zero is the gate off. A
+ *   pulse header's tach window can raise a floor for a job, never
+ *   lower it.
  * cool_purge_min_current: the purge-air fan has no tachometer; its
  *   current reads about 1 off and about 630 on, and the floor sits
  *   between. Zero is the gate off.
@@ -48,9 +49,9 @@ static const gate_setting_t table[] = {
     { "cool_temp_resume",           NULL,          31.0,  5.0,    59.0, 20.0,  36.0,  0 },
     { "cool_flow_check_s",          "flow",        50.0,  0.0,   300.0, 30.0, 120.0, -1 },
     { "cool_flow_rise",             NULL,          14.4,  1.0,    40.0,  8.0,  16.0,  0 },
-    { "cool_tach_exhaust_min_rpm",  "exhaust",   3700.0,  0.0, 20000.0, 2500.0, 5000.0, -1 },
-    { "cool_tach_intake_min_rpm",   "intake",    1800.0,  0.0, 20000.0, 1200.0, 2500.0, -1 },
-    { "cool_tach_air_assist_min_rpm", "air_assist", 6000.0, 0.0, 30000.0, 4000.0, 8000.0, -1 },
+    { "cool_tach_exhaust_min_rpm",  "exhaust",   6400.0,  0.0, 20000.0, 5800.0, 7000.0, -1 },
+    { "cool_tach_intake_min_rpm",   "intake",    2290.0,  0.0, 20000.0, 2100.0, 2500.0, -1 },
+    { "cool_tach_air_assist_min_rpm", "air_assist", 6000.0, 0.0, 30000.0, 5500.0, 6600.0, -1 },
     { "cool_purge_min_current",     "purge",      300.0,  0.0,  1023.0, 150.0, 500.0, -1 },
     { "cool_fan_grace_s",           NULL,          15.0,  0.0,   120.0,  5.0,  30.0,  0 },
 };
