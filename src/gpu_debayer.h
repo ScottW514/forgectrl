@@ -40,9 +40,12 @@ void gpu_debayer_close(gpu_debayer_t *g);
 int gpu_debayer_attach_raw(gpu_debayer_t *g, int idx, int fd);
 
 /* Import a planar YUV420 destination (dmabuf) under slot `slot` (0..1):
- * an encoder OUTPUT buffer of the half-resolution geometry, Y plane of
- * y_stride bytes per row at offset 0, then U and V planes of
- * y_stride / 2 bytes per row. Returns 0, or -1 with the reason logged. */
+ * a buffer of the half-resolution geometry, Y plane of y_stride bytes
+ * per row at offset 0, then U and V planes of y_stride / 2 bytes per
+ * row. The GPU writes rows padded to 64 bytes, so y_stride must be a
+ * multiple of 128 (ipu_copy_src_width) and the encoders are fed through
+ * the IPU crop (ipu_copy.h) rather than directly. Returns 0, or -1 with
+ * the reason logged. */
 int gpu_debayer_attach_dst(gpu_debayer_t *g, int slot, int fd,
                            int y_stride, size_t buf_len);
 

@@ -32,6 +32,7 @@ add_executable(forgectrl
   src/fflog.c
   src/gates.c
   src/gpu_debayer.c
+  src/ipu_copy.c
   src/liveness.c
   src/logs.c
   src/mp4mux.c

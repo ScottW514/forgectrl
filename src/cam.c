@@ -34,6 +34,7 @@
 #include "debayer.h"
 #include "fflog.h"
 #include "gpu_debayer.h"
+#include "ipu_copy.h"
 #include "mp4mux.h"
 #include "settings.h"
 #include "status.h"
@@ -295,8 +296,12 @@ static mp4mux_t *h264_params;
 static pthread_mutex_t h264_params_mx = PTHREAD_MUTEX_INITIALIZER;
 
 /* GC880 GPU demosaic for the stream path; the NEON path remains the
- * fallback (and always the snapshot path). Worker-thread use only. */
+ * fallback (and always the snapshot path). The GPU renders into the IPU
+ * stride-fix buffer and the IPU crops that into each encoder (the GPU's
+ * row padding and the CODA's fixed stride are incompatible; ipu_copy.h).
+ * Worker-thread use only. */
 static gpu_debayer_t *gpu;
+static ipu_copy_t *ipu;
 static int gpu_disabled;
 static int hw_skip_disabled;
 
@@ -1037,6 +1042,10 @@ static void ensure_encoders(int jpeg_want, int h264_want,
             gpu_debayer_close(gpu);
             gpu = NULL;
         }
+        if (ipu) {
+            ipu_copy_close(ipu);
+            ipu = NULL;
+        }
         pthread_mutex_lock(&h264_params_mx);
         mp4mux_free(h264_params);
         h264_params = NULL;
@@ -1070,15 +1079,22 @@ static void ensure_encoders(int jpeg_want, int h264_want,
         }
     }
 
-    static int gpu_dst_ok[2];   /* dst slot attached: 0 JPEG, 1 H.264 */
     if (!gpu_disabled && !gpu && (vpu || h264)) {
+        if (!ipu)
+            ipu = ipu_copy_open(ipu_copy_src_width(half_w), half_w,
+                                half_h);
+        if (!ipu) {
+            gpu_disabled = 1;
+            fflog(LOG_INFO, "cam: no IPU stride-fix crop, using the "
+                  "NEON path");
+            return;
+        }
         gpu = gpu_debayer_open(eng.prof->w, eng.prof->h, hflip);
         if (!gpu) {
             gpu_disabled = 1;
             fflog(LOG_INFO, "cam: no GPU demosaic, using the NEON path");
             return;
         }
-        gpu_dst_ok[0] = gpu_dst_ok[1] = 0;
         int ok = 1;
         for (int i = 0; ok && i < eng.n_bufs; i++) {
             if (eng.bufs[i].dmabuf < 0) {
@@ -1097,6 +1113,13 @@ static void ensure_encoders(int jpeg_want, int h264_want,
             }
             ok = gpu_debayer_attach_raw(gpu, i, eng.bufs[i].dmabuf) == 0;
         }
+        if (ok) {
+            int stride;
+            size_t len;
+            int fd = ipu_copy_src_dmabuf(ipu, &stride, &len);
+            ok = fd >= 0 &&
+                 gpu_debayer_attach_dst(gpu, 0, fd, stride, len) == 0;
+        }
         if (!ok) {
             gpu_debayer_close(gpu);
             gpu = NULL;
@@ -1104,35 +1127,6 @@ static void ensure_encoders(int jpeg_want, int h264_want,
             fflog(LOG_INFO, "cam: GPU import failed, using the NEON path");
         }
     }
-    /* Attach the render target of any encoder that is open but not yet
-     * wired - which also covers an encoder that came up after the GPU
-     * did. A refused import retires the GPU, not the encoder. */
-    if (gpu && vpu && !gpu_dst_ok[0]) {
-        int stride;
-        size_t len;
-        int fd = vpu_jpeg_out_dmabuf(vpu, &stride, &len);
-        if (fd >= 0 && gpu_debayer_attach_dst(gpu, 0, fd, stride, len) == 0)
-            gpu_dst_ok[0] = 1;
-        else
-            goto gpu_dead;
-    }
-    if (gpu && h264 && !gpu_dst_ok[1]) {
-        int stride;
-        size_t len;
-        int fd = vpu_h264_out_dmabuf(h264, &stride, &len);
-        if (fd >= 0 && gpu_debayer_attach_dst(gpu, 1, fd, stride, len) == 0)
-            gpu_dst_ok[1] = 1;
-        else
-            goto gpu_dead;
-    }
-    return;
-
-gpu_dead:
-    gpu_debayer_close(gpu);
-    gpu = NULL;
-    gpu_disabled = 1;
-    fflog(LOG_INFO, "cam: GPU render-target import failed, using the "
-          "NEON path");
 }
 
 /* One-shot GPU-versus-CPU comparison on a live frame, FORGECTRL_GPU_CHECK.
@@ -1407,27 +1401,56 @@ static void *worker(void *arg)
             now_ts(&e0);
             ensure_encoders(jpeg_want, h264_want, half_w, half_h, HFLIP);
 
+            /* One GPU render into the IPU buffer, then one IPU crop per
+             * wanted encoder. Any failure retires the GPU mid-stream and
+             * the CPU finishes this frame. */
             int gpu_jpeg = 0, gpu_h264 = 0;
-            if (gpu) {
-                int fail = 0;
-                if (jpeg_want && vpu) {
-                    gpu_jpeg = gpu_debayer_convert(gpu, (int)buf.index,
+            if (gpu && ipu) {
+                struct timespec g0, g1, g2;
+                now_ts(&g0);
+                int rendered = gpu_debayer_convert(gpu, (int)buf.index,
                                                    0) == 0;
-                    fail |= !gpu_jpeg;
+                now_ts(&g1);
+                if (rendered) {
+                    if (jpeg_want && vpu) {
+                        int stride;
+                        size_t len;
+                        int fd = vpu_jpeg_out_dmabuf(vpu, &stride, &len);
+                        gpu_jpeg = fd >= 0 &&
+                                   ipu_copy_run(ipu, fd, len) == 0;
+                    }
+                    if (h264_want && h264) {
+                        int stride;
+                        size_t len;
+                        int fd = vpu_h264_out_dmabuf(h264, &stride, &len);
+                        gpu_h264 = fd >= 0 &&
+                                   ipu_copy_run(ipu, fd, len) == 0;
+                    }
                 }
-                if (!fail && h264_want && h264) {
-                    gpu_h264 = gpu_debayer_convert(gpu, (int)buf.index,
-                                                   1) == 0;
-                    fail |= !gpu_h264;
+                now_ts(&g2);
+                /* Render-versus-copy split, on the diagnostic cadence. */
+                static double rms, cms;
+                static unsigned gn;
+                rms += ts_diff(&g1, &g0) * 1e3;
+                cms += ts_diff(&g2, &g1) * 1e3;
+                if (++gn >= 30) {
+                    if (getenv("FORGECTRL_GPU_CHECK"))
+                        fflog(LOG_DEBUG, "cam: gpu split: render %.0f ms, "
+                              "ipu copy %.0f ms avg", rms / gn, cms / gn);
+                    rms = cms = 0;
+                    gn = 0;
                 }
-                if (fail) {
-                    gpu_debayer_close(gpu);
-                    gpu = NULL;
-                    gpu_disabled = 1;
-                    gpu_jpeg = gpu_h264 = 0;
-                    fflog(LOG_WARNING, "cam: GPU convert failed, "
-                          "falling back to the NEON path");
-                }
+            }
+            if (gpu && ((jpeg_want && vpu && !gpu_jpeg) ||
+                        (h264_want && h264 && !gpu_h264))) {
+                gpu_debayer_close(gpu);
+                gpu = NULL;
+                ipu_copy_close(ipu);
+                ipu = NULL;
+                gpu_disabled = 1;
+                gpu_jpeg = gpu_h264 = 0;
+                fflog(LOG_WARNING, "cam: GPU convert failed, "
+                      "falling back to the NEON path");
             }
 
             /* ---- JPEG ---- */
@@ -1581,8 +1604,11 @@ static void *worker(void *arg)
                 stat_enc_ms += ts_diff(&e2, &e1) * 1e3;
                 /* ~every 11 min of streaming, not every ~7 s: LightBurn
                  * keeps a stream open for whole sessions, and /data is
-                 * the persistent partition settings and updates live on. */
-                if (++stat_n >= 10000) {
+                 * the persistent partition settings and updates live on.
+                 * Under the GPU diagnostic env the cadence tightens so a
+                 * bench drill sees the split without waiting. */
+                if (++stat_n >= (getenv("FORGECTRL_GPU_CHECK") ? 30u
+                                                               : 10000u)) {
                     fflog(LOG_DEBUG, "cam: stream stats: dqbuf %.0f ms, "
                           "copy %.0f ms, convert %.0f ms, encode %.0f ms "
                           "avg (%s, %s)",
@@ -1801,6 +1827,10 @@ void cam_engine_shutdown(void)
     if (h264) {
         vpu_h264_close(h264);
         h264 = NULL;
+    }
+    if (ipu) {
+        ipu_copy_close(ipu);
+        ipu = NULL;
     }
     pthread_mutex_lock(&h264_params_mx);
     mp4mux_free(h264_params);

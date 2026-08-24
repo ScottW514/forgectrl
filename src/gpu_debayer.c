@@ -10,13 +10,15 @@
  * chroma per 2x2 pixel block, JFIF full-range ITU-R 601.
  *
  * Both ends are dmabufs: the V4L2 capture buffers are imported as
- * textures and the encoder's own OUTPUT buffer is imported as the render
+ * textures and the destination (the IPU stride-fix buffer, ipu_copy.h,
+ * whose stride sits on the GPU's 64-byte render boundary) as the render
  * target, so the frame never crosses the CPU. Buffers are byte streams
- * to the GPU, not pictures: both sides are bound as XRGB8888 with the
- * width in texels a quarter of the width in bytes, and the shaders do
- * the byte indexing (an XRGB8888 texel's memory bytes 0..3 read back as
- * .b .g .r .a in the shader, and write the same way through
- * gl_FragColor).
+ * to the GPU, not pictures: the raw side binds as GR88 (one texel per
+ * Bayer byte pair) and the YUV planes as ARGB8888 (four bytes per
+ * texel, memory bytes 0..3 writing as .b .g .r .a through
+ * gl_FragColor; it must be ARGB, not XRGB, because the render engine
+ * writes an XRGB surface's X byte as opaque, clobbering every fourth
+ * output byte), and the shaders do the byte indexing.
  *
  * GLES2 has no integer textures and no multiple render targets on this
  * class of GPU, which is why the passes are three (Y, U, V) and the
@@ -79,7 +81,8 @@ typedef unsigned int   GLbitfield;
 #define EGL_DMA_BUF_PLANE0_OFFSET_EXT 0x3273
 #define EGL_DMA_BUF_PLANE0_PITCH_EXT  0x3274
 
-#define DRM_FORMAT_XRGB8888         0x34325258  /* 'XR24' */
+#define DRM_FORMAT_ARGB8888         0x34325241  /* 'AR24' */
+#define DRM_FORMAT_GR88             0x38385247  /* 'GR88' */
 
 #define GL_FALSE                    0
 #define GL_TRIANGLES                0x0004
@@ -221,19 +224,17 @@ static const char VS_SRC[] =
     "attribute vec2 a_pos;\n"
     "void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }\n";
 
-/* Byte j of an XRGB8888 texel reads back as .b (j=0), .g (1), .r (2),
- * .a (3); pair p of a texel is bytes (2p, 2p+1). An even raw row's pairs
- * are (B, G1), an odd row's are (G2, R). */
+/* The raw frame binds as GR88: one texel per Bayer byte pair, byte 0 in
+ * .r and byte 1 in .g, so superpixel column c is texel column c. An even
+ * raw row's pair is (B, G1), an odd row's is (G2, R). u_inv carries the
+ * reciprocal texture size: a divide per fetch is what this GPU cannot
+ * afford, so the callers hoist the row coordinates and sp() multiplies. */
 #define SP_FETCH \
-    "vec3 sp(float c, float ry) {\n"                                     \
-    "  float ix = floor(c * 0.5);\n"                                     \
-    "  float p  = c - 2.0 * ix;\n"                                       \
-    "  vec2 tc = vec2(ix + 0.5, ry - u_rowbase + 0.5) / u_texsz;\n"      \
-    "  vec4 e = texture2D(u_raw, tc);\n"                                 \
-    "  vec4 o = texture2D(u_raw, tc + vec2(0.0, 1.0 / u_texsz.y));\n"    \
-    "  vec2 eb = mix(vec2(e.b, e.g), vec2(e.r, e.a), p);\n"              \
-    "  vec2 ob = mix(vec2(o.b, o.g), vec2(o.r, o.a), p);\n"              \
-    "  return vec3(ob.y, (eb.y + ob.x) * 0.5, eb.x);\n"  /* R G B */     \
+    "vec3 sp(float c, float vy, float vy2) {\n"                          \
+    "  float u = (c + 0.5) * u_inv.x;\n"                                 \
+    "  vec4 e = texture2D(u_raw, vec2(u, vy));\n"                        \
+    "  vec4 o = texture2D(u_raw, vec2(u, vy2));\n"                       \
+    "  return vec3(o.g, (e.g + o.r) * 0.5, e.r);\n"  /* R G B */         \
     "}\n"
 
 /* One output texel = 4 luma bytes = 4 superpixels. gl_FragCoord is in
@@ -242,7 +243,7 @@ static const char VS_SRC[] =
 static const char FS_Y_SRC[] =
     "PRECISION\n"
     "uniform sampler2D u_raw;\n"
-    "uniform vec2  u_texsz;\n"
+    "uniform vec2  u_inv;\n"
     "uniform float u_ow;\n"
     "uniform float u_flip;\n"
     "uniform float u_rowbase;\n"
@@ -252,12 +253,14 @@ static const char FS_Y_SRC[] =
     "}\n"
     "void main() {\n"
     "  float tx = floor(gl_FragCoord.x);\n"
-    "  float ry = 2.0 * floor(gl_FragCoord.y);\n"
+    "  float ry = 2.0 * floor(gl_FragCoord.y) - u_rowbase;\n"
+    "  float vy  = (ry + 0.5) * u_inv.y;\n"
+    "  float vy2 = (ry + 1.5) * u_inv.y;\n"
     "  vec4 y;\n"
     "  for (int k = 0; k < 4; k++) {\n"
     "    float s = 4.0 * tx + float(k);\n"
     "    float c = mix(s, u_ow - 1.0 - s, u_flip);\n"
-    "    y[k] = luma(sp(c, ry));\n"
+    "    y[k] = luma(sp(c, vy, vy2));\n"
     "  }\n"
     "  gl_FragColor = vec4(y[2], y[1], y[0], y[3]);\n"
     "}\n";
@@ -267,7 +270,7 @@ static const char FS_Y_SRC[] =
 static const char FS_C_SRC[] =
     "PRECISION\n"
     "uniform sampler2D u_raw;\n"
-    "uniform vec2  u_texsz;\n"
+    "uniform vec2  u_inv;\n"
     "uniform float u_ow;\n"
     "uniform float u_flip;\n"
     "uniform float u_rowbase;\n"
@@ -276,18 +279,18 @@ static const char FS_C_SRC[] =
     SP_FETCH
     "void main() {\n"
     "  float tx = floor(gl_FragCoord.x);\n"
-    "  float ty = floor(gl_FragCoord.y);\n"
-    "  float uvw = u_ow * 0.25;\n"
+    "  float ry = 4.0 * floor(gl_FragCoord.y) - u_rowbase;\n"
+    "  float va  = (ry + 0.5) * u_inv.y;\n"
+    "  float va2 = (ry + 1.5) * u_inv.y;\n"
+    "  float vb  = (ry + 2.5) * u_inv.y;\n"
+    "  float vb2 = (ry + 3.5) * u_inv.y;\n"
+    "  float uvw = u_ow * 0.5;\n"    /* chroma columns per row */
     "  vec4 outv;\n"
     "  for (int k = 0; k < 4; k++) {\n"
     "    float cc = 4.0 * tx + float(k);\n"
-    "    float sx = mix(cc, uvw - 1.0 - cc, u_flip);\n"
-    "    vec3 acc = vec3(0.0);\n"
-    "    for (int sy = 0; sy < 2; sy++) {\n"
-    "      float ry = 2.0 * (2.0 * ty + float(sy));\n"
-    "      acc += sp(2.0 * sx,       ry);\n"
-    "      acc += sp(2.0 * sx + 1.0, ry);\n"
-    "    }\n"
+    "    float sx = 2.0 * mix(cc, uvw - 1.0 - cc, u_flip);\n"
+    "    vec3 acc = sp(sx,       va, va2) + sp(sx + 1.0, va, va2)\n"
+    "             + sp(sx,       vb, vb2) + sp(sx + 1.0, vb, vb2);\n"
     "    outv[k] = dot(acc * 0.25, u_coef) + u_off;\n"
     "  }\n"
     "  gl_FragColor = vec4(outv[2], outv[1], outv[0], outv[3]);\n"
@@ -428,12 +431,13 @@ static GLuint build_prog(gpu_debayer_t *g, const char *fs_tmpl)
 }
 
 static EGLImageKHR import_bytes(gpu_debayer_t *g, int fd, size_t offset,
-                                int w_bytes, int h, int pitch)
+                                int w_texels, int h, int pitch,
+                                unsigned fourcc)
 {
     EGLint attrs[] = {
-        EGL_WIDTH,                    w_bytes / 4,
+        EGL_WIDTH,                    w_texels,
         EGL_HEIGHT,                   h,
-        EGL_LINUX_DRM_FOURCC_EXT,     DRM_FORMAT_XRGB8888,
+        EGL_LINUX_DRM_FOURCC_EXT,     (EGLint)fourcc,
         EGL_DMA_BUF_PLANE0_FD_EXT,    fd,
         EGL_DMA_BUF_PLANE0_OFFSET_EXT, (EGLint)offset,
         EGL_DMA_BUF_PLANE0_PITCH_EXT, pitch,
@@ -443,9 +447,10 @@ static EGLImageKHR import_bytes(gpu_debayer_t *g, int fd, size_t offset,
                                             EGL_LINUX_DMA_BUF_EXT, NULL,
                                             attrs);
     if (img == EGL_NO_IMAGE)
-        fflog(LOG_WARNING, "gpu: dmabuf import failed (fd %d, %dx%d bytes, "
-              "pitch %d, offset %zu): egl 0x%x", fd, w_bytes, h, pitch,
-              offset, g->egl.GetError());
+        fflog(LOG_WARNING, "gpu: dmabuf import failed (fd %d, %d texels x "
+              "%d, pitch %d, offset %zu, fourcc %.4s): egl 0x%x", fd,
+              w_texels, h, pitch, offset, (const char *)&fourcc,
+              g->egl.GetError());
     return img;
 }
 
@@ -504,15 +509,28 @@ gpu_debayer_t *gpu_debayer_open(int raw_w, int raw_h, int hflip)
 
     static const EGLenum EGL_OPENGL_ES_API = 0x30A0;
     g->egl.BindAPI(EGL_OPENGL_ES_API);
-    EGLConfig cfg;
+    /* EGL_SURFACE_TYPE must be requested as 0 explicitly: left
+     * unspecified it defaults to EGL_WINDOW_BIT, and the surfaceless
+     * platform has no window configs, so the choose comes back empty. */
+    EGLConfig cfg = NULL;
     EGLint ncfg = 0;
+    static const EGLint SURFACE_TYPE = 0x3033;
     static const EGLint cfg_attrs[] = {
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+        SURFACE_TYPE, 0,
+        EGL_NONE
     };
     if (!g->egl.ChooseConfig(g->dpy, cfg_attrs, &cfg, 1, &ncfg) ||
         ncfg < 1) {
-        fflog(LOG_INFO, "gpu: no GLES2 EGL config");
-        goto fail;
+        /* No config at all: a no-config context still works for pure
+         * FBO rendering where the display offers the extension. */
+        if (strstr(dext, "EGL_KHR_no_config_context")) {
+            cfg = NULL;
+            fflog(LOG_DEBUG, "gpu: using a no-config EGL context");
+        } else {
+            fflog(LOG_INFO, "gpu: no GLES2 EGL config");
+            goto fail;
+        }
     }
     static const EGLint ctx_attrs[] = {
         EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE
@@ -537,10 +555,10 @@ gpu_debayer_t *gpu_debayer_open(int raw_w, int raw_h, int hflip)
     g->gl.GetIntegerv(GL_MAX_TEXTURE_SIZE, &g->max_tex);
     GLint max_rb = 0;
     g->gl.GetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &max_rb);
-    /* The raw import is raw_w/4 texels wide (byte packing), so only the
-     * height can exceed the cap; tile by rows. Output planes are half
-     * and quarter height and never wider than the raw import. */
-    if (raw_w / 4 > g->max_tex || raw_h / 2 > max_rb) {
+    /* The raw import is raw_w/2 texels wide (one texel per Bayer pair),
+     * so only the height can exceed the cap; tile by rows. Output planes
+     * are half and quarter height and never wider than the raw import. */
+    if (raw_w / 2 > g->max_tex || raw_h / 2 > max_rb) {
         fflog(LOG_INFO, "gpu: frame exceeds GPU limits (tex %d, rb %d)",
               g->max_tex, max_rb);
         goto fail;
@@ -562,12 +580,12 @@ gpu_debayer_t *gpu_debayer_open(int raw_w, int raw_h, int hflip)
     if (!g->prog_y || !g->prog_c)
         goto fail;
     g->y_a_pos    = g->gl.GetAttribLocation(g->prog_y, "a_pos");
-    g->y_u_texsz  = g->gl.GetUniformLocation(g->prog_y, "u_texsz");
+    g->y_u_texsz  = g->gl.GetUniformLocation(g->prog_y, "u_inv");
     g->y_u_ow     = g->gl.GetUniformLocation(g->prog_y, "u_ow");
     g->y_u_flip   = g->gl.GetUniformLocation(g->prog_y, "u_flip");
     g->y_u_rowbase = g->gl.GetUniformLocation(g->prog_y, "u_rowbase");
     g->c_a_pos    = g->gl.GetAttribLocation(g->prog_c, "a_pos");
-    g->c_u_texsz  = g->gl.GetUniformLocation(g->prog_c, "u_texsz");
+    g->c_u_texsz  = g->gl.GetUniformLocation(g->prog_c, "u_inv");
     g->c_u_ow     = g->gl.GetUniformLocation(g->prog_c, "u_ow");
     g->c_u_flip   = g->gl.GetUniformLocation(g->prog_c, "u_flip");
     g->c_u_rowbase = g->gl.GetUniformLocation(g->prog_c, "u_rowbase");
@@ -637,7 +655,8 @@ int gpu_debayer_attach_raw(gpu_debayer_t *g, int idx, int fd)
     for (int t = 0; t < g->tiles; t++) {
         EGLImageKHR img = import_bytes(g, fd,
                                        (size_t)t * g->tile_h * g->raw_w,
-                                       g->raw_w, g->tile_h, g->raw_w);
+                                       g->raw_w / 2, g->tile_h, g->raw_w,
+                                       DRM_FORMAT_GR88);
         if (img == EGL_NO_IMAGE)
             return -1;
         GLuint tex;
@@ -670,8 +689,8 @@ int gpu_debayer_attach_dst(gpu_debayer_t *g, int slot, int fd,
     if (g->dead || slot < 0 || slot >= MAX_DST_SLOTS)
         return -1;
     const int ow = g->raw_w / 2, oh = g->raw_h / 2;
-    if (y_stride < ow || y_stride % 8) {
-        fflog(LOG_WARNING, "gpu: unusable encoder stride %d", y_stride);
+    if (y_stride < ow || y_stride % 128) {
+        fflog(LOG_WARNING, "gpu: unusable destination stride %d", y_stride);
         return -1;
     }
     size_t y_sz = (size_t)y_stride * oh;
@@ -690,8 +709,9 @@ int gpu_debayer_attach_dst(gpu_debayer_t *g, int slot, int fd,
     };
     struct dst *d = &g->dst[slot];
     for (int pl = 0; pl < 3; pl++) {
-        d->img[pl] = import_bytes(g, fd, plane[pl].off, plane[pl].w_bytes,
-                                  plane[pl].h, plane[pl].pitch);
+        d->img[pl] = import_bytes(g, fd, plane[pl].off,
+                                  plane[pl].w_bytes / 4, plane[pl].h,
+                                  plane[pl].pitch, DRM_FORMAT_ARGB8888);
         if (d->img[pl] == EGL_NO_IMAGE)
             return -1;
         g->gl.GenRenderbuffers(1, &d->rb[pl]);
@@ -737,13 +757,13 @@ static void draw_pass(gpu_debayer_t *g, int idx, struct dst *d, int pass)
                               FS_TRI);
     g->gl.EnableVertexAttribArray((GLuint)a_pos);
     if (pass == 0) {
-        g->gl.Uniform2f(g->y_u_texsz, (GLfloat)(g->raw_w / 4),
-                        (GLfloat)g->tile_h);
+        g->gl.Uniform2f(g->y_u_texsz, 1.f / (GLfloat)(g->raw_w / 2),
+                        1.f / (GLfloat)g->tile_h);
         g->gl.Uniform1f(g->y_u_ow, (GLfloat)ow);
         g->gl.Uniform1f(g->y_u_flip, (GLfloat)g->hflip);
     } else {
-        g->gl.Uniform2f(g->c_u_texsz, (GLfloat)(g->raw_w / 4),
-                        (GLfloat)g->tile_h);
+        g->gl.Uniform2f(g->c_u_texsz, 1.f / (GLfloat)(g->raw_w / 2),
+                        1.f / (GLfloat)g->tile_h);
         g->gl.Uniform1f(g->c_u_ow, (GLfloat)ow);
         g->gl.Uniform1f(g->c_u_flip, (GLfloat)g->hflip);
         static const GLfloat coef[2][3] = {
