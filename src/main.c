@@ -1471,7 +1471,8 @@ int main(int argc, char **argv)
     cam_lamp_apply_idle();
 
     struct _u_instance inst;
-    if (ulfius_init_instance(&inst, port, NULL, NULL) != U_OK) {
+    /* Dual-stack listener: one socket serves IPv4 and IPv6 clients. */
+    if (ulfius_init_instance_ipv6(&inst, port, NULL, U_USE_ALL, NULL) != U_OK) {
         fflog(LOG_ERR, "ulfius init failed");
         return 1;
     }

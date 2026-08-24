@@ -509,6 +509,8 @@ char *logs_tail_json(const char *name, long lines, long long from)
 
 /* ----------------------------------------------------------- export */
 
+#define PSTORE_DIR "/sys/fs/pstore"   /* ramoops records from the last panics */
+
 struct logs_export {
     char base[128];
     FILE *pipe;
@@ -768,6 +770,31 @@ logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
     (void)stage_file(san, LOGS_RSYSLOG, dst);
     snprintf(dst, sizeof(dst), "%s/system/loglevels.txt", top);
     (void)stage_file(san, LOGS_EFFECTIVE, dst);
+
+    /* crash records: what pstore (ramoops) carried across the last panic
+     * reboots, if anything; the directory exists only when it holds some */
+    DIR *pp = opendir(PSTORE_DIR);
+    if (pp) {
+        int made = 0;
+        struct dirent *de;
+        while ((de = readdir(pp)) != NULL) {
+            if (de->d_name[0] == '.')
+                continue;
+            snprintf(src, sizeof(src), "%s/%s", PSTORE_DIR, de->d_name);
+            struct stat st;
+            if (stat(src, &st) != 0 || !S_ISREG(st.st_mode) ||
+                st.st_size > EXPORT_MAX_FILE)
+                continue;
+            if (!made) {
+                snprintf(d, sizeof(d), "%s/system/pstore", top);
+                (void)mkdir(d, 0700);
+                made = 1;
+            }
+            snprintf(dst, sizeof(dst), "%s/system/pstore/%s", top, de->d_name);
+            (void)stage_file(san, src, dst);
+        }
+        closedir(pp);
+    }
     if (settings_cb) {
         FILE *t = tmpfile();
         if (t) {
@@ -799,7 +826,11 @@ logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
                    "  system/          firmware version, kernel ring buffer,"
                    " uptime, memory, disk,\n"
                    "                   processes, effective log levels,"
-                   " settings (secrets masked)\n\n",
+                   " settings (secrets masked)\n"
+                   "  system/pstore/   crash records the kernel kept across"
+                   " its last panic reboots\n"
+                   "                   (ramoops), present only when there"
+                   " are any\n\n",
                 ts, sanitize ? "yes" : "NO - contains the machine identity,"
                                      " network addresses, and any credentials"
                                      " the logs carry");
