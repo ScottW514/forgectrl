@@ -385,15 +385,20 @@ function startH264() {
           if (queue.length && !sb.updating) sb.appendBuffer(queue.shift());
         }
         sb.addEventListener('updateend', function () {
-          // Stay at the live edge: a background tab pauses playback
-          // while fragments keep arriving.
+          // Stay at the live edge, clamped inside the newest buffered
+          // range: early on only a frame or two is buffered, and a
+          // fixed back-off would land in a gap and stall.
           if (v.buffered.length) {
-            var end = v.buffered.end(v.buffered.length - 1);
-            if (end - v.currentTime > 1.5) v.currentTime = end - 0.2;
-            if (v.buffered.length && end - v.buffered.start(0) > 30 &&
-                !sb.updating)
+            var last = v.buffered.length - 1;
+            var start = v.buffered.start(last);
+            var end = v.buffered.end(last);
+            if (v.currentTime < start || end - v.currentTime > 1.5)
+              v.currentTime = Math.max(start, end - 0.3);
+            if (end - v.buffered.start(0) > 30 && !sb.updating)
               sb.remove(v.buffered.start(0), end - 10);
           }
+          // A seek near the live edge can leave the element paused.
+          if (v.paused) v.play().catch(function () {});
           pumpQueue();
         });
         (function read() {

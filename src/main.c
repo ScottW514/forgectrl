@@ -172,6 +172,9 @@ struct h264_ctx {
     cam_h264_client_t *cl;
     mp4mux_t          *mux;
     uint32_t           frag_seq;
+    uint64_t           pts_base;    /* first frame's clock: fragments are
+                                     * zero-based so any player starts at
+                                     * the top of its timeline */
     uint64_t           prev_pts;
     uint8_t           *chunk;       /* current fMP4 piece being drained */
     size_t             chunk_len;
@@ -195,7 +198,8 @@ static int h264_next_chunk(struct h264_ctx *hc)
         dur = (uint32_t)(pts - hc->prev_pts);
     hc->prev_pts = pts;
     free(hc->chunk);
-    hc->chunk = mp4mux_fragment(hc->mux, ++hc->frag_seq, pts, dur, key,
+    hc->chunk = mp4mux_fragment(hc->mux, ++hc->frag_seq,
+                                pts - hc->pts_base, dur, key,
                                 au, (size_t)len, &hc->chunk_len);
     hc->off = 0;
     return hc->chunk ? 0 : -1;
@@ -273,8 +277,9 @@ static int do_h264(cam_id_t cam, struct _u_response *res)
     }
     size_t init_len = 0, frag_len = 0;
     uint8_t *init = mp4mux_init_segment(hc->mux, &init_len);
+    hc->pts_base = pts;
     hc->prev_pts = pts;
-    uint8_t *frag = mp4mux_fragment(hc->mux, ++hc->frag_seq, pts,
+    uint8_t *frag = mp4mux_fragment(hc->mux, ++hc->frag_seq, 0,
                                     90000 / 15, key, au, (size_t)len,
                                     &frag_len);
     if (!init || !frag) {
