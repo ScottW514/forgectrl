@@ -345,6 +345,7 @@ class Mock:
         self.status = {
             'state': 'idle', 'homed': True, 'diag': False,
             'temps': {'chassis_c': 29.0, 'supply_raw': 589, 'soc_c': 42.8, 'soc_throttle': 0},
+            'sys': {'cpu_pct': 7.4, 'mem_pct': 38.2},
             'pos': {'x': 12.34, 'y': -5.6, 'z': 0.0},
             'laser_locked': True,
             'laser': {'emission_samples': 0, 'pgood_samples': 0},

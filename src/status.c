@@ -24,6 +24,7 @@
 #include <fcntl.h>
 #include <linux/input.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -393,6 +394,65 @@ long supply_temp_raw(void)
     return rd_attr_long("pic/pwr_temp", -1);
 }
 
+/* CPU utilization from the /proc/stat aggregate line: busy percent over
+ * the interval since the previous status read (the panel polls about
+ * once a second, so that is the window the number describes). The first
+ * read only primes the counters and reports no value. The daemon is
+ * thread-per-connection, so the counters sit behind a mutex. Returns
+ * -1 when unreadable or unprimed. */
+static double cpu_used_pct(void)
+{
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    static unsigned long long prev_total, prev_idle;
+    static int primed;
+
+    FILE *f = fopen("/proc/stat", "r");
+    if (!f)
+        return -1;
+    unsigned long long v[8] = {0};
+    int n = fscanf(f, "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
+                   &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]);
+    fclose(f);
+    if (n < 4)
+        return -1;
+    unsigned long long total = 0;
+    for (int i = 0; i < 8; i++)
+        total += v[i];
+    unsigned long long idle = v[3] + v[4];      /* idle + iowait */
+
+    pthread_mutex_lock(&lock);
+    double pct = -1;
+    if (primed && total > prev_total && idle >= prev_idle) {
+        unsigned long long dt = total - prev_total;
+        pct = 100.0 * (double)(dt - (idle - prev_idle)) / (double)dt;
+    }
+    prev_total = total;
+    prev_idle = idle;
+    primed = 1;
+    pthread_mutex_unlock(&lock);
+    return pct;
+}
+
+/* Memory utilization: MemTotal against MemAvailable, the kernel's own
+ * estimate of what userspace could still claim without swapping.
+ * Returns the used percent, or -1 when unreadable. */
+static double mem_used_pct(void)
+{
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f)
+        return -1;
+    long total = -1, avail = -1;
+    char line[64];
+    while (fgets(line, sizeof(line), f) && (total < 0 || avail < 0)) {
+        sscanf(line, "MemTotal: %ld", &total);
+        sscanf(line, "MemAvailable: %ld", &avail);
+    }
+    fclose(f);
+    if (total <= 0 || avail < 0 || avail > total)
+        return -1;
+    return 100.0 * (double)(total - avail) / (double)total;
+}
+
 int machine_status_json(char *buf, size_t len, const char *extra)
 {
     char state[24] = "";
@@ -480,6 +540,21 @@ int machine_status_json(char *buf, size_t len, const char *extra)
     append(buf, len, &off, ",\"soc_throttle\":");
     if (thr >= 0)
         append(buf, len, &off, "%ld},", thr);
+    else
+        append(buf, len, &off, "null},");
+    /* SoC load next to its temperature: CPU busy percent over the window
+     * since the previous status read, memory used percent by the
+     * kernel's MemAvailable estimate. */
+    double cpu = cpu_used_pct();
+    double mem = mem_used_pct();
+    append(buf, len, &off, "\"sys\":{\"cpu_pct\":");
+    if (cpu >= 0)
+        append(buf, len, &off, "%.1f", cpu);
+    else
+        append(buf, len, &off, "null");
+    append(buf, len, &off, ",\"mem_pct\":");
+    if (mem >= 0)
+        append(buf, len, &off, "%.1f},", mem);
     else
         append(buf, len, &off, "null},");
     char gf_latest[32], gf_tested[32];

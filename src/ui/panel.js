@@ -466,6 +466,12 @@ function renderCooling() {
              thr > 0 ? 'b-warn' : 'b-dim');
     g += txt('Supply (raw)', M.temps.supply_raw == null ? '\u2014' : String(M.temps.supply_raw), 'b-dim');
   }
+  if (M.sys) {
+    g += txt('CPU', M.sys.cpu_pct == null ? '\u2014' : M.sys.cpu_pct.toFixed(0) + '%',
+             M.sys.cpu_pct != null && M.sys.cpu_pct >= 90 ? 'b-warn' : '');
+    g += txt('Memory', M.sys.mem_pct == null ? '\u2014' : M.sys.mem_pct.toFixed(0) + '%',
+             M.sys.mem_pct != null && M.sys.mem_pct >= 90 ? 'b-warn' : '');
+  }
   if (M.fans) {
     g += txt('Air assist', rpm(M.fans.air_assist));
     g += txt('Exhaust', rpm(M.fans.exhaust));

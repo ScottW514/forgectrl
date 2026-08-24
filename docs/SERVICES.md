@@ -183,7 +183,10 @@ counters), fan RPM, coolant temperatures, pump/TEC state, the board
 temperatures (`temps`: `chassis_c` from the LM75, `soc_c` from the i.MX6
 on-die monitor, `supply_raw` from `pic/pwr_temp` as the count, and
 `soc_throttle`, the kernel's CPU-frequency cooling state, 0 at full speed;
-each `null` when absent; watched, not gated), and the switch map above.
+each `null` when absent; watched, not gated), the SoC load (`sys`:
+`cpu_pct`, busy percent from `/proc/stat` over the interval since the
+previous status read, `null` on the first read; `mem_pct`, used percent
+from `MemTotal` against `MemAvailable`), and the switch map above.
 
 **Never poll the Grbl TCP socket for status.** A connection there displaces the
 sender's session (LightBurn). Controller-side facts reach forgectrl only through

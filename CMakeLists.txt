@@ -53,7 +53,15 @@ install(TARGETS forgectrl RUNTIME DESTINATION bin)
 # after the build.
 add_executable(status_idle_test tests/status_idle_test.c src/status.c)
 target_compile_options(status_idle_test PRIVATE -Wall -Wextra)
-target_link_libraries(status_idle_test m)
+target_link_libraries(status_idle_test m pthread)
+
+# Host unit test for the machine status JSON: the sys block reports
+# memory utilization at once and CPU utilization once primed by a prior
+# read, and the document stays inside the handler's buffer. CI runs it
+# after the build.
+add_executable(status_sys_test tests/status_sys_test.c src/status.c)
+target_compile_options(status_sys_test PRIVATE -Wall -Wextra)
+target_link_libraries(status_sys_test m pthread)
 
 # Host unit test for the log-export sanitizer: every identifying class
 # redacted, ordinary log text untouched, stable placeholders, idempotent.
@@ -66,7 +74,7 @@ target_compile_options(sanitize_test PRIVATE -Wall -Wextra)
 # the enclosure open. CI runs it after the build.
 add_executable(lid_gate_test tests/lid_gate_test.c src/status.c)
 target_compile_options(lid_gate_test PRIVATE -Wall -Wextra)
-target_link_libraries(lid_gate_test m)
+target_link_libraries(lid_gate_test m pthread)
 
 # Host unit test for the raw-frame front end: the 10-bit -> 8-bit
 # narrowing the 8 MP (OV8856) capture path depends on, and the Bayer

@@ -20,6 +20,8 @@ jobs:
         run: cmake --build build -j"$(nproc)"
       - name: machine_is_idle fail-closed (X-2)
         run: ./build/status_idle_test
+      - name: Machine status JSON sys block
+        run: ./build/status_sys_test
       - name: Log-export sanitizer
         run: ./build/sanitize_test
       - name: Raw-frame narrowing and Bayer phase
