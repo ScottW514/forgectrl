@@ -8,6 +8,7 @@
  *   odd  rows:  G R G R ...
  */
 #include <stddef.h>
+#include <stdlib.h>
 
 #include "debayer.h"
 
