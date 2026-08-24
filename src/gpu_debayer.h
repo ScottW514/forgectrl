@@ -49,10 +49,18 @@ int gpu_debayer_attach_raw(gpu_debayer_t *g, int idx, int fd);
 int gpu_debayer_attach_dst(gpu_debayer_t *g, int slot, int fd,
                            int y_stride, size_t buf_len);
 
-/* Convert raw slot `idx` into destination slot `slot`. Blocks until the
- * GPU is done (the destination is safe to hand to the encoder on
- * return). Returns 0, or -1 with the reason logged; after a failure the
- * instance is dead and the caller falls back to the CPU path. */
-int gpu_debayer_convert(gpu_debayer_t *g, int idx, int slot);
+/* Start converting raw slot `idx` into destination slot `slot` and
+ * return without waiting: the draws are submitted behind a fence, so
+ * the caller can overlap the render with other work (the previous
+ * frame's copies and encodes) and collect it with gpu_debayer_wait.
+ * The raw buffer must stay untouched until the wait returns. Returns
+ * 0, or -1 with the reason logged; after a failure the instance is
+ * dead and the caller falls back to the CPU path. */
+int gpu_debayer_kick(gpu_debayer_t *g, int idx, int slot);
+
+/* Block until the render kicked into `slot` has fully landed in its
+ * destination buffer. Without the fence extension this is a full
+ * pipeline drain (correct, just unoverlapped). Returns 0 or -1. */
+int gpu_debayer_wait(gpu_debayer_t *g, int slot);
 
 #endif

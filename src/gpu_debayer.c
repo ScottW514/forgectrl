@@ -80,6 +80,12 @@ typedef unsigned int   GLbitfield;
 #define EGL_DMA_BUF_PLANE0_FD_EXT   0x3272
 #define EGL_DMA_BUF_PLANE0_OFFSET_EXT 0x3273
 #define EGL_DMA_BUF_PLANE0_PITCH_EXT  0x3274
+#define EGL_SYNC_FENCE_KHR          0x30F9
+#define EGL_SYNC_FLUSH_COMMANDS_BIT_KHR 0x0001
+#define EGL_CONDITION_SATISFIED_KHR 0x30F6
+#define EGL_FOREVER_KHR             0xFFFFFFFFFFFFFFFFull
+typedef void *EGLSyncKHR;
+typedef uint64_t EGLTimeKHR;
 
 #define DRM_FORMAT_ARGB8888         0x34325241  /* 'AR24' */
 #define DRM_FORMAT_GR88             0x38385247  /* 'GR88' */
@@ -131,6 +137,10 @@ struct egl_api {
     EGLImageKHR (*CreateImageKHR)(EGLDisplay, EGLContext, EGLenum,
                                   void *, const EGLint *);
     EGLBoolean  (*DestroyImageKHR)(EGLDisplay, EGLImageKHR);
+    EGLSyncKHR  (*CreateSyncKHR)(EGLDisplay, EGLenum, const EGLint *);
+    EGLBoolean  (*DestroySyncKHR)(EGLDisplay, EGLSyncKHR);
+    EGLint      (*ClientWaitSyncKHR)(EGLDisplay, EGLSyncKHR, EGLint,
+                                     EGLTimeKHR);
 };
 
 struct gles_api {
@@ -180,6 +190,7 @@ struct gles_api {
     void    (*EnableVertexAttribArray)(GLuint);
     void    (*DrawArrays)(GLenum, GLint, GLsizei);
     void    (*Finish)(void);
+    void    (*Flush)(void);
     /* extension procs */
     void    (*EGLImageTargetTexture2DOES)(GLenum, void *);
     void    (*EGLImageTargetRenderbufferStorageOES)(GLenum, void *);
@@ -209,6 +220,8 @@ struct gpu_debayer {
     GLuint          raw_tex[MAX_RAW_SLOTS][MAX_TILES];
     int             raw_attached[MAX_RAW_SLOTS];
     struct dst      dst[MAX_DST_SLOTS];
+    EGLSyncKHR      fence[MAX_DST_SLOTS];
+    int             fences_ok;      /* EGL_KHR_fence_sync usable */
     GLuint          prog_y, prog_c;
     /* uniform/attrib locations */
     GLint           y_a_pos, y_u_texsz, y_u_ow, y_u_flip, y_u_rowbase;
@@ -321,6 +334,10 @@ static int load_egl(struct egl_api *e)
         e->GetProcAddress("eglGetPlatformDisplayEXT");
     *(void **)&e->CreateImageKHR = e->GetProcAddress("eglCreateImageKHR");
     *(void **)&e->DestroyImageKHR = e->GetProcAddress("eglDestroyImageKHR");
+    *(void **)&e->CreateSyncKHR = e->GetProcAddress("eglCreateSyncKHR");
+    *(void **)&e->DestroySyncKHR = e->GetProcAddress("eglDestroySyncKHR");
+    *(void **)&e->ClientWaitSyncKHR =
+        e->GetProcAddress("eglClientWaitSyncKHR");
     return 0;
 }
 
@@ -353,7 +370,7 @@ static int load_gles(struct gles_api *g,
     G(GenRenderbuffers); G(DeleteRenderbuffers); G(BindRenderbuffer);
     G(Viewport); G(Scissor); G(Enable); G(Disable);
     G(VertexAttribPointer); G(EnableVertexAttribArray); G(DrawArrays);
-    G(Finish);
+    G(Finish); G(Flush);
 #undef G
     *(void **)&g->EGLImageTargetTexture2DOES =
         proc("glEGLImageTargetTexture2DOES");
@@ -506,6 +523,11 @@ gpu_debayer_t *gpu_debayer_open(int raw_w, int raw_h, int hflip)
         fflog(LOG_INFO, "gpu: required EGL extensions missing");
         goto fail;
     }
+    g->fences_ok = strstr(dext, "EGL_KHR_fence_sync") &&
+                   g->egl.CreateSyncKHR && g->egl.DestroySyncKHR &&
+                   g->egl.ClientWaitSyncKHR;
+    if (!g->fences_ok)
+        fflog(LOG_INFO, "gpu: no EGL fences, renders will not overlap");
 
     static const EGLenum EGL_OPENGL_ES_API = 0x30A0;
     g->egl.BindAPI(EGL_OPENGL_ES_API);
@@ -613,6 +635,14 @@ void gpu_debayer_close(gpu_debayer_t *g)
         if (g->ctx != EGL_NO_CONTEXT) {
             g->egl.MakeCurrent(g->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE,
                                g->ctx);
+            for (int i = 0; i < MAX_DST_SLOTS; i++)
+                if (g->fence[i]) {
+                    g->egl.ClientWaitSyncKHR(g->dpy, g->fence[i],
+                                             EGL_SYNC_FLUSH_COMMANDS_BIT_KHR,
+                                             EGL_FOREVER_KHR);
+                    g->egl.DestroySyncKHR(g->dpy, g->fence[i]);
+                    g->fence[i] = NULL;
+                }
             for (int i = 0; i < MAX_RAW_SLOTS; i++)
                 for (int t = 0; t < MAX_TILES; t++) {
                     if (g->raw_tex[i][t])
@@ -793,11 +823,11 @@ static void draw_pass(gpu_debayer_t *g, int idx, struct dst *d, int pass)
     g->gl.Disable(GL_SCISSOR_TEST);
 }
 
-int gpu_debayer_convert(gpu_debayer_t *g, int idx, int slot)
+int gpu_debayer_kick(gpu_debayer_t *g, int idx, int slot)
 {
     if (g->dead || idx < 0 || idx >= MAX_RAW_SLOTS ||
         !g->raw_attached[idx] || slot < 0 || slot >= MAX_DST_SLOTS ||
-        !g->dst[slot].attached)
+        !g->dst[slot].attached || g->fence[slot])
         return -1;
 
     /* FORGECTRL_GPU_PASSES limits the draws (1 = Y only, 2 = +U): a
@@ -813,8 +843,38 @@ int gpu_debayer_convert(gpu_debayer_t *g, int idx, int slot)
     g->gl.ActiveTexture(GL_TEXTURE0);
     for (int pass = 0; pass < npass; pass++)
         draw_pass(g, idx, &g->dst[slot], pass);
+    if (g->fences_ok) {
+        g->fence[slot] = g->egl.CreateSyncKHR(g->dpy, EGL_SYNC_FENCE_KHR,
+                                              NULL);
+        g->gl.Flush();
+    }
+    if (!gl_ok(g, "kick")) {
+        g->dead = 1;
+        return -1;
+    }
+    return 0;
+}
+
+int gpu_debayer_wait(gpu_debayer_t *g, int slot)
+{
+    if (g->dead || slot < 0 || slot >= MAX_DST_SLOTS)
+        return -1;
+    if (g->fence[slot]) {
+        EGLint r = g->egl.ClientWaitSyncKHR(g->dpy, g->fence[slot],
+                                            EGL_SYNC_FLUSH_COMMANDS_BIT_KHR,
+                                            EGL_FOREVER_KHR);
+        g->egl.DestroySyncKHR(g->dpy, g->fence[slot]);
+        g->fence[slot] = NULL;
+        if (r != EGL_CONDITION_SATISFIED_KHR) {
+            fflog(LOG_WARNING, "gpu: fence wait failed (0x%x)", r);
+            g->dead = 1;
+            return -1;
+        }
+        return 0;
+    }
+    /* No fences: drain everything. */
     g->gl.Finish();
-    if (!gl_ok(g, "convert")) {
+    if (!gl_ok(g, "wait")) {
         g->dead = 1;
         return -1;
     }

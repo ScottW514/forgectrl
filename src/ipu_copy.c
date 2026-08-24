@@ -30,9 +30,10 @@
 struct ipu_copy {
     int      fd;
     int      src_w, w, h;
-    int      src_dmabuf;
+    int      n_src;
+    int      src_dmabuf[IPU_COPY_SRCS];
     size_t   src_len;
-    uint8_t *src_map;       /* diagnostic mapping, made on first use */
+    uint8_t *src_map[IPU_COPY_SRCS]; /* diagnostic maps, on first use */
 };
 
 static int xioctl(int fd, unsigned long req, void *arg)
@@ -91,7 +92,8 @@ ipu_copy_t *ipu_copy_open(int src_w, int w, int h)
     ipu_copy_t *c = calloc(1, sizeof(*c));
     if (!c)
         return NULL;
-    c->src_dmabuf = -1;
+    for (int i = 0; i < IPU_COPY_SRCS; i++)
+        c->src_dmabuf[i] = -1;
     c->src_w = src_w;
     c->w = w;
     c->h = h;
@@ -119,31 +121,37 @@ ipu_copy_t *ipu_copy_open(int src_w, int w, int h)
     }
 
     struct v4l2_requestbuffers req = {
-        .count = 1,
+        .count = IPU_COPY_SRCS,
         .type = V4L2_BUF_TYPE_VIDEO_OUTPUT,
         .memory = V4L2_MEMORY_MMAP,
     };
-    if (xioctl(c->fd, VIDIOC_REQBUFS, &req) < 0 || req.count < 1) {
-        fflog(LOG_INFO, "ipu: source REQBUFS refused: %s", strerror(errno));
+    if (xioctl(c->fd, VIDIOC_REQBUFS, &req) < 0 ||
+        req.count < IPU_COPY_SRCS) {
+        fflog(LOG_INFO, "ipu: %d source buffers refused: %s",
+              IPU_COPY_SRCS, strerror(errno));
         goto fail;
     }
-    struct v4l2_buffer buf = { .type = V4L2_BUF_TYPE_VIDEO_OUTPUT,
-                               .memory = V4L2_MEMORY_MMAP, .index = 0 };
-    if (xioctl(c->fd, VIDIOC_QUERYBUF, &buf) < 0)
-        goto fail;
-    c->src_len = buf.length;
+    c->n_src = IPU_COPY_SRCS;
+    for (int i = 0; i < c->n_src; i++) {
+        struct v4l2_buffer buf = { .type = V4L2_BUF_TYPE_VIDEO_OUTPUT,
+                                   .memory = V4L2_MEMORY_MMAP,
+                                   .index = (unsigned)i };
+        if (xioctl(c->fd, VIDIOC_QUERYBUF, &buf) < 0)
+            goto fail;
+        c->src_len = buf.length;
 
-    struct v4l2_exportbuffer exp = {
-        .type = V4L2_BUF_TYPE_VIDEO_OUTPUT,
-        .index = 0,
-        .flags = O_CLOEXEC,
-    };
-    if (xioctl(c->fd, VIDIOC_EXPBUF, &exp) < 0) {
-        fflog(LOG_INFO, "ipu: source dmabuf export refused: %s",
-              strerror(errno));
-        goto fail;
+        struct v4l2_exportbuffer exp = {
+            .type = V4L2_BUF_TYPE_VIDEO_OUTPUT,
+            .index = (unsigned)i,
+            .flags = O_CLOEXEC,
+        };
+        if (xioctl(c->fd, VIDIOC_EXPBUF, &exp) < 0) {
+            fflog(LOG_INFO, "ipu: source dmabuf export refused: %s",
+                  strerror(errno));
+            goto fail;
+        }
+        c->src_dmabuf[i] = exp.fd;
     }
-    c->src_dmabuf = exp.fd;
 
     struct v4l2_requestbuffers creq = {
         .count = 1,
@@ -172,37 +180,45 @@ fail:
     return NULL;
 }
 
-int ipu_copy_src_dmabuf(ipu_copy_t *c, int *stride, size_t *len)
+int ipu_copy_src_dmabuf(ipu_copy_t *c, int i, int *stride, size_t *len)
 {
+    if (i < 0 || i >= c->n_src)
+        return -1;
     *stride = c->src_w;
     *len = c->src_len;
-    return c->src_dmabuf;
+    return c->src_dmabuf[i];
 }
 
-const uint8_t *ipu_copy_src_map(ipu_copy_t *c)
+const uint8_t *ipu_copy_src_map(ipu_copy_t *c, int i)
 {
-    if (!c->src_map) {
+    if (i < 0 || i >= c->n_src)
+        return NULL;
+    if (!c->src_map[i]) {
         struct v4l2_buffer buf = { .type = V4L2_BUF_TYPE_VIDEO_OUTPUT,
-                                   .memory = V4L2_MEMORY_MMAP, .index = 0 };
+                                   .memory = V4L2_MEMORY_MMAP,
+                                   .index = (unsigned)i };
         if (xioctl(c->fd, VIDIOC_QUERYBUF, &buf) < 0)
             return NULL;
         void *m = mmap(NULL, buf.length, PROT_READ, MAP_SHARED, c->fd,
                        buf.m.offset);
         if (m == MAP_FAILED)
             return NULL;
-        c->src_map = m;
+        c->src_map[i] = m;
     }
-    return c->src_map;
+    return c->src_map[i];
 }
 
-int ipu_copy_run(ipu_copy_t *c, int dst_fd, size_t dst_len)
+int ipu_copy_run(ipu_copy_t *c, int i, int dst_fd, size_t dst_len)
 {
+    if (i < 0 || i >= c->n_src)
+        return -1;
     struct v4l2_buffer db = { .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
                               .memory = V4L2_MEMORY_DMABUF, .index = 0 };
     db.m.fd = dst_fd;
     db.length = (unsigned)dst_len;
     struct v4l2_buffer sb = { .type = V4L2_BUF_TYPE_VIDEO_OUTPUT,
-                              .memory = V4L2_MEMORY_MMAP, .index = 0 };
+                              .memory = V4L2_MEMORY_MMAP,
+                              .index = (unsigned)i };
     sb.bytesused = (unsigned)c->src_len;
 
     if (xioctl(c->fd, VIDIOC_QBUF, &db) < 0 ||
@@ -237,10 +253,12 @@ void ipu_copy_close(ipu_copy_t *c)
         t = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         xioctl(c->fd, VIDIOC_STREAMOFF, &t);
     }
-    if (c->src_map)
-        munmap(c->src_map, c->src_len);
-    if (c->src_dmabuf >= 0)
-        close(c->src_dmabuf);
+    for (int i = 0; i < IPU_COPY_SRCS; i++) {
+        if (c->src_map[i])
+            munmap(c->src_map[i], c->src_len);
+        if (c->src_dmabuf[i] >= 0)
+            close(c->src_dmabuf[i]);
+    }
     if (c->fd >= 0)
         close(c->fd);
     free(c);

@@ -305,6 +305,15 @@ static ipu_copy_t *ipu;
 static int gpu_disabled;
 static int hw_skip_disabled;
 
+/* The GPU pipeline's in-flight frame (worker thread only): the IPU
+ * source slot being rendered, the capture buffer held out of the queue
+ * for it, and its timestamp. Reset wherever the GPU is torn down - the
+ * buffers it refers to go back to the queue through STREAMOFF or the
+ * teardown paths, never through a stale delivery. */
+static int pend_slot = -1;
+static unsigned pend_idx;
+static uint64_t pend_pts;
+
 /* FORGECTRL_NO_CACHED_BUFS: never request non-coherent capture buffers
  * (forces the uncached-mmap + bounce-copy path). */
 static int cached_disabled;
@@ -640,6 +649,7 @@ static void release_capture(void)
         gpu_debayer_close(gpu);
         gpu = NULL;
     }
+    pend_slot = -1;
     if (eng.streaming) {
         enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         xioctl(eng.fd, VIDIOC_STREAMOFF, &type);
@@ -1046,6 +1056,7 @@ static void ensure_encoders(int jpeg_want, int h264_want,
             ipu_copy_close(ipu);
             ipu = NULL;
         }
+        pend_slot = -1;
         pthread_mutex_lock(&h264_params_mx);
         mp4mux_free(h264_params);
         h264_params = NULL;
@@ -1113,12 +1124,12 @@ static void ensure_encoders(int jpeg_want, int h264_want,
             }
             ok = gpu_debayer_attach_raw(gpu, i, eng.bufs[i].dmabuf) == 0;
         }
-        if (ok) {
+        for (int i = 0; ok && i < IPU_COPY_SRCS; i++) {
             int stride;
             size_t len;
-            int fd = ipu_copy_src_dmabuf(ipu, &stride, &len);
+            int fd = ipu_copy_src_dmabuf(ipu, i, &stride, &len);
             ok = fd >= 0 &&
-                 gpu_debayer_attach_dst(gpu, 0, fd, stride, len) == 0;
+                 gpu_debayer_attach_dst(gpu, i, fd, stride, len) == 0;
         }
         if (!ok) {
             gpu_debayer_close(gpu);
@@ -1136,7 +1147,7 @@ static void ensure_encoders(int jpeg_want, int h264_want,
  * on this GPU. Reads the write-combine encoder buffer, so it is slow and
  * runs once. */
 static void gpu_check_once(const uint8_t *raw, int raw_w, int raw_h,
-                           int hflip, vpu_jpeg_t *v)
+                           int hflip, vpu_jpeg_t *v, int slot)
 {
     static int done;
     if (done || !getenv("FORGECTRL_GPU_CHECK"))
@@ -1184,11 +1195,11 @@ static void gpu_check_once(const uint8_t *raw, int raw_w, int raw_h,
         /* Attribute any bottom-row disagreement: the same row read from
          * the IPU's source (the GPU's own output, before the crop) says
          * whether the GPU rendered it wrong or the IPU copied it wrong. */
-        const uint8_t *src = ipu ? ipu_copy_src_map(ipu) : NULL;
+        const uint8_t *src = ipu ? ipu_copy_src_map(ipu, slot) : NULL;
         if (src) {
             int sstride;
             size_t slen;
-            ipu_copy_src_dmabuf(ipu, &sstride, &slen);
+            ipu_copy_src_dmabuf(ipu, slot, &sstride, &slen);
             const uint8_t *pre = src + (size_t)(oh - 1) * sstride;
             const uint8_t *post = gy + (size_t)(oh - 1) * ys;
             const uint8_t *ref = ry + (size_t)(oh - 1) * ys;
@@ -1360,6 +1371,13 @@ static void *worker(void *arg)
                       "restarts, stopping engine", CAM_MAX_RECOVERIES);
                 break;
             }
+            /* A queue cycle requeues every buffer, including one held
+             * for an in-flight render: settle the render first so the
+             * pipeline restarts from empty. */
+            if (gpu && pend_slot >= 0) {
+                gpu_debayer_wait(gpu, pend_slot);
+                pend_slot = -1;
+            }
             if (restream()) {
                 fflog(LOG_ERR, "cam: stream restart failed: %s",
                       strerror(errno));
@@ -1419,68 +1437,138 @@ static void *worker(void *arg)
             }
         }
 
-        /* Stream frame: demosaic + encode. The demosaic runs on the GPU
-         * when it is up (straight into the encoders' buffers through
-         * their dmabufs, one pass per encoder), on NEON otherwise. JPEG
-         * comes from the VPU JPEG unit with libjpeg as the fallback;
-         * H.264 comes from the VPU BIT processor and has no software
-         * fallback (the MJPEG stream is the fallback). */
-        if (encode) {
+        /* Stream frame: demosaic + encode. On the GPU path the two are
+         * pipelined: this frame's render is kicked behind a fence, and
+         * the PREVIOUS frame's finished render is copied to the
+         * encoders and published while the new one runs - the render
+         * overlaps the copies, the encodes and the next frame wait, so
+         * it alone paces the stream. The rendering frame's capture
+         * buffer is held out of the queue until its fence signals. On
+         * the CPU (NEON) path everything stays synchronous, and H.264
+         * has no software fallback (the MJPEG stream is the fallback).
+         * The pend_* state lives at file scope so teardowns reset it. */
+        int hold_buf = 0;
+        int want = jpeg_want || h264_want;
+
+        if (want || pend_slot >= 0) {
             struct timespec e0, e1, e2;
             now_ts(&e0);
-            ensure_encoders(jpeg_want, h264_want, half_w, half_h, HFLIP);
+            if (want)
+                ensure_encoders(jpeg_want, h264_want, half_w, half_h,
+                                HFLIP);
 
-            /* One GPU render into the IPU buffer, then one IPU crop per
-             * wanted encoder. Any failure retires the GPU mid-stream and
-             * the CPU finishes this frame. */
-            int gpu_jpeg = 0, gpu_h264 = 0;
-            if (gpu && ipu) {
-                struct timespec g0, g1, g2;
-                now_ts(&g0);
-                int rendered = gpu_debayer_convert(gpu, (int)buf.index,
-                                                   0) == 0;
-                now_ts(&g1);
-                if (rendered) {
-                    if (jpeg_want && vpu) {
-                        int stride;
-                        size_t len;
-                        int fd = vpu_jpeg_out_dmabuf(vpu, &stride, &len);
-                        gpu_jpeg = fd >= 0 &&
-                                   ipu_copy_run(ipu, fd, len) == 0;
-                    }
-                    if (h264_want && h264) {
-                        int stride;
-                        size_t len;
-                        int fd = vpu_h264_out_dmabuf(h264, &stride, &len);
-                        gpu_h264 = fd >= 0 &&
-                                   ipu_copy_run(ipu, fd, len) == 0;
-                    }
+            int gpu_mode = gpu && ipu;
+            if (!gpu_mode)
+                pend_slot = -1;     /* a teardown recycled the buffers */
+
+            /* Collect the in-flight render: deliver it below, or drop
+             * it if its viewers are gone. The held capture buffer goes
+             * back to the queue as soon as the fence clears (drop) or
+             * after the encoders and diagnostics are done with the
+             * frame (deliver). */
+            int deliver_slot = -1;
+            unsigned deliver_raw = 0;
+            uint64_t deliver_pts = 0;
+            struct timespec g0, g1, g2;
+            now_ts(&g0);
+            if (gpu_mode && pend_slot >= 0) {
+                int wrc = gpu_debayer_wait(gpu, pend_slot);
+                if (wrc == 0 && want) {
+                    deliver_slot = pend_slot;
+                    deliver_raw = pend_idx;
+                    deliver_pts = pend_pts;
+                } else {
+                    struct v4l2_buffer rb = {0};
+                    rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                    rb.memory = V4L2_MEMORY_MMAP;
+                    rb.index = pend_idx;
+                    xioctl(eng.fd, VIDIOC_QBUF, &rb);
+                    if (wrc != 0)
+                        gpu_mode = 0;
                 }
-                now_ts(&g2);
-                /* Render-versus-copy split, on the diagnostic cadence. */
-                static double rms, cms;
+                pend_slot = -1;
+            }
+            now_ts(&g1);
+
+            /* Kick this frame's render (`encode` carries the fps cap;
+             * a capped frame still delivered the previous one above). */
+            if (gpu_mode && encode) {
+                int slot = deliver_slot == 0 ? 1 : 0;
+                if (gpu_debayer_kick(gpu, (int)buf.index, slot) == 0) {
+                    pend_slot = slot;
+                    pend_idx = buf.index;
+                    pend_pts = (uint64_t)c1.tv_sec * 90000u +
+                               (uint64_t)c1.tv_nsec / 11111u;
+                    hold_buf = 1;
+                } else {
+                    gpu_mode = 0;
+                }
+            }
+
+            /* Copy the delivered render into each wanted encoder. */
+            int gpu_jpeg = 0, gpu_h264 = 0;
+            if (gpu_mode && deliver_slot >= 0) {
+                if (jpeg_want && vpu) {
+                    int stride;
+                    size_t len;
+                    int fd = vpu_jpeg_out_dmabuf(vpu, &stride, &len);
+                    gpu_jpeg = fd >= 0 &&
+                               ipu_copy_run(ipu, deliver_slot, fd,
+                                            len) == 0;
+                }
+                if (h264_want && h264) {
+                    int stride;
+                    size_t len;
+                    int fd = vpu_h264_out_dmabuf(h264, &stride, &len);
+                    gpu_h264 = fd >= 0 &&
+                               ipu_copy_run(ipu, deliver_slot, fd,
+                                            len) == 0;
+                }
+            }
+            now_ts(&g2);
+            if (gpu_mode) {
+                /* Fence-stall-versus-copy split: a stall near zero
+                 * means the render fully overlapped the rest. */
+                static double sms, cms;
                 static unsigned gn;
-                rms += ts_diff(&g1, &g0) * 1e3;
+                sms += ts_diff(&g1, &g0) * 1e3;
                 cms += ts_diff(&g2, &g1) * 1e3;
                 if (++gn >= 30) {
                     if (getenv("FORGECTRL_GPU_CHECK"))
-                        fflog(LOG_DEBUG, "cam: gpu split: render %.0f ms, "
-                              "ipu copy %.0f ms avg", rms / gn, cms / gn);
-                    rms = cms = 0;
+                        fflog(LOG_DEBUG, "cam: gpu split: stall %.0f ms, "
+                              "kick+copy %.0f ms avg", sms / gn, cms / gn);
+                    sms = cms = 0;
                     gn = 0;
                 }
             }
-            if (gpu && ((jpeg_want && vpu && !gpu_jpeg) ||
-                        (h264_want && h264 && !gpu_h264))) {
-                gpu_debayer_close(gpu);
+            int gpu_on = gpu_mode;
+            if ((gpu || ipu) &&
+                (!gpu_mode ||
+                 (deliver_slot >= 0 && ((jpeg_want && vpu && !gpu_jpeg) ||
+                                        (h264_want && h264 &&
+                                         !gpu_h264))))) {
+                gpu_debayer_close(gpu);     /* waits any pending fence */
                 gpu = NULL;
                 ipu_copy_close(ipu);
                 ipu = NULL;
                 gpu_disabled = 1;
                 gpu_jpeg = gpu_h264 = 0;
-                fflog(LOG_WARNING, "cam: GPU convert failed, "
+                gpu_on = 0;
+                if (hold_buf) {
+                    struct v4l2_buffer rb = {0};
+                    rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                    rb.memory = V4L2_MEMORY_MMAP;
+                    rb.index = pend_idx;
+                    xioctl(eng.fd, VIDIOC_QBUF, &rb);
+                    hold_buf = 0;
+                    pend_slot = -1;
+                }
+                fflog(LOG_WARNING, "cam: GPU pipeline failed, "
                       "falling back to the NEON path");
             }
+            /* On the GPU path with nothing delivered (the pipeline's
+             * first frame), the encoders have no input this iteration. */
+            int feed_encoders = !gpu_on || deliver_slot >= 0;
 
             /* ---- JPEG ---- */
             uint8_t *jpg = NULL;
@@ -1488,7 +1576,7 @@ static void *worker(void *arg)
             int via_vpu = 0;
             static int vpu_hard_fails;
             int vpu_rc = -1;
-            if (jpeg_want && vpu) {
+            if (feed_encoders && jpeg_want && vpu) {
                 if (!gpu_jpeg) {
                     uint8_t *yp, *up, *vp;
                     int ys, uvs;
@@ -1527,10 +1615,11 @@ static void *worker(void *arg)
                     }
 #endif
                 } else if (getenv("FORGECTRL_GPU_CHECK")) {
-                    if (!raw)
-                        raw = prepare_raw8(eng.bufs[buf.index].start,
-                                           raw_cached, p);
-                    gpu_check_once(raw, raw_w, raw_h, HFLIP, vpu);
+                    /* The encoder holds the DELIVERED frame; compare it
+                     * against that frame's raw (still held). */
+                    gpu_check_once(prepare_raw8(eng.bufs[deliver_raw].start,
+                                                raw_cached, p),
+                                   raw_w, raw_h, HFLIP, vpu, deliver_slot);
                 }
                 now_ts(&e1);
                 vpu_rc = vpu_jpeg_encode(vpu, &jpg, &len);
@@ -1549,7 +1638,7 @@ static void *worker(void *arg)
                     vpu_disabled = 1;
                 }
             }
-            if (jpeg_want && !via_vpu && vpu_rc < 0) {
+            if (feed_encoders && jpeg_want && !via_vpu && vpu_rc < 0) {
                 if (!raw)
                     raw = prepare_raw8(eng.bufs[buf.index].start,
                                        raw_cached, p);
@@ -1562,7 +1651,7 @@ static void *worker(void *arg)
             now_ts(&e2);
 
             /* ---- H.264 ---- */
-            if (h264_want && h264) {
+            if (feed_encoders && h264_want && h264) {
                 if (!gpu_h264) {
                     uint8_t *yp, *up, *vp;
                     int ys, uvs;
@@ -1599,8 +1688,9 @@ static void *worker(void *arg)
                     eng.h264_au = au;
                     eng.h264_len = aulen;
                     eng.h264_key = key;
-                    eng.h264_pts = (uint64_t)c1.tv_sec * 90000u +
-                                   (uint64_t)c1.tv_nsec / 11111u;
+                    eng.h264_pts = gpu_h264 ? deliver_pts
+                                            : (uint64_t)c1.tv_sec * 90000u +
+                                              (uint64_t)c1.tv_nsec / 11111u;
                     eng.h264_seq++;
                     eng.h264_up = 1;
                     eng.gpu_active = gpu_jpeg || gpu_h264;
@@ -1624,6 +1714,18 @@ static void *worker(void *arg)
                         pthread_mutex_unlock(&eng.lock);
                     }
                 }
+            }
+
+            /* The delivered frame's capture buffer goes back now: the
+             * encoders and the diagnostics are done reading it. */
+            if (deliver_slot >= 0) {
+                struct v4l2_buffer rb = {0};
+                rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                rb.memory = V4L2_MEMORY_MMAP;
+                rb.index = deliver_raw;
+                if (xioctl(eng.fd, VIDIOC_QBUF, &rb) < 0)
+                    fflog(LOG_ERR, "cam: delivered-frame QBUF: %s",
+                          strerror(errno));
             }
 
             if (jpg) {
@@ -1672,7 +1774,9 @@ static void *worker(void *arg)
             }
         }
 
-        if (xioctl(eng.fd, VIDIOC_QBUF, &buf) < 0) {
+        /* A frame whose render is in flight stays out of the queue; it
+         * goes back when its fence clears on a later iteration. */
+        if (!hold_buf && xioctl(eng.fd, VIDIOC_QBUF, &buf) < 0) {
             fflog(LOG_ERR, "cam: QBUF: %s", strerror(errno));
             break;
         }

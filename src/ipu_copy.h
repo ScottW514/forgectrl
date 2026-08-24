@@ -31,26 +31,31 @@ static inline int ipu_copy_src_width(int w)
     return (w + 127) & ~127;
 }
 
-/* Find the imx-csc-scaler node and configure it: source src_w x h
- * YUV420 (its own MMAP buffer), cropped to the top-left w x h, into a
- * caller-supplied dmabuf per run. Returns NULL if the device is absent
- * or refuses the geometry, with the reason logged. */
+/* Sources the module keeps: two, so a frame can render into one while
+ * the previous frame's copies run from the other. */
+#define IPU_COPY_SRCS 2
+
+/* Find the imx-csc-scaler node and configure it: IPU_COPY_SRCS source
+ * buffers of src_w x h YUV420 (its own MMAP buffers), each cropped to
+ * the top-left w x h into a caller-supplied dmabuf per run. Returns
+ * NULL if the device is absent or refuses the geometry, with the
+ * reason logged. */
 ipu_copy_t *ipu_copy_open(int src_w, int w, int h);
 
-/* The source buffer as a dmabuf for the GPU to render into; owned by
- * this module. *stride is the luma stride (= src_w), *len the buffer
- * length. */
-int ipu_copy_src_dmabuf(ipu_copy_t *c, int *stride, size_t *len);
+/* Source buffer `i` (0..IPU_COPY_SRCS-1) as a dmabuf for the GPU to
+ * render into; owned by this module. *stride is the luma stride
+ * (= src_w), *len the buffer length. */
+int ipu_copy_src_dmabuf(ipu_copy_t *c, int i, int *stride, size_t *len);
 
-/* Crop the current source content into dst_fd (a YUV420 buffer of the
- * cropped geometry, dst_len bytes - an encoder OUTPUT buffer). Blocks
- * until the IPU is done. Returns 0, or -1 with the reason logged. */
-int ipu_copy_run(ipu_copy_t *c, int dst_fd, size_t dst_len);
+/* Crop source buffer `i` into dst_fd (a YUV420 buffer of the cropped
+ * geometry, dst_len bytes - an encoder OUTPUT buffer). Blocks until
+ * the IPU is done. Returns 0, or -1 with the reason logged. */
+int ipu_copy_run(ipu_copy_t *c, int i, int dst_fd, size_t dst_len);
 
-/* CPU view of the source buffer (mapped on first use; slow uncached
+/* CPU view of source buffer `i` (mapped on first use; slow uncached
  * reads) - a bench diagnostic for comparing the GPU's output before the
  * IPU touched it. NULL if the mapping fails. */
-const uint8_t *ipu_copy_src_map(ipu_copy_t *c);
+const uint8_t *ipu_copy_src_map(ipu_copy_t *c, int i);
 
 void ipu_copy_close(ipu_copy_t *c);
 
