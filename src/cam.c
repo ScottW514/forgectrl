@@ -1152,8 +1152,13 @@ static void gpu_check_once(const uint8_t *raw, int raw_w, int raw_h,
     if (ry && ru && rv) {
         debayer_bggr_half_yuv420_scalar(raw, raw_w, raw_h, hflip,
                                         ry, ys, ru, rv, uvs);
-        int dmax = 0;
+        /* Luma is held to the CPU path within rounding; chroma is
+         * reported separately, because the GPU point-samples where the
+         * CPU box-filters (see gpu_debayer.c), so its deltas measure
+         * scene chroma detail, not correctness. */
+        int dmax = 0, cmax = 0;
         long bad = 0;
+        double csum = 0;
         for (int r = 0; r < oh; r++)
             for (int x = 0; x < ow; x++) {
                 int d = abs((int)gy[(size_t)r * ys + x] -
@@ -1166,15 +1171,39 @@ static void gpu_check_once(const uint8_t *raw, int raw_w, int raw_h,
         for (size_t i = 0; i < usz; i++) {
             int du = abs((int)gu[i] - (int)ru[i]);
             int dv = abs((int)gv[i] - (int)rv[i]);
-            if (du > dmax)
-                dmax = du;
-            if (dv > dmax)
-                dmax = dv;
-            if (du > 2 || dv > 2)
-                bad++;
+            if (du > cmax)
+                cmax = du;
+            if (dv > cmax)
+                cmax = dv;
+            csum += du + dv;
         }
-        fflog(LOG_INFO, "cam: GPU/CPU compare: max delta %d, %ld samples "
-              "off by more than 2", dmax, bad);
+        fflog(LOG_INFO, "cam: GPU/CPU compare: luma max delta %d, %ld "
+              "samples off by more than 2; chroma vs box filter mean "
+              "%.2f max %d", dmax, bad, csum / (double)(2 * usz), cmax);
+
+        /* Attribute any bottom-row disagreement: the same row read from
+         * the IPU's source (the GPU's own output, before the crop) says
+         * whether the GPU rendered it wrong or the IPU copied it wrong. */
+        const uint8_t *src = ipu ? ipu_copy_src_map(ipu) : NULL;
+        if (src) {
+            int sstride;
+            size_t slen;
+            ipu_copy_src_dmabuf(ipu, &sstride, &slen);
+            const uint8_t *pre = src + (size_t)(oh - 1) * sstride;
+            const uint8_t *post = gy + (size_t)(oh - 1) * ys;
+            const uint8_t *ref = ry + (size_t)(oh - 1) * ys;
+            int dmax_pre = 0, dmax_post = 0;
+            for (int x = 0; x < ow; x++) {
+                int dp = abs((int)pre[x] - (int)ref[x]);
+                int dq = abs((int)post[x] - (int)ref[x]);
+                if (dp > dmax_pre)
+                    dmax_pre = dp;
+                if (dq > dmax_post)
+                    dmax_post = dq;
+            }
+            fflog(LOG_INFO, "cam: bottom Y row: GPU-vs-CPU max %d, "
+                  "post-IPU-vs-CPU max %d", dmax_pre, dmax_post);
+        }
     }
     free(ry);
     free(ru);
@@ -1194,7 +1223,7 @@ static void *worker(void *arg)
      * uncached capture buffers (see prepare_raw8). */
     uint8_t *raw_cached = malloc(max_raw8_bytes());
     double stat_dq_ms = 0, stat_copy_ms = 0, stat_conv_ms = 0,
-           stat_enc_ms = 0;
+           stat_enc_ms = 0, stat_wait_ms = 0;
     unsigned stat_n = 0;
     int dq_timeouts = 0;
     int lamp_skip = 0;      /* frames left to drain after a lamp override */
@@ -1598,6 +1627,7 @@ static void *worker(void *arg)
             }
 
             if (jpg) {
+                stat_wait_ms += ts_diff(&c0, &now) * 1e3;
                 stat_dq_ms += ts_diff(&c1, &c0) * 1e3;
                 stat_copy_ms += ts_diff(&c2, &c1) * 1e3;
                 stat_conv_ms += ts_diff(&e1, &e0) * 1e3;
@@ -1609,15 +1639,16 @@ static void *worker(void *arg)
                  * bench drill sees the split without waiting. */
                 if (++stat_n >= (getenv("FORGECTRL_GPU_CHECK") ? 30u
                                                                : 10000u)) {
-                    fflog(LOG_DEBUG, "cam: stream stats: dqbuf %.0f ms, "
-                          "copy %.0f ms, convert %.0f ms, encode %.0f ms "
-                          "avg (%s, %s)",
+                    fflog(LOG_DEBUG, "cam: stream stats: wait %.0f ms, "
+                          "dqbuf %.0f ms, copy %.0f ms, convert %.0f ms, "
+                          "encode %.0f ms avg (%s, %s)",
+                          stat_wait_ms / stat_n,
                           stat_dq_ms / stat_n, stat_copy_ms / stat_n,
                           stat_conv_ms / stat_n, stat_enc_ms / stat_n,
                           via_vpu ? "vpu" : "software",
                           eng.cached_bufs ? "cached" : "uncached");
                     stat_dq_ms = stat_copy_ms = stat_conv_ms = 0;
-                    stat_enc_ms = 0;
+                    stat_enc_ms = stat_wait_ms = 0;
                     stat_n = 0;
                 }
                 pthread_mutex_lock(&eng.lock);

@@ -22,15 +22,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #define COPY_TIMEOUT_MS 1000
 
 struct ipu_copy {
-    int    fd;
-    int    src_w, w, h;
-    int    src_dmabuf;
-    size_t src_len;
+    int      fd;
+    int      src_w, w, h;
+    int      src_dmabuf;
+    size_t   src_len;
+    uint8_t *src_map;       /* diagnostic mapping, made on first use */
 };
 
 static int xioctl(int fd, unsigned long req, void *arg)
@@ -177,6 +179,22 @@ int ipu_copy_src_dmabuf(ipu_copy_t *c, int *stride, size_t *len)
     return c->src_dmabuf;
 }
 
+const uint8_t *ipu_copy_src_map(ipu_copy_t *c)
+{
+    if (!c->src_map) {
+        struct v4l2_buffer buf = { .type = V4L2_BUF_TYPE_VIDEO_OUTPUT,
+                                   .memory = V4L2_MEMORY_MMAP, .index = 0 };
+        if (xioctl(c->fd, VIDIOC_QUERYBUF, &buf) < 0)
+            return NULL;
+        void *m = mmap(NULL, buf.length, PROT_READ, MAP_SHARED, c->fd,
+                       buf.m.offset);
+        if (m == MAP_FAILED)
+            return NULL;
+        c->src_map = m;
+    }
+    return c->src_map;
+}
+
 int ipu_copy_run(ipu_copy_t *c, int dst_fd, size_t dst_len)
 {
     struct v4l2_buffer db = { .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
@@ -219,6 +237,8 @@ void ipu_copy_close(ipu_copy_t *c)
         t = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         xioctl(c->fd, VIDIOC_STREAMOFF, &t);
     }
+    if (c->src_map)
+        munmap(c->src_map, c->src_len);
     if (c->src_dmabuf >= 0)
         close(c->src_dmabuf);
     if (c->fd >= 0)

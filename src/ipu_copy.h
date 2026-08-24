@@ -47,6 +47,11 @@ int ipu_copy_src_dmabuf(ipu_copy_t *c, int *stride, size_t *len);
  * until the IPU is done. Returns 0, or -1 with the reason logged. */
 int ipu_copy_run(ipu_copy_t *c, int dst_fd, size_t dst_len);
 
+/* CPU view of the source buffer (mapped on first use; slow uncached
+ * reads) - a bench diagnostic for comparing the GPU's output before the
+ * IPU touched it. NULL if the mapping fails. */
+const uint8_t *ipu_copy_src_map(ipu_copy_t *c);
+
 void ipu_copy_close(ipu_copy_t *c);
 
 #endif

@@ -265,8 +265,12 @@ static const char FS_Y_SRC[] =
     "  gl_FragColor = vec4(y[2], y[1], y[0], y[3]);\n"
     "}\n";
 
-/* One output texel = 4 chroma bytes = 4 chroma sites; each site averages
- * a 2x2 block of superpixels (raw 4x4). u_coef/u_off select U or V. */
+/* One output texel = 4 chroma bytes = 4 chroma sites. Each site is
+ * point-sampled from its block's top-left superpixel rather than
+ * box-averaged over the 2x2: the box costs four times the fetches, and
+ * measured on the GC880 that is the difference between 6 and 14 frames
+ * a second. The CPU path keeps the box filter, so the one-shot compare
+ * reports chroma separately (cam.c). u_coef/u_off select U or V. */
 static const char FS_C_SRC[] =
     "PRECISION\n"
     "uniform sampler2D u_raw;\n"
@@ -282,16 +286,12 @@ static const char FS_C_SRC[] =
     "  float ry = 4.0 * floor(gl_FragCoord.y) - u_rowbase;\n"
     "  float va  = (ry + 0.5) * u_inv.y;\n"
     "  float va2 = (ry + 1.5) * u_inv.y;\n"
-    "  float vb  = (ry + 2.5) * u_inv.y;\n"
-    "  float vb2 = (ry + 3.5) * u_inv.y;\n"
     "  float uvw = u_ow * 0.5;\n"    /* chroma columns per row */
     "  vec4 outv;\n"
     "  for (int k = 0; k < 4; k++) {\n"
     "    float cc = 4.0 * tx + float(k);\n"
     "    float sx = 2.0 * mix(cc, uvw - 1.0 - cc, u_flip);\n"
-    "    vec3 acc = sp(sx,       va, va2) + sp(sx + 1.0, va, va2)\n"
-    "             + sp(sx,       vb, vb2) + sp(sx + 1.0, vb, vb2);\n"
-    "    outv[k] = dot(acc * 0.25, u_coef) + u_off;\n"
+    "    outv[k] = dot(sp(sx, va, va2), u_coef) + u_off;\n"
     "  }\n"
     "  gl_FragColor = vec4(outv[2], outv[1], outv[0], outv[3]);\n"
     "}\n";
@@ -800,8 +800,18 @@ int gpu_debayer_convert(gpu_debayer_t *g, int idx, int slot)
         !g->dst[slot].attached)
         return -1;
 
+    /* FORGECTRL_GPU_PASSES limits the draws (1 = Y only, 2 = +U): a
+     * bench diagnostic for attributing render time, never for serving
+     * pictures. */
+    static int npass = -1;
+    if (npass < 0) {
+        const char *v = getenv("FORGECTRL_GPU_PASSES");
+        npass = v ? atoi(v) : 3;
+        if (npass < 1 || npass > 3)
+            npass = 3;
+    }
     g->gl.ActiveTexture(GL_TEXTURE0);
-    for (int pass = 0; pass < 3; pass++)
+    for (int pass = 0; pass < npass; pass++)
         draw_pass(g, idx, &g->dst[slot], pass);
     g->gl.Finish();
     if (!gl_ok(g, "convert")) {
