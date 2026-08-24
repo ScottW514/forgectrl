@@ -676,6 +676,28 @@ auto-exposure, auto-gain or white-balance controls, so white balance is
 uncorrected. The exposure and gain defaults are the OV5648 values translated
 into those units and have never been measured on real 8 MP hardware.
 
+### Stream encoding and demosaic
+
+One capture serves every consumer, but the stream conversion has layered
+implementations, each probed at runtime and each falling back to the next:
+
+| Stage | First choice | Fallback | Switch |
+|---|---|---|---|
+| Demosaic (stream) | GC880 GPU fragment shaders (`src/gpu_debayer.c`): capture dmabuf in, encoder dmabuf out, CPU untouched | NEON superpixel (`src/debayer.c`), then scalar | `FORGECTRL_NO_GPU`, `FORGECTRL_NO_NEON` |
+| MJPEG frames | CODA960 JPEG unit (`src/vpu_jpeg.c`) | libjpeg | `FORGECTRL_NO_VPU` |
+| H.264 stream (`/cam/h264`, fragmented MP4 via `src/vpu_h264.c` + `src/mp4mux.c`) | CODA960 BIT processor | none: the endpoint answers 503 and MJPEG remains | `FORGECTRL_NO_H264` |
+| fps cap | CSI hardware frame skip (frames dropped before DMA) | software pacing in the worker | `FORGECTRL_NO_HW_SKIP` |
+
+The GPU path loads Mesa with `dlopen` (no build-time GL dependency); an image
+without Mesa, a kernel without etnaviv, or any refused probe lands on the NEON
+path with the reason logged once. The two CODA engines are independent, so
+MJPEG and H.264 clients can be served concurrently; both encoder OUTPUT
+buffers are exported as dmabufs and the GPU renders into them directly.
+Snapshots always use the CPU bilinear demosaic. `/cam/status` reports the
+active choices (`convert`, `encoder`, `hw_fps_skip`, `h264`). H.264 viewers
+count toward engine arbitration and idle exactly like MJPEG viewers, and a
+joining H.264 viewer forces an IDR so it can start decoding immediately.
+
 ### Frame health
 
 The capture queue flags a buffer `V4L2_BUF_FLAG_ERROR` when the frame in it is

@@ -31,19 +31,24 @@ add_executable(forgectrl
   src/diag.c
   src/fflog.c
   src/gates.c
+  src/gpu_debayer.c
   src/liveness.c
   src/logs.c
+  src/mp4mux.c
   src/sanitize.c
   src/settings.c
   src/status.c
   src/super.c
   src/update.c
+  src/vpu_h264.c
   src/vpu_jpeg.c
   ${UI_OUT}/ui_blob.c
 )
 target_include_directories(forgectrl PRIVATE src)
 target_compile_options(forgectrl PRIVATE -Wall -Wextra -O2)
-target_link_libraries(forgectrl ulfius jpeg z pthread m)
+# dl: the GPU demosaic loads libEGL/libGLESv2 at runtime, so the build
+# has no GL dependency and images without Mesa fall back to NEON.
+target_link_libraries(forgectrl ulfius jpeg z pthread m ${CMAKE_DL_LIBS})
 
 install(TARGETS forgectrl RUNTIME DESTINATION bin)
 
@@ -111,6 +116,14 @@ target_link_libraries(airflow_test m)
 add_executable(coolfmt_test tests/coolfmt_test.c src/coolfmt.c)
 target_compile_options(coolfmt_test PRIVATE -Wall -Wextra)
 target_link_libraries(coolfmt_test m)
+
+# Host unit test for the fragmented-MP4 muxer behind /cam/h264: the init
+# segment's box tree and avcC must match the fed SPS/PPS, fragments must
+# carry the right sizes, offsets and sample flags, and the Annex B
+# reframing must drop parameter sets and length-prefix the rest. CI runs
+# it after the build.
+add_executable(mp4mux_test tests/mp4mux_test.c src/mp4mux.c)
+target_compile_options(mp4mux_test PRIVATE -Wall -Wextra)
 
 # Emitter half of the host end-to-end logging check (tests/fflog_e2e.sh
 # drives it against a private rsyslogd; manual, not CI).

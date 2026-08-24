@@ -24,6 +24,12 @@ vpu_jpeg_t *vpu_jpeg_open(int w, int h, int quality);
 void vpu_jpeg_planes(vpu_jpeg_t *v, uint8_t **y, uint8_t **u, uint8_t **vv,
                      int *y_stride, int *uv_stride);
 
+/* The OUTPUT buffer as a dmabuf, for a GPU that fills it instead of the
+ * CPU (gpu_debayer.h). Exported once and owned by the encoder (closed by
+ * vpu_jpeg_close); *stride is the luma stride, *len the buffer length.
+ * Returns the fd, or -1 if the queue cannot export. */
+int vpu_jpeg_out_dmabuf(vpu_jpeg_t *v, int *stride, size_t *len);
+
 /* Encode the currently-filled OUTPUT buffer. On success *jpeg is malloc'd
  * (caller frees) and 0 is returned. Returns 1 for a dropped frame (the
  * encoder flagged it in error - transient, keep using the VPU) or -1 for

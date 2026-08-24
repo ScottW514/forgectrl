@@ -33,8 +33,11 @@
 #include "camhealth.h"
 #include "debayer.h"
 #include "fflog.h"
+#include "gpu_debayer.h"
+#include "mp4mux.h"
 #include "settings.h"
 #include "status.h"
+#include "vpu_h264.h"
 #include "vpu_jpeg.h"
 
 #include <errno.h>
@@ -90,6 +93,7 @@ struct sensor_profile {
     const char *driver;     /* media entity name prefix */
     const char *model;      /* reported by /cam/status */
     int         w, h;       /* raw frame the pipeline is configured for */
+    int         fps;        /* the mode's sensor frame rate */
     const char *mbus;       /* media-ctl pad format, geometry appended */
     uint32_t    pixfmt;     /* V4L2 pixel format at the capture node */
     int         bpp;        /* bytes per raw sample at the capture node */
@@ -105,7 +109,7 @@ static const struct sensor_profile sensor_profiles[] = {
     {
         /* 5 MP, 8-bit Bayer straight out of the CSI. */
         .driver = "ov5648", .model = "OV5648",
-        .w = 2592, .h = 1944,
+        .w = 2592, .h = 1944, .fps = 15,
         .mbus = "SBGGR8_1X8", .pixfmt = V4L2_PIX_FMT_SBGGR8,
         .bpp = 1, .shift = 0, .ctrls = ctrls_ov5648,
     },
@@ -117,7 +121,7 @@ static const struct sensor_profile sensor_profiles[] = {
          * downstream path are the OV5648's, only larger.
          * UNPROVEN: no 8 MP machine has been on the bench. */
         .driver = "ov8856", .model = "OV8856",
-        .w = 3264, .h = 2448,
+        .w = 3264, .h = 2448, .fps = 15,
         .mbus = "SBGGR8_1X8", .pixfmt = V4L2_PIX_FMT_SBGGR8,
         .bpp = 1, .shift = 0, .ctrls = ctrls_ov8856,
     },
@@ -166,6 +170,7 @@ static const struct sensor_profile *profile_for(const char *entity)
 struct buffer {
     void  *start;
     size_t length;
+    int    dmabuf;      /* exported for the GPU import; -1 until then */
 };
 
 static struct {
@@ -201,6 +206,17 @@ static struct {
     size_t          stream_cap;
     uint64_t        seq;
     double          fps;
+
+    /* published H.264 access unit (worker writes, H.264 clients read) */
+    pthread_cond_t  h264_cv;
+    uint8_t        *h264_au;
+    size_t          h264_len;
+    uint64_t        h264_seq;
+    uint64_t        h264_pts;   /* 90 kHz, CLOCK_MONOTONIC based */
+    int             h264_key;
+    int             h264_clients;
+    int             h264_up;        /* encoder open and delivering */
+    int             h264_key_req;   /* a joining client needs an IDR */
 
     /* one pending snapshot request at a time (control mutex serializes).
      * snap_cam may differ from the streaming camera: the worker then
@@ -240,16 +256,23 @@ static struct {
     int             stream_quality;
     int             lamp_level;
     double          fps_cap;        /* stream frames/s ceiling; 0 = sensor max */
+    int             h264_kbps;
+    int             h264_gop;
     int             vpu_active;     /* last stream frame went through the VPU */
+    int             gpu_active;     /* last stream frame demosaiced on the GPU */
+    int             hw_skip;        /* CSI frame skip realizes the fps cap */
 } eng = {
     .ctl = PTHREAD_MUTEX_INITIALIZER,
     .lock = PTHREAD_MUTEX_INITIALIZER,
     .frame_cv = PTHREAD_COND_INITIALIZER,
     .snap_cv = PTHREAD_COND_INITIALIZER,
+    .h264_cv = PTHREAD_COND_INITIALIZER,
     .fd = -1,
     .lamp_prev = -1,
     .stream_quality = 75,
     .lamp_level = 132,
+    .h264_kbps = 1500,
+    .h264_gop = 30,
 };
 
 const char *cam_name(cam_id_t cam)
@@ -262,6 +285,20 @@ const char *cam_name(cam_id_t cam)
  * fallback (and the snapshot path). Worker-thread use only. */
 static vpu_jpeg_t *vpu;
 static int vpu_disabled;
+
+/* CODA960 H.264 encoder (the BIT processor, independent of the JPEG
+ * unit), plus the engine-held parameter-set cache viewers that join
+ * late take their SPS/PPS from. Worker-thread use only. */
+static vpu_h264_t *h264;
+static int h264_disabled;
+static mp4mux_t *h264_params;
+static pthread_mutex_t h264_params_mx = PTHREAD_MUTEX_INITIALIZER;
+
+/* GC880 GPU demosaic for the stream path; the NEON path remains the
+ * fallback (and always the snapshot path). Worker-thread use only. */
+static gpu_debayer_t *gpu;
+static int gpu_disabled;
+static int hw_skip_disabled;
 
 /* FORGECTRL_NO_CACHED_BUFS: never request non-coherent capture buffers
  * (forces the uncached-mmap + bounce-copy path). */
@@ -459,6 +496,36 @@ static int configure_pipeline(cam_id_t cam, const char *sensor,
         run("media-ctl -V '\"ipu1_csi0\":0 [fmt:%s]'", fmt) ||
         run("media-ctl -V '\"ipu1_csi0\":2 [fmt:%s]'", fmt))
         return -1;
+
+    /* An fps cap of at least 1 is realized in hardware where possible:
+     * the IPU CSI's frame-skip table drops frames before they are ever
+     * DMA-written, so a skipped frame costs no memory bandwidth and no
+     * CPU (the software pacing in the worker still runs and passes what
+     * arrives). The sink pad carries the sensor rate, the IDMAC source
+     * pad the requested one; the driver picks the nearest skip pattern.
+     * Best effort: a media-ctl without interval syntax leaves the cap to
+     * software pacing alone. */
+    int hw = 0;
+    if (!hw_skip_disabled && eng.fps_cap >= 1.0 &&
+        eng.fps_cap < (double)p->fps) {
+        int n = (int)(eng.fps_cap + 0.5);
+        char fmt_in[80], fmt_out[80];
+        snprintf(fmt_in, sizeof(fmt_in), "%s/%dx%d@1/%d field:none",
+                 p->mbus, p->w, p->h, p->fps);
+        snprintf(fmt_out, sizeof(fmt_out), "%s/%dx%d@1/%d field:none",
+                 p->mbus, p->w, p->h, n);
+        if (run("media-ctl -V '\"ipu1_csi0\":0 [fmt:%s]'", fmt_in) == 0 &&
+            run("media-ctl -V '\"ipu1_csi0\":2 [fmt:%s]'", fmt_out) == 0) {
+            hw = 1;
+            fflog(LOG_INFO, "cam: CSI hardware frame skip to ~%d fps", n);
+        } else {
+            fflog(LOG_WARNING, "cam: CSI frame-skip setup refused, the "
+                  "fps cap stays software-paced");
+        }
+    }
+    pthread_mutex_lock(&eng.lock);
+    eng.hw_skip = hw;
+    pthread_mutex_unlock(&eng.lock);
     return 0;
 }
 
@@ -561,6 +628,13 @@ static int jpeg_encode_rgb(const uint8_t *rgb, int w, int h, int quality,
  * any state; called by the worker on exit and by a failed start. */
 static void release_capture(void)
 {
+    /* The GPU holds imports of the capture buffers about to go away;
+     * it re-imports on the next stream frame (the encoders and their
+     * dmabufs survive, so only the raw side is redone). */
+    if (gpu) {
+        gpu_debayer_close(gpu);
+        gpu = NULL;
+    }
     if (eng.streaming) {
         enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         xioctl(eng.fd, VIDIOC_STREAMOFF, &type);
@@ -570,6 +644,10 @@ static void release_capture(void)
         if (eng.bufs[i].start) {
             munmap(eng.bufs[i].start, eng.bufs[i].length);
             eng.bufs[i].start = NULL;
+        }
+        if (eng.bufs[i].dmabuf >= 0) {
+            close(eng.bufs[i].dmabuf);
+            eng.bufs[i].dmabuf = -1;
         }
     }
     eng.n_bufs = 0;
@@ -735,6 +813,7 @@ static int start_capture(cam_id_t cam, char *err, size_t errlen)
             return -1;
         }
         eng.bufs[eng.n_bufs].length = buf.length;
+        eng.bufs[eng.n_bufs].dmabuf = -1;
         eng.bufs[eng.n_bufs].start = mmap(NULL, buf.length,
                                           PROT_READ | PROT_WRITE, MAP_SHARED,
                                           eng.fd, buf.m.offset);
@@ -933,6 +1012,181 @@ static int grab_one_snap(uint8_t *raw_cached, uint8_t *rgb_half,
     return -1;
 }
 
+/* ---------------------------------------------- stream encoder plumbing */
+
+/* Geometry the encoder set (worker thread only). */
+static int enc_w, enc_h;
+
+/* Open (or re-open, on a geometry change) whichever encoders the current
+ * clients need, and the GPU demosaic that feeds them. Every piece fails
+ * soft: a missing encoder or GPU disables that path and the frame loop
+ * uses what came up. */
+static void ensure_encoders(int jpeg_want, int h264_want,
+                            int half_w, int half_h, int hflip)
+{
+    if (enc_w != half_w || enc_h != half_h) {
+        if (vpu) {
+            vpu_jpeg_close(vpu);
+            vpu = NULL;
+        }
+        if (h264) {
+            vpu_h264_close(h264);
+            h264 = NULL;
+        }
+        if (gpu) {
+            gpu_debayer_close(gpu);
+            gpu = NULL;
+        }
+        pthread_mutex_lock(&h264_params_mx);
+        mp4mux_free(h264_params);
+        h264_params = NULL;
+        pthread_mutex_unlock(&h264_params_mx);
+        enc_w = half_w;
+        enc_h = half_h;
+    }
+
+    if (jpeg_want && !vpu_disabled && !vpu) {
+        vpu = vpu_jpeg_open(half_w, half_h, eng.stream_quality);
+        if (!vpu) {
+            vpu_disabled = 1;
+            fflog(LOG_WARNING, "cam: no VPU JPEG encoder, "
+                  "using software encode");
+        }
+    }
+    if (h264_want && !h264_disabled && !h264) {
+        int fps = eng.fps_cap >= 1.0 ? (int)(eng.fps_cap + 0.5)
+                                     : eng.prof->fps;
+        h264 = vpu_h264_open(half_w, half_h, fps, eng.h264_kbps * 1000,
+                             eng.h264_gop);
+        if (!h264) {
+            h264_disabled = 1;
+            fflog(LOG_WARNING, "cam: no H.264 encoder, the stream "
+                  "stays MJPEG only");
+        } else {
+            pthread_mutex_lock(&h264_params_mx);
+            if (!h264_params)
+                h264_params = mp4mux_new(half_w, half_h);
+            pthread_mutex_unlock(&h264_params_mx);
+        }
+    }
+
+    static int gpu_dst_ok[2];   /* dst slot attached: 0 JPEG, 1 H.264 */
+    if (!gpu_disabled && !gpu && (vpu || h264)) {
+        gpu = gpu_debayer_open(eng.prof->w, eng.prof->h, hflip);
+        if (!gpu) {
+            gpu_disabled = 1;
+            fflog(LOG_INFO, "cam: no GPU demosaic, using the NEON path");
+            return;
+        }
+        gpu_dst_ok[0] = gpu_dst_ok[1] = 0;
+        int ok = 1;
+        for (int i = 0; ok && i < eng.n_bufs; i++) {
+            if (eng.bufs[i].dmabuf < 0) {
+                struct v4l2_exportbuffer exp = {
+                    .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+                    .index = (unsigned)i,
+                    .flags = O_CLOEXEC,
+                };
+                if (xioctl(eng.fd, VIDIOC_EXPBUF, &exp) < 0) {
+                    fflog(LOG_INFO, "cam: capture dmabuf export refused: "
+                          "%s", strerror(errno));
+                    ok = 0;
+                    break;
+                }
+                eng.bufs[i].dmabuf = exp.fd;
+            }
+            ok = gpu_debayer_attach_raw(gpu, i, eng.bufs[i].dmabuf) == 0;
+        }
+        if (!ok) {
+            gpu_debayer_close(gpu);
+            gpu = NULL;
+            gpu_disabled = 1;
+            fflog(LOG_INFO, "cam: GPU import failed, using the NEON path");
+        }
+    }
+    /* Attach the render target of any encoder that is open but not yet
+     * wired - which also covers an encoder that came up after the GPU
+     * did. A refused import retires the GPU, not the encoder. */
+    if (gpu && vpu && !gpu_dst_ok[0]) {
+        int stride;
+        size_t len;
+        int fd = vpu_jpeg_out_dmabuf(vpu, &stride, &len);
+        if (fd >= 0 && gpu_debayer_attach_dst(gpu, 0, fd, stride, len) == 0)
+            gpu_dst_ok[0] = 1;
+        else
+            goto gpu_dead;
+    }
+    if (gpu && h264 && !gpu_dst_ok[1]) {
+        int stride;
+        size_t len;
+        int fd = vpu_h264_out_dmabuf(h264, &stride, &len);
+        if (fd >= 0 && gpu_debayer_attach_dst(gpu, 1, fd, stride, len) == 0)
+            gpu_dst_ok[1] = 1;
+        else
+            goto gpu_dead;
+    }
+    return;
+
+gpu_dead:
+    gpu_debayer_close(gpu);
+    gpu = NULL;
+    gpu_disabled = 1;
+    fflog(LOG_INFO, "cam: GPU render-target import failed, using the "
+          "NEON path");
+}
+
+/* One-shot GPU-versus-CPU comparison on a live frame, FORGECTRL_GPU_CHECK.
+ * The GPU is not bit-identical to the NEON path (different rounding), so
+ * this reports the worst per-byte difference instead of demanding zero;
+ * anything beyond a couple of counts means the shader indexing is wrong
+ * on this GPU. Reads the write-combine encoder buffer, so it is slow and
+ * runs once. */
+static void gpu_check_once(const uint8_t *raw, int raw_w, int raw_h,
+                           int hflip, vpu_jpeg_t *v)
+{
+    static int done;
+    if (done || !getenv("FORGECTRL_GPU_CHECK"))
+        return;
+    done = 1;
+
+    uint8_t *gy, *gu, *gv;
+    int ys, uvs;
+    vpu_jpeg_planes(v, &gy, &gu, &gv, &ys, &uvs);
+    const int ow = raw_w / 2, oh = raw_h / 2;
+    size_t ysz = (size_t)ys * oh, usz = (size_t)uvs * (oh / 2);
+    uint8_t *ry = malloc(ysz), *ru = malloc(usz), *rv = malloc(usz);
+    if (ry && ru && rv) {
+        debayer_bggr_half_yuv420_scalar(raw, raw_w, raw_h, hflip,
+                                        ry, ys, ru, rv, uvs);
+        int dmax = 0;
+        long bad = 0;
+        for (int r = 0; r < oh; r++)
+            for (int x = 0; x < ow; x++) {
+                int d = abs((int)gy[(size_t)r * ys + x] -
+                            (int)ry[(size_t)r * ys + x]);
+                if (d > dmax)
+                    dmax = d;
+                if (d > 2)
+                    bad++;
+            }
+        for (size_t i = 0; i < usz; i++) {
+            int du = abs((int)gu[i] - (int)ru[i]);
+            int dv = abs((int)gv[i] - (int)rv[i]);
+            if (du > dmax)
+                dmax = du;
+            if (dv > dmax)
+                dmax = dv;
+            if (du > 2 || dv > 2)
+                bad++;
+        }
+        fflog(LOG_INFO, "cam: GPU/CPU compare: max delta %d, %ld samples "
+              "off by more than 2", dmax, bad);
+    }
+    free(ry);
+    free(ru);
+    free(rv);
+}
+
 static void *worker(void *arg)
 {
     (void)arg;
@@ -969,12 +1223,13 @@ static void *worker(void *arg)
         pthread_mutex_lock(&eng.lock);
         int stop = eng.stop_flag;
         int clients = eng.clients;
+        int h264c = eng.h264_clients;
         int snap = eng.snap_pending == 1 && eng.snap_cam == eng.home_cam;
         int borrow = eng.snap_pending == 1 && eng.snap_cam != eng.home_cam;
         int snap_lamp = eng.snap_lamp;
         cam_id_t borrow_cam = eng.snap_cam;
         cam_id_t orig_cam = eng.home_cam;
-        int idle = clients == 0 && !snap && !borrow &&
+        int idle = clients == 0 && h264c == 0 && !snap && !borrow &&
                    ts_diff(&now, &eng.last_activity) > IDLE_STOP_S;
         pthread_mutex_unlock(&eng.lock);
 
@@ -1099,8 +1354,12 @@ static void *worker(void *arg)
 
         /* FPS cap: a frame arriving before the next due time is requeued
          * without demosaic/encode (a pending snapshot still rides on it;
-         * the sensor keeps its own pace). */
-        int encode = clients > 0;
+         * the sensor keeps its own pace). When the CSI hardware skip is
+         * active the sensor-side rate already matches and this pacing
+         * passes everything through. */
+        int jpeg_want = clients > 0;
+        int h264_want = h264c > 0 && !h264_disabled;
+        int encode = jpeg_want || h264_want;
         if (encode && cap_period > 0) {
             double t = (double)c1.tv_sec + (double)c1.tv_nsec / 1e9;
             if (t < next_due) {
@@ -1115,8 +1374,11 @@ static void *worker(void *arg)
         const struct sensor_profile *p = eng.prof;
         const int raw_w = p->w, raw_h = p->h;
         const int half_w = raw_w / 2, half_h = raw_h / 2;
+        /* The CPU-side raw view is produced only for consumers that read
+         * it (a snapshot, or a CPU demosaic); a GPU-converted stream
+         * frame reads the capture buffer over its dmabuf instead. */
         const uint8_t *raw = NULL;
-        if (snap || encode)
+        if (snap)
             raw = prepare_raw8(eng.bufs[buf.index].start, raw_cached, p);
         now_ts(&c2);
 
@@ -1134,67 +1396,90 @@ static void *worker(void *arg)
             }
         }
 
-        /* Stream frame: demosaic + encode, VPU first, libjpeg fallback */
+        /* Stream frame: demosaic + encode. The demosaic runs on the GPU
+         * when it is up (straight into the encoders' buffers through
+         * their dmabufs, one pass per encoder), on NEON otherwise. JPEG
+         * comes from the VPU JPEG unit with libjpeg as the fallback;
+         * H.264 comes from the VPU BIT processor and has no software
+         * fallback (the MJPEG stream is the fallback). */
         if (encode) {
+            struct timespec e0, e1, e2;
+            now_ts(&e0);
+            ensure_encoders(jpeg_want, h264_want, half_w, half_h, HFLIP);
+
+            int gpu_jpeg = 0, gpu_h264 = 0;
+            if (gpu) {
+                int fail = 0;
+                if (jpeg_want && vpu) {
+                    gpu_jpeg = gpu_debayer_convert(gpu, (int)buf.index,
+                                                   0) == 0;
+                    fail |= !gpu_jpeg;
+                }
+                if (!fail && h264_want && h264) {
+                    gpu_h264 = gpu_debayer_convert(gpu, (int)buf.index,
+                                                   1) == 0;
+                    fail |= !gpu_h264;
+                }
+                if (fail) {
+                    gpu_debayer_close(gpu);
+                    gpu = NULL;
+                    gpu_disabled = 1;
+                    gpu_jpeg = gpu_h264 = 0;
+                    fflog(LOG_WARNING, "cam: GPU convert failed, "
+                          "falling back to the NEON path");
+                }
+            }
+
+            /* ---- JPEG ---- */
             uint8_t *jpg = NULL;
             size_t len = 0;
             int via_vpu = 0;
-            struct timespec e0, e1, e2;
-            now_ts(&e0);
-
-            /* The encoder is opened for a fixed geometry, so a switch to a
-             * differently-modeled sensor reopens it. */
-            static int vpu_w, vpu_h;
-            if (vpu && (vpu_w != half_w || vpu_h != half_h)) {
-                vpu_jpeg_close(vpu);
-                vpu = NULL;
-            }
-            if (!vpu_disabled && !vpu) {
-                vpu = vpu_jpeg_open(half_w, half_h, eng.stream_quality);
-                if (!vpu) {
-                    vpu_disabled = 1;
-                    fflog(LOG_WARNING, "cam: no VPU JPEG encoder, "
-                          "using software encode");
-                } else {
-                    vpu_w = half_w;
-                    vpu_h = half_h;
-                }
-            }
             static int vpu_hard_fails;
             int vpu_rc = -1;
-            if (vpu) {
-                uint8_t *yp, *up, *vp;
-                int ys, uvs;
-                vpu_jpeg_planes(vpu, &yp, &up, &vp, &ys, &uvs);
-                debayer_bggr_half_yuv420(raw, raw_w, raw_h, HFLIP,
-                                         yp, ys, up, vp, uvs);
+            if (jpeg_want && vpu) {
+                if (!gpu_jpeg) {
+                    uint8_t *yp, *up, *vp;
+                    int ys, uvs;
+                    vpu_jpeg_planes(vpu, &yp, &up, &vp, &ys, &uvs);
+                    if (!raw)
+                        raw = prepare_raw8(eng.bufs[buf.index].start,
+                                           raw_cached, p);
+                    debayer_bggr_half_yuv420(raw, raw_w, raw_h, HFLIP,
+                                             yp, ys, up, vp, uvs);
 #ifdef __ARM_NEON
-                /* One-shot NEON-vs-scalar equivalence check on a live
-                 * frame (the paths are constructed to be bit-identical;
-                 * this proves it on real data). Stride == width here. */
-                static int neon_checked;
-                if (!neon_checked && getenv("FORGECTRL_NEON_CHECK")) {
-                    neon_checked = 1;
-                    size_t ysz = (size_t)ys * half_h;
-                    size_t usz = (size_t)uvs * (half_h / 2);
-                    uint8_t *ry = malloc(ysz);
-                    uint8_t *ru = malloc(usz);
-                    uint8_t *rv = malloc(usz);
-                    if (ry && ru && rv) {
-                        debayer_bggr_half_yuv420_scalar(raw, raw_w, raw_h,
-                                                        HFLIP, ry, ys,
-                                                        ru, rv, uvs);
-                        fflog(LOG_DEBUG, "cam: NEON/scalar compare: %s",
-                              (!memcmp(ry, yp, ysz) &&
-                                 !memcmp(ru, up, usz) &&
-                                 !memcmp(rv, vp, usz))
-                              ? "IDENTICAL" : "MISMATCH");
+                    /* One-shot NEON-vs-scalar equivalence check on a live
+                     * frame (the paths are constructed to be bit-identical;
+                     * this proves it on real data). Stride == width here. */
+                    static int neon_checked;
+                    if (!neon_checked && getenv("FORGECTRL_NEON_CHECK")) {
+                        neon_checked = 1;
+                        size_t ysz = (size_t)ys * half_h;
+                        size_t usz = (size_t)uvs * (half_h / 2);
+                        uint8_t *ry = malloc(ysz);
+                        uint8_t *ru = malloc(usz);
+                        uint8_t *rv = malloc(usz);
+                        if (ry && ru && rv) {
+                            debayer_bggr_half_yuv420_scalar(raw, raw_w,
+                                                            raw_h, HFLIP,
+                                                            ry, ys,
+                                                            ru, rv, uvs);
+                            fflog(LOG_DEBUG, "cam: NEON/scalar compare: %s",
+                                  (!memcmp(ry, yp, ysz) &&
+                                     !memcmp(ru, up, usz) &&
+                                     !memcmp(rv, vp, usz))
+                                  ? "IDENTICAL" : "MISMATCH");
+                        }
+                        free(ry);
+                        free(ru);
+                        free(rv);
                     }
-                    free(ry);
-                    free(ru);
-                    free(rv);
-                }
 #endif
+                } else if (getenv("FORGECTRL_GPU_CHECK")) {
+                    if (!raw)
+                        raw = prepare_raw8(eng.bufs[buf.index].start,
+                                           raw_cached, p);
+                    gpu_check_once(raw, raw_w, raw_h, HFLIP, vpu);
+                }
                 now_ts(&e1);
                 vpu_rc = vpu_jpeg_encode(vpu, &jpg, &len);
                 if (vpu_rc == 0) {
@@ -1212,7 +1497,10 @@ static void *worker(void *arg)
                     vpu_disabled = 1;
                 }
             }
-            if (!via_vpu && vpu_rc < 0) {
+            if (jpeg_want && !via_vpu && vpu_rc < 0) {
+                if (!raw)
+                    raw = prepare_raw8(eng.bufs[buf.index].start,
+                                       raw_cached, p);
                 debayer_bggr_half(raw, rgb_half, raw_w, raw_h, HFLIP);
                 now_ts(&e1);
                 if (jpeg_encode_rgb(rgb_half, half_w, half_h,
@@ -1220,6 +1508,71 @@ static void *worker(void *arg)
                     jpg = NULL;
             }
             now_ts(&e2);
+
+            /* ---- H.264 ---- */
+            if (h264_want && h264) {
+                if (!gpu_h264) {
+                    uint8_t *yp, *up, *vp;
+                    int ys, uvs;
+                    vpu_h264_planes(h264, &yp, &up, &vp, &ys, &uvs);
+                    if (!raw)
+                        raw = prepare_raw8(eng.bufs[buf.index].start,
+                                           raw_cached, p);
+                    /* With both stream types on the CPU path this is a
+                     * second demosaic of the same frame; the GPU path is
+                     * how that cost is meant to be paid. */
+                    debayer_bggr_half_yuv420(raw, raw_w, raw_h, HFLIP,
+                                             yp, ys, up, vp, uvs);
+                }
+                pthread_mutex_lock(&eng.lock);
+                int want_key = eng.h264_key_req;
+                eng.h264_key_req = 0;
+                pthread_mutex_unlock(&eng.lock);
+                if (want_key)
+                    vpu_h264_force_key(h264);
+
+                uint8_t *au = NULL;
+                size_t aulen = 0;
+                int key = 0;
+                static int h264_hard_fails;
+                int rc = vpu_h264_encode(h264, &au, &aulen, &key);
+                if (rc == 0) {
+                    h264_hard_fails = 0;
+                    pthread_mutex_lock(&h264_params_mx);
+                    if (h264_params)
+                        mp4mux_feed_params(h264_params, au, aulen);
+                    pthread_mutex_unlock(&h264_params_mx);
+                    pthread_mutex_lock(&eng.lock);
+                    free(eng.h264_au);
+                    eng.h264_au = au;
+                    eng.h264_len = aulen;
+                    eng.h264_key = key;
+                    eng.h264_pts = (uint64_t)c1.tv_sec * 90000u +
+                                   (uint64_t)c1.tv_nsec / 11111u;
+                    eng.h264_seq++;
+                    eng.h264_up = 1;
+                    eng.gpu_active = gpu_jpeg || gpu_h264;
+                    pthread_cond_broadcast(&eng.h264_cv);
+                    pthread_mutex_unlock(&eng.lock);
+                } else if (rc < 0) {
+                    if (want_key) {
+                        pthread_mutex_lock(&eng.lock);
+                        eng.h264_key_req = 1;   /* not consumed */
+                        pthread_mutex_unlock(&eng.lock);
+                    }
+                    if (++h264_hard_fails >= 3) {
+                        fflog(LOG_WARNING, "cam: repeated H.264 encode "
+                              "failures, dropping the H.264 stream");
+                        vpu_h264_close(h264);
+                        h264 = NULL;
+                        h264_disabled = 1;
+                        pthread_mutex_lock(&eng.lock);
+                        eng.h264_up = 0;
+                        pthread_cond_broadcast(&eng.h264_cv);
+                        pthread_mutex_unlock(&eng.lock);
+                    }
+                }
+            }
 
             if (jpg) {
                 stat_dq_ms += ts_diff(&c1, &c0) * 1e3;
@@ -1246,6 +1599,7 @@ static void *worker(void *arg)
                 eng.stream_jpg = jpg;
                 eng.stream_len = len;
                 eng.vpu_active = via_vpu;
+                eng.gpu_active = gpu_jpeg || gpu_h264;
                 eng.seq++;
                 fps_frames++;
                 struct timespec t;
@@ -1274,12 +1628,14 @@ out:
     free(raw_cached);
     pthread_mutex_lock(&eng.lock);
     eng.running = 0;
+    eng.h264_up = 0;
     /* fail any waiter: stream clients see running==0, a pending snapshot
      * is marked failed */
     if (eng.snap_pending == 1)
         eng.snap_pending = 3;
     pthread_cond_broadcast(&eng.frame_cv);
     pthread_cond_broadcast(&eng.snap_cv);
+    pthread_cond_broadcast(&eng.h264_cv);
     pthread_mutex_unlock(&eng.lock);
     return NULL;
 }
@@ -1297,7 +1653,7 @@ static int ensure_engine(cam_id_t cam, char *err, size_t errlen)
          * pipeline (eng.cam) is briefly on the other sensor, and a stream
          * request racing that window must not attach to it. */
         cam_id_t cur = eng.home_cam;
-        int clients = eng.clients;
+        int clients = eng.clients + eng.h264_clients;
         int tid_valid = eng.tid_valid;
         pthread_mutex_unlock(&eng.lock);
 
@@ -1314,13 +1670,14 @@ static int ensure_engine(cam_id_t cam, char *err, size_t errlen)
                 pthread_mutex_lock(&eng.lock);
                 eng.kick_gen++;
                 pthread_cond_broadcast(&eng.frame_cv);
+                pthread_cond_broadcast(&eng.h264_cv);
                 pthread_mutex_unlock(&eng.lock);
                 struct timespec t0, t;
                 now_ts(&t0);
                 do {
                     usleep(100 * 1000);
                     pthread_mutex_lock(&eng.lock);
-                    clients = eng.clients;
+                    clients = eng.clients + eng.h264_clients;
                     pthread_mutex_unlock(&eng.lock);
                     now_ts(&t);
                 } while (clients > 0 && ts_diff(&t, &t0) < SWITCH_GRACE_S);
@@ -1389,8 +1746,24 @@ void cam_engine_init(void)
         if (f > 0 && f <= 60)
             eng.fps_cap = f;
     }
+    if ((v = getenv("FORGECTRL_H264_KBPS")) != NULL) {
+        int k = atoi(v);
+        if (k >= 100 && k <= 20000)
+            eng.h264_kbps = k;
+    }
+    if ((v = getenv("FORGECTRL_H264_GOP")) != NULL) {
+        int gp = atoi(v);
+        if (gp >= 1 && gp <= 300)
+            eng.h264_gop = gp;
+    }
     if (getenv("FORGECTRL_NO_VPU"))
         vpu_disabled = 1;
+    if (getenv("FORGECTRL_NO_H264"))
+        h264_disabled = 1;
+    if (getenv("FORGECTRL_NO_GPU"))
+        gpu_disabled = 1;
+    if (getenv("FORGECTRL_NO_HW_SKIP"))
+        hw_skip_disabled = 1;
     if (getenv("FORGECTRL_NO_CACHED_BUFS"))
         cached_disabled = 1;
 
@@ -1425,6 +1798,14 @@ void cam_engine_shutdown(void)
         vpu_jpeg_close(vpu);
         vpu = NULL;
     }
+    if (h264) {
+        vpu_h264_close(h264);
+        h264 = NULL;
+    }
+    pthread_mutex_lock(&h264_params_mx);
+    mp4mux_free(h264_params);
+    h264_params = NULL;
+    pthread_mutex_unlock(&h264_params_mx);
     pthread_mutex_unlock(&eng.ctl);
 }
 
@@ -1584,6 +1965,113 @@ void cam_client_close(cam_client_t *c)
     free(c);
 }
 
+/* ---------------------------------------------------- H.264 stream client */
+
+struct cam_h264_client {
+    uint64_t last_seq;
+    uint64_t gen;
+    int      started;   /* first delivered unit must be an IDR */
+    uint8_t *buf;
+    size_t   cap;
+};
+
+cam_h264_client_t *cam_h264_client_open(cam_id_t cam, char *err,
+                                        size_t errlen)
+{
+    if (!machine_lid_closed()) {
+        snprintf(err, errlen, "%s", CAM_ERR_LID);
+        return NULL;
+    }
+    pthread_mutex_lock(&eng.ctl);
+    if (ensure_engine(cam, err, errlen)) {
+        pthread_mutex_unlock(&eng.ctl);
+        return NULL;
+    }
+    cam_h264_client_t *c = calloc(1, sizeof(*c));
+    if (!c) {
+        pthread_mutex_unlock(&eng.ctl);
+        snprintf(err, errlen, "out of memory");
+        return NULL;
+    }
+    pthread_mutex_lock(&eng.lock);
+    eng.h264_clients++;
+    eng.h264_key_req = 1;   /* this viewer needs an IDR to start on */
+    c->gen = eng.kick_gen;
+    c->last_seq = eng.h264_seq;     /* only frames from now on */
+    now_ts(&eng.last_activity);
+    pthread_mutex_unlock(&eng.lock);
+    pthread_mutex_unlock(&eng.ctl);
+    return c;
+}
+
+long cam_h264_next(cam_h264_client_t *c, const uint8_t **au,
+                   uint64_t *pts90k, int *key)
+{
+    pthread_mutex_lock(&eng.lock);
+    for (;;) {
+        int timeouts = 0;
+        while (eng.running && !h264_disabled && c->gen == eng.kick_gen &&
+               eng.h264_seq <= c->last_seq) {
+            struct timespec deadline;
+            clock_gettime(CLOCK_REALTIME, &deadline);
+            deadline.tv_sec += CLIENT_WAIT_S;
+            if (pthread_cond_timedwait(&eng.h264_cv, &eng.lock, &deadline)
+                == ETIMEDOUT && ++timeouts >= 2)
+                break;
+        }
+        if (!eng.running || h264_disabled || c->gen != eng.kick_gen ||
+            eng.h264_seq <= c->last_seq) {
+            pthread_mutex_unlock(&eng.lock);
+            return -1;
+        }
+        c->last_seq = eng.h264_seq;
+        if (!c->started && !eng.h264_key)
+            continue;       /* wait for this viewer's IDR */
+        break;
+    }
+    c->started = 1;
+    if (c->cap < eng.h264_len) {
+        uint8_t *nb = realloc(c->buf, eng.h264_len);
+        if (!nb) {
+            pthread_mutex_unlock(&eng.lock);
+            return -1;
+        }
+        c->buf = nb;
+        c->cap = eng.h264_len;
+    }
+    memcpy(c->buf, eng.h264_au, eng.h264_len);
+    long len = (long)eng.h264_len;
+    *pts90k = eng.h264_pts;
+    *key = eng.h264_key;
+    now_ts(&eng.last_activity);
+    pthread_mutex_unlock(&eng.lock);
+    *au = c->buf;
+    return len;
+}
+
+void cam_h264_client_close(cam_h264_client_t *c)
+{
+    if (!c)
+        return;
+    pthread_mutex_lock(&eng.lock);
+    if (eng.h264_clients > 0)
+        eng.h264_clients--;
+    now_ts(&eng.last_activity);
+    pthread_mutex_unlock(&eng.lock);
+    free(c->buf);
+    free(c);
+}
+
+size_t cam_h264_params(uint8_t *buf, size_t cap)
+{
+    size_t n = 0;
+    pthread_mutex_lock(&h264_params_mx);
+    if (h264_params)
+        n = mp4mux_params_annexb(h264_params, buf, cap);
+    pthread_mutex_unlock(&h264_params_mx);
+    return n;
+}
+
 /* --------------------------------------------------------------- status */
 
 void cam_get_status(struct cam_status *st)
@@ -1596,7 +2084,11 @@ void cam_get_status(struct cam_status *st)
     st->fps = eng.fps;
     st->fps_cap = eng.fps_cap;
     st->vpu = eng.vpu_active;
+    st->gpu = eng.gpu_active;
+    st->hw_skip = eng.hw_skip;
     st->cached = eng.cached_bufs;
+    st->h264_up = eng.h264_up;
+    st->h264_clients = eng.h264_clients;
     /* Geometry follows the sensor the served camera actually carries. */
     const struct sensor_profile *p = eng.seen[eng.home_cam];
     st->sensor = p ? p->model : "unknown";

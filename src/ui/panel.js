@@ -338,6 +338,100 @@ function snapUrl() {
 function refreshSnap() {
   if (!liveOn) $('cam').src = snapUrl();
 }
+// Live view: H.264 over MSE when the browser and the machine both offer
+// it (a fraction of MJPEG's bytes, which matters on the machine's WiFi),
+// MJPEG otherwise. Any H.264 setup or mid-stream failure falls back to
+// MJPEG for the rest of the session.
+var h264Abort = null;
+var h264Failed = false;
+
+function stopH264() {
+  if (h264Abort) {
+    h264Abort.abort();
+    h264Abort = null;
+  }
+  var v = $('camvid');
+  v.style.display = 'none';
+  v.removeAttribute('src');
+  $('cam').style.display = '';
+}
+
+function startMjpeg() {
+  stopH264();
+  $('cam').src = '/cam/stream?cam=lid&t=' + Date.now();
+}
+
+function startH264() {
+  if (h264Failed || !window.MediaSource) {
+    startMjpeg();
+    return;
+  }
+  h264Abort = new AbortController();
+  var signal = h264Abort.signal;
+  fetch('/cam/h264?cam=lid', { signal: signal })
+    .then(function (resp) {
+      if (!resp.ok) throw new Error('h264 ' + resp.status);
+      var codec = resp.headers.get('X-H264-Codec') || 'avc1.42e01e';
+      var mime = 'video/mp4; codecs="' + codec + '"';
+      if (!MediaSource.isTypeSupported(mime)) throw new Error(mime);
+      var ms = new MediaSource();
+      var v = $('camvid');
+      v.src = URL.createObjectURL(ms);
+      var reader = resp.body.getReader();
+      ms.addEventListener('sourceopen', function () {
+        var sb = ms.addSourceBuffer(mime);
+        var queue = [];
+        function pumpQueue() {
+          if (queue.length && !sb.updating) sb.appendBuffer(queue.shift());
+        }
+        sb.addEventListener('updateend', function () {
+          // Stay at the live edge: a background tab pauses playback
+          // while fragments keep arriving.
+          if (v.buffered.length) {
+            var end = v.buffered.end(v.buffered.length - 1);
+            if (end - v.currentTime > 1.5) v.currentTime = end - 0.2;
+            if (v.buffered.length && end - v.buffered.start(0) > 30 &&
+                !sb.updating)
+              sb.remove(v.buffered.start(0), end - 10);
+          }
+          pumpQueue();
+        });
+        (function read() {
+          reader
+            .read()
+            .then(function (r) {
+              if (r.done) {
+                // Ended upstream: the lid opened or another viewer took
+                // the camera. Freeze on the last frame and say so.
+                if (liveOn && !signal.aborted)
+                  $('cammsg').textContent = 'stream ended';
+                return;
+              }
+              if (!liveOn) return;
+              queue.push(r.value);
+              pumpQueue();
+              read();
+            })
+            .catch(function () {
+              if (liveOn && !signal.aborted) {
+                h264Failed = true;
+                startMjpeg();
+              }
+            });
+        })();
+      });
+      v.style.display = '';
+      $('cam').style.display = 'none';
+      v.play().catch(function () {});
+    })
+    .catch(function () {
+      if (liveOn && !signal.aborted) {
+        h264Failed = true;
+        startMjpeg();
+      }
+    });
+}
+
 function toggleLive() {
   liveOn = !liveOn;
   retries = 0;
@@ -345,7 +439,12 @@ function toggleLive() {
   $('live').textContent = liveOn ? 'Stop' : 'Live';
   $('live').className = liveOn ? 'on' : '';
   $('snapbtn').disabled = liveOn;
-  $('cam').src = liveOn ? '/cam/stream?cam=lid&t=' + Date.now() : snapUrl();
+  if (liveOn) {
+    startH264();
+  } else {
+    stopH264();
+    $('cam').src = snapUrl();
+  }
 }
 $('cam').onerror = function () {
   if (!liveOn) return;

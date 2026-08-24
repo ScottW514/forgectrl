@@ -72,6 +72,28 @@ cam_client_t *cam_client_open(cam_id_t cam, char *err, size_t errlen);
 long cam_client_next(cam_client_t *c, const uint8_t **jpeg);
 void cam_client_close(cam_client_t *c);
 
+/* H.264 stream client: the same engine and arbitration as the MJPEG
+ * clients, but the frames come from the CODA H.264 encoder as Annex B
+ * access units. A client's first delivered unit is always an IDR (one is
+ * forced when it opens), so a viewer can start decoding immediately. */
+typedef struct cam_h264_client cam_h264_client_t;
+
+cam_h264_client_t *cam_h264_client_open(cam_id_t cam, char *err,
+                                        size_t errlen);
+/* Blocks for an access unit newer than the last one returned. Returns
+ * its length (>0) with *pts90k the frame timestamp (90 kHz, monotonic)
+ * and *key whether it holds an IDR, or -1 when the stream should end.
+ * The pointer stays valid until the next call or close. */
+long cam_h264_next(cam_h264_client_t *c, const uint8_t **au,
+                   uint64_t *pts90k, int *key);
+void cam_h264_client_close(cam_h264_client_t *c);
+
+/* The stream's SPS and PPS as Annex B bytes (for the client's init
+ * segment), captured from the encoder's first access unit. Returns the
+ * length written, or 0 while none have been captured yet (the caller
+ * waits on cam_h264_next, whose first delivery implies they exist). */
+size_t cam_h264_params(uint8_t *buf, size_t cap);
+
 /* Status snapshot for /cam/status. */
 struct cam_status {
     int      running;
@@ -81,7 +103,11 @@ struct cam_status {
     double   fps;
     double   fps_cap;   /* configured stream ceiling; 0 = sensor max */
     int      vpu;       /* stream frames are VPU-encoded */
+    int      gpu;       /* stream frames are GPU-demosaiced */
+    int      hw_skip;   /* fps cap realized by CSI hardware frame skip */
     int      cached;    /* capture buffers are CPU-cached (non-coherent) */
+    int      h264_up;   /* the H.264 encoder is serving clients */
+    int      h264_clients;
     /* The sensor `cam` carries and the geometry that follows from it;
      * "unknown" with zeroes if no sensor has been resolved on that bus. */
     const char *sensor;

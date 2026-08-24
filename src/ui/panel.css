@@ -202,7 +202,8 @@ button:disabled {
   font-size: 13px;
   color: var(--blue);
 }
-#cam {
+#cam,
+#camvid {
   width: 100%;
   max-width: 520px;
   border-radius: 6px;

@@ -9,6 +9,8 @@
  *   GET /?action=stream          mjpg-streamer-compatible stream (lid)
  *   GET /?action=snapshot        mjpg-streamer-compatible snapshot (lid)
  *   GET /cam/stream?cam=lid|head            multipart MJPEG, half sensor res
+ *   GET /cam/h264?cam=lid|head              fragmented MP4 H.264 live stream
+ *                                (MSE-consumable; far fewer bytes than MJPEG)
  *   GET /cam/snapshot?cam=&res=full|half&q=&lamp=  single JPEG (full res;
  *                                lamp overrides the scene lamp for the shot)
  *   GET /cam/status                         JSON engine status, including
@@ -35,7 +37,11 @@
  * and switches. A SNAPSHOT of the other camera does not switch: the
  * engine borrows the mux for one frame and the stream freezes briefly.
  * Environment: FORGECTRL_PORT (8080), FORGECTRL_STREAM_Q (75),
- * FORGECTRL_LAMP (132), FORGECTRL_STREAM_FPS (0 = sensor max).
+ * FORGECTRL_LAMP (132), FORGECTRL_STREAM_FPS (0 = sensor max; 1 or more
+ * is also realized as CSI hardware frame skip), FORGECTRL_H264_KBPS
+ * (1500), FORGECTRL_H264_GOP (30), and the fallback switches
+ * FORGECTRL_NO_VPU, FORGECTRL_NO_H264, FORGECTRL_NO_GPU,
+ * FORGECTRL_NO_HW_SKIP, FORGECTRL_NO_CACHED_BUFS, FORGECTRL_NO_NEON.
  *
  * ulfius runs libmicrohttpd in thread-per-connection mode, so each stream
  * callback may block waiting for the next frame.
@@ -43,6 +49,7 @@
 #define _GNU_SOURCE
 #include "auth.h"
 #include "cam.h"
+#include "mp4mux.h"
 #include "cool.h"
 #include "diag.h"
 #include "fflog.h"
@@ -157,6 +164,140 @@ static void stream_free_cb(void *cls)
     free(sc);
 }
 
+/* ------------------------------------------------- H.264 (fMP4) stream */
+
+static unsigned cam_err_status(const char *err);
+
+struct h264_ctx {
+    cam_h264_client_t *cl;
+    mp4mux_t          *mux;
+    uint32_t           frag_seq;
+    uint64_t           prev_pts;
+    uint8_t           *chunk;       /* current fMP4 piece being drained */
+    size_t             chunk_len;
+    size_t             off;
+    uint8_t           *pending;     /* init segment queued before frame 1 */
+    size_t             pending_len;
+};
+
+/* Pull one access unit and wrap it as a moof+mdat chunk. */
+static int h264_next_chunk(struct h264_ctx *hc)
+{
+    const uint8_t *au;
+    uint64_t pts;
+    int key;
+    long len = cam_h264_next(hc->cl, &au, &pts, &key);
+    if (len < 0)
+        return -1;
+    uint32_t dur = 90000 / 15;
+    if (hc->frag_seq > 0 && pts > hc->prev_pts &&
+        pts - hc->prev_pts < 90000)
+        dur = (uint32_t)(pts - hc->prev_pts);
+    hc->prev_pts = pts;
+    free(hc->chunk);
+    hc->chunk = mp4mux_fragment(hc->mux, ++hc->frag_seq, pts, dur, key,
+                                au, (size_t)len, &hc->chunk_len);
+    hc->off = 0;
+    return hc->chunk ? 0 : -1;
+}
+
+static ssize_t h264_cb(void *cls, uint64_t pos, char *buf, size_t max)
+{
+    (void)pos;
+    struct h264_ctx *hc = cls;
+
+    if (hc->off >= hc->chunk_len) {
+        if (hc->pending) {
+            free(hc->chunk);
+            hc->chunk = hc->pending;
+            hc->chunk_len = hc->pending_len;
+            hc->pending = NULL;
+            hc->off = 0;
+        } else if (h264_next_chunk(hc)) {
+            return U_STREAM_END;
+        }
+    }
+    size_t n = hc->chunk_len - hc->off;
+    if (n > max)
+        n = max;
+    memcpy(buf, hc->chunk + hc->off, n);
+    hc->off += n;
+    return (ssize_t)n;
+}
+
+static void h264_free_cb(void *cls)
+{
+    struct h264_ctx *hc = cls;
+    cam_h264_client_close(hc->cl);
+    mp4mux_free(hc->mux);
+    free(hc->chunk);
+    free(hc->pending);
+    free(hc);
+}
+
+static int do_h264(cam_id_t cam, struct _u_response *res)
+{
+    char err[256];
+    cam_h264_client_t *cl = cam_h264_client_open(cam, err, sizeof(err));
+    if (!cl)
+        return reply_error(res, cam_err_status(err), err);
+
+    struct h264_ctx *hc = calloc(1, sizeof(*hc));
+    if (!hc) {
+        cam_h264_client_close(cl);
+        return reply_error(res, 500, "out of memory");
+    }
+    hc->cl = cl;
+
+    /* Block for the first access unit here, so the codec string (from
+     * the SPS) can travel in a response header and the init segment
+     * precedes frame one. A machine whose H.264 encoder is missing or
+     * refused answers 503 instead of an empty stream. */
+    const uint8_t *au;
+    uint64_t pts;
+    int key;
+    long len = cam_h264_next(cl, &au, &pts, &key);
+    uint8_t params[512];
+    size_t plen = len < 0 ? 0 : cam_h264_params(params, sizeof(params));
+    if (len < 0 || plen == 0) {
+        h264_free_cb(hc);
+        return reply_error(res, 503, "H.264 stream unavailable "
+                           "(the MJPEG stream still works)");
+    }
+    struct cam_status st;
+    cam_get_status(&st);
+    hc->mux = mp4mux_new(st.stream_w, st.stream_h);
+    if (!hc->mux || !mp4mux_feed_params(hc->mux, params, plen)) {
+        h264_free_cb(hc);
+        return reply_error(res, 500, "H.264 parameter sets unusable");
+    }
+    size_t init_len = 0, frag_len = 0;
+    uint8_t *init = mp4mux_init_segment(hc->mux, &init_len);
+    hc->prev_pts = pts;
+    uint8_t *frag = mp4mux_fragment(hc->mux, ++hc->frag_seq, pts,
+                                    90000 / 15, key, au, (size_t)len,
+                                    &frag_len);
+    if (!init || !frag) {
+        free(init);
+        free(frag);
+        h264_free_cb(hc);
+        return reply_error(res, 500, "out of memory");
+    }
+    hc->chunk = init;
+    hc->chunk_len = init_len;
+    hc->off = 0;
+    hc->pending = frag;
+    hc->pending_len = frag_len;
+
+    ulfius_add_header_to_response(res, "Content-Type", "video/mp4");
+    ulfius_add_header_to_response(res, "X-H264-Codec",
+                                  mp4mux_codec(hc->mux));
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    ulfius_set_stream_response(res, 200, h264_cb, h264_free_cb,
+                               U_STREAM_SIZE_UNKNOWN, 64 * 1024, hc);
+    return U_CALLBACK_CONTINUE;
+}
+
 /* Camera failures that reflect machine state rather than a fault answer
  * 409 (the request conflicts with how the machine is right now, and the
  * fix is to change that): the mux is held by another viewer, or the lid
@@ -219,6 +360,19 @@ static int cb_stream(const struct _u_request *req, struct _u_response *res,
     return do_stream(cam, res);
 }
 
+static int cb_h264(const struct _u_request *req, struct _u_response *res,
+                   void *user_data)
+{
+    (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    int ok;
+    cam_id_t cam = parse_cam(req, &ok);
+    if (!ok)
+        return reply_error(res, 400, "cam must be 'lid' or 'head'");
+    return do_h264(cam, res);
+}
+
 static int cb_snapshot(const struct _u_request *req, struct _u_response *res,
                        void *user_data)
 {
@@ -261,21 +415,27 @@ static int cb_status(const struct _u_request *req, struct _u_response *res,
         return U_CALLBACK_COMPLETE;
     struct cam_status st;
     cam_get_status(&st);
-    char body[576];
+    char body[768];
     snprintf(body, sizeof(body),
              "{\"running\":%s,\"cam\":\"%s\",\"clients\":%d,"
              "\"frames\":%llu,\"fps\":%.1f,\"fps_cap\":%.1f,"
-             "\"encoder\":\"%s\",\"buffers\":\"%s\",\"sensor\":\"%s\","
+             "\"hw_fps_skip\":%s,"
+             "\"encoder\":\"%s\",\"convert\":\"%s\",\"buffers\":\"%s\","
+             "\"sensor\":\"%s\","
              "\"stream\":{\"width\":%d,\"height\":%d},"
              "\"snapshot\":{\"width\":%d,\"height\":%d},"
+             "\"h264\":{\"active\":%s,\"clients\":%d},"
              "\"health\":{\"captured\":%llu,\"corrupt\":%llu,"
              "\"restarts\":%u},"
              "\"capture_allowed\":%s,\"stopped_by_lid\":%s}",
              st.running ? "true" : "false", cam_name(st.cam), st.clients,
              (unsigned long long)st.seq, st.fps, st.fps_cap,
+             st.hw_skip ? "true" : "false",
              st.vpu ? "vpu" : "software",
+             st.gpu ? "gpu" : "cpu",
              st.cached ? "cached" : "uncached", st.sensor,
              st.stream_w, st.stream_h, st.snap_w, st.snap_h,
+             st.h264_up ? "true" : "false", st.h264_clients,
              (unsigned long long)st.frames, (unsigned long long)st.corrupt,
              st.recoveries,
              st.lid_closed ? "true" : "false",
@@ -1281,6 +1441,8 @@ int main(int argc, char **argv)
     ulfius_add_endpoint_by_val(&inst, "GET", "/", NULL, 0, &cb_root, NULL);
     ulfius_add_endpoint_by_val(&inst, "GET", "/cam/stream", NULL, 0,
                                &cb_stream, NULL);
+    ulfius_add_endpoint_by_val(&inst, "GET", "/cam/h264", NULL, 0,
+                               &cb_h264, NULL);
     ulfius_add_endpoint_by_val(&inst, "GET", "/cam/snapshot", NULL, 0,
                                &cb_snapshot, NULL);
     ulfius_add_endpoint_by_val(&inst, "GET", "/cam/status", NULL, 0,
