@@ -72,6 +72,7 @@
 #include <time.h>
 #include <ulfius.h>
 #include <unistd.h>
+#include <zlib.h>
 
 #define DEFAULT_PORT 8080
 #define BOUNDARY     "forgectrl-frame"
@@ -1238,30 +1239,61 @@ static int cb_diag_status(const struct _u_request *req,
     return U_CALLBACK_CONTINUE;
 }
 
-/* The panel with the per-machine token spliced in place of the
- * __FFTOKEN__ placeholder, built once. Serving the token inside the
- * page (rather than from an endpoint any LAN client could call) is what
- * lets the origin checks keep it out of a rebinding attacker's reach. */
+/* The panel: the embedded gzip bundle inflated once, with the per-machine
+ * token spliced in place of the __FFTOKEN__ placeholder. Serving the
+ * token inside the page (rather than from an endpoint any LAN client
+ * could call) is what lets the origin checks keep it out of a rebinding
+ * attacker's reach. The splice happens on the inflated text, never
+ * inside the compressed stream. */
 static const char *panel_html(void)
 {
     static char *page;
+    static const char fallback[] =
+        "<!doctype html><title>ForgeFIRM</title>"
+        "forgectrl: the panel could not be unpacked";
     if (page)
         return page;
 
-    const char *mark = strstr(index_html, "__FFTOKEN__");
-    const char *tok = auth_token();
-    if (!mark || !tok[0])
-        return index_html;              /* no token: serve inert page */
+    char *html = malloc((size_t)index_html_len + 1);
+    if (!html)
+        return fallback;
+    z_stream zs;
+    memset(&zs, 0, sizeof(zs));
+    if (inflateInit2(&zs, 15 + 16) != Z_OK) {   /* 16: gzip wrapper */
+        free(html);
+        return fallback;
+    }
+    zs.next_in = (Bytef *)index_html_gz;
+    zs.avail_in = index_html_gz_len;
+    zs.next_out = (Bytef *)html;
+    zs.avail_out = index_html_len;
+    int rc = inflate(&zs, Z_FINISH);
+    size_t n = zs.total_out;
+    inflateEnd(&zs);
+    if (rc != Z_STREAM_END) {
+        free(html);
+        return fallback;
+    }
+    html[n] = '\0';
 
-    size_t pre = (size_t)(mark - index_html);
+    const char *mark = strstr(html, "__FFTOKEN__");
+    const char *tok = auth_token();
+    if (!mark || !tok[0]) {
+        page = html;                    /* no token: serve inert page */
+        return page;
+    }
+    size_t pre = (size_t)(mark - html);
     size_t tlen = strlen(tok);
-    size_t total = strlen(index_html) - strlen("__FFTOKEN__") + tlen + 1;
+    size_t total = n - strlen("__FFTOKEN__") + tlen + 1;
     page = malloc(total);
-    if (!page)
-        return index_html;
-    memcpy(page, index_html, pre);
+    if (!page) {
+        page = html;
+        return page;
+    }
+    memcpy(page, html, pre);
     memcpy(page + pre, tok, tlen);
     strcpy(page + pre + tlen, mark + strlen("__FFTOKEN__"));
+    free(html);
     return page;
 }
 

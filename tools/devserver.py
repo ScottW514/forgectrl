@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Panel development server: live reload for the control panel.
 
-Serves the panel from src/ui/ (index.html, panel.css, panel.js) as plain
-files - so the browser's devtools see real file names and line numbers -
+Serves the panel from src/ui/ (index.html, theme.css, help.js, forms.js,
+panel.js and the Bootstrap files under vendor/) as plain files - so the
+browser's devtools see real file names and line numbers -
 and reloads the open tab through an injected watcher as soon as anything
 in that directory changes, while every API request is either
 
@@ -22,8 +23,9 @@ Usage:
     python3 tools/devserver.py --dump    # the bundled page to stdout
 
 Then browse http://127.0.0.1:8081 and edit src/ui/. --bundle serves the
-page the way the daemon does (CSS and JS inlined, one response), which is
-also what --dump prints; the bundling mirrors src/ui/embed.cmake.
+page the way the daemon does (CSS and JS inlined, one response, before
+the daemon's gzip), which is also what --dump prints; the bundling
+mirrors src/ui/embed.cmake.
 
 Requires only the Python 3 standard library.
 """
@@ -47,8 +49,11 @@ UI_DIR = os.path.join(ROOT, 'src', 'ui')
 ENV_FILE = os.path.join(ROOT, '.env')
 
 TOKEN_MARK = '__FFTOKEN__'          # in panel.js; the daemon substitutes it
-CSS_TAG = '<link rel="stylesheet" href="panel.css" />'   # as embed.cmake
-JS_TAG = '<script src="panel.js"></script>'
+# The files index.html links, in load order: the list embed.cmake inlines,
+# one marker tag per file.
+CSS_FILES = ('vendor/bootstrap.min.css', 'theme.css')
+JS_FILES = ('vendor/bootstrap.bundle.min.js', 'help.js', 'forms.js',
+            'panel.js')
 
 DEFAULT_PORT = 8081
 DEVICE_PORT = 8080
@@ -211,14 +216,20 @@ def html_escape(s):
             .replace('>', '&gt;'))
 
 
-def bundle(html, css, js):
+def bundle(html, read):
     """One self-contained page - the same replacement embed.cmake does,
-    so `--dump` / `--bundle` show exactly what the daemon serves."""
-    for tag, rep in ((CSS_TAG, '<style>\n' + css + '</style>'),
-                     (JS_TAG, '<script>\n' + js + '</script>')):
+    so `--dump` / `--bundle` show exactly what the daemon serves (before
+    its gzip). `read(name)` returns a file under src/ui/ as text."""
+    for name in CSS_FILES:
+        tag = '<link rel="stylesheet" href="%s" />' % name
         if tag not in html:
             raise ValueError('index.html lacks the marker %s' % tag)
-        html = html.replace(tag, rep, 1)
+        html = html.replace(tag, '<style>\n' + read(name) + '</style>', 1)
+    for name in JS_FILES:
+        tag = '<script src="%s"></script>' % name
+        if tag not in html:
+            raise ValueError('index.html lacks the marker %s' % tag)
+        html = html.replace(tag, '<script>\n' + read(name) + '</script>', 1)
     return html
 
 
@@ -240,11 +251,20 @@ class Panel:
         except OSError:
             return 'missing'
         for n in names:
-            try:
-                st = os.stat(os.path.join(self.dir, n))
-            except OSError:
-                continue
-            parts.append('%s:%d:%d' % (n, st.st_mtime_ns, st.st_size))
+            p = os.path.join(self.dir, n)
+            if os.path.isdir(p):
+                try:
+                    subs = [n + '/' + m for m in sorted(os.listdir(p))]
+                except OSError:
+                    continue
+            else:
+                subs = [n]
+            for s in subs:
+                try:
+                    st = os.stat(os.path.join(self.dir, s))
+                except OSError:
+                    continue
+                parts.append('%s:%d:%d' % (s, st.st_mtime_ns, st.st_size))
         return hashlib.sha1('|'.join(parts).encode()).hexdigest()[:16]
 
     def _watch(self):
@@ -265,11 +285,17 @@ class Panel:
             return self.version
 
     def path(self, name):
-        """Absolute path of a file in src/ui/, or None if `name` is not a
-        plain file there (no traversal, no dotfiles)."""
-        if not name or '/' in name or '\\' in name or name.startswith('.'):
+        """Absolute path of a file in src/ui/ or its vendor/ directory, or
+        None if `name` is not a plain file there (no traversal, no
+        dotfiles)."""
+        parts = name.split('/') if name else []
+        if not parts or len(parts) > 2 or (len(parts) == 2 and
+                                            parts[0] != 'vendor'):
             return None
-        p = os.path.join(self.dir, name)
+        for part in parts:
+            if not part or part.startswith('.') or '\\' in part:
+                return None
+        p = os.path.join(self.dir, *parts)
         return p if os.path.isfile(p) else None
 
     def read(self, name):
@@ -280,11 +306,11 @@ class Panel:
         return self.read(name).decode('utf-8')
 
     def page(self, bundled):
-        """index.html as text: the three files linked (dev default, real
-        file names and line numbers in the browser) or inlined."""
+        """index.html as text: the files linked (dev default, real file
+        names and line numbers in the browser) or inlined."""
         html = self.text('index.html')
         if bundled:
-            html = bundle(html, self.text('panel.css'), self.text('panel.js'))
+            html = bundle(html, self.text)
         return html
 
     def render(self, token, label, mock, bundled):

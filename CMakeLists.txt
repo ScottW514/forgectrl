@@ -4,8 +4,9 @@ project(forgectrl C)
 set(CMAKE_C_STANDARD 11)
 
 # The control panel is a normal static page under src/ui/ (index.html,
-# panel.css, panel.js). embed.cmake bundles it into one self-contained
-# page and emits it as `const char index_html[]` (see src/ui.h); the
+# theme.css, help.js, forms.js, panel.js, and Bootstrap in vendor/).
+# embed.cmake bundles it into one self-contained page, gzips it, and
+# emits the compressed bytes as `index_html_gz[]` (see src/ui.h); the
 # bundled page itself lands in build/ui/index.html for inspection.
 set(UI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/ui)
 set(UI_OUT ${CMAKE_CURRENT_BINARY_DIR}/ui)
@@ -14,9 +15,12 @@ add_custom_command(
   COMMAND ${CMAKE_COMMAND} -E make_directory ${UI_OUT}
   COMMAND ${CMAKE_COMMAND} -DUI_DIR=${UI_DIR} -DOUT_HTML=${UI_OUT}/index.html
           -DOUT_C=${UI_OUT}/ui_blob.c -P ${UI_DIR}/embed.cmake
-  DEPENDS ${UI_DIR}/index.html ${UI_DIR}/panel.css ${UI_DIR}/panel.js
+  DEPENDS ${UI_DIR}/index.html ${UI_DIR}/theme.css ${UI_DIR}/help.js
+          ${UI_DIR}/forms.js ${UI_DIR}/panel.js
+          ${UI_DIR}/vendor/bootstrap.min.css
+          ${UI_DIR}/vendor/bootstrap.bundle.min.js
           ${UI_DIR}/embed.cmake
-  COMMENT "Bundling the control panel (src/ui -> index_html[])"
+  COMMENT "Bundling the control panel (src/ui -> index_html_gz[])"
   VERBATIM)
 
 add_executable(forgectrl

@@ -3,7 +3,8 @@
  * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
  * SPDX-License-Identifier: MIT
  *
- * Single-page machine control panel, hash-routed tabs, ES5 only:
+ * Single-page machine control panel, hash-routed tabs, built on Bootstrap
+ * (vendor/) with the OpenGlow theme on top (theme.css):
  *
  *   #status   landing page - live operational status (motion state and
  *             position, cooling and fans, safety switches, system
@@ -27,7 +28,15 @@
  * State flows through GET/POST /settings, GET /status (machine
  * telemetry), GET /cam/status and GET /logs. The design intent: every
  * machine tunable - shared, cloud-override, and GRBL-mode - gets a home
- * in one of these tabs as it appears.
+ * in one of these tabs as it appears. Every settings field on every tab
+ * feeds one dirty set and one Save (forms.js): the save bar shows while
+ * anything is unsaved, posts every dirty key in one request, and leaving
+ * a tab or the page with unsaved changes asks first. Help is a "?"
+ * popover per card or field (help.js), each linking into the
+ * documentation site; the light and dark themes are picked in the
+ * header. Refills from the daemon (after a save, a mode switch, a
+ * diagnostic's Apply) never overwrite a field the operator is editing:
+ * setF keeps a dirty value and only moves its baseline.
  *
  * The header identifies the machine by its fuse identity (the factory
  * hostname derived from the burned-in serial) regardless of any cloud
@@ -65,17 +74,6 @@ var CK = [
   'cool_purge_min_current',
   'cool_fan_grace_s'
 ];
-function $(i) {
-  return document.getElementById(i);
-}
-function esc(t) {
-  return String(t)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
 function fx(u, o) {
   o = o || {};
   o.headers = o.headers || {};
@@ -249,26 +247,20 @@ function backVal(k, s) {
   if (s === '' || isNaN(f) || !FT[k]) return s;
   return FT[k] === 'len' ? fnum(pLen(f), 3) : fnum(FT[k] === 'ta' ? pTa(f) : pTd(f), 2);
 }
+/* A refill only replaces a field that is clean (showing its baseline);
+ * a value the operator has typed stays, with the baseline moved under
+ * it. fill(true) after a save resets everything to what the daemon
+ * reports. */
+var fillForce = false;
 function setF(k, raw) {
-  var v = dspVal(k, raw || '');
-  $(k).value = v;
+  var v = dspVal(k, raw || ''),
+    e = $(k),
+    clean = typeof orig[k] === 'undefined' || e.value.trim() === orig[k];
+  if (fillForce || clean) e.value = v;
   orig[k] = v;
 }
 function dirty(k) {
-  return $(k).value.trim() !== orig[k];
-}
-function pick(p, keys) {
-  var i,
-    k,
-    any = 0;
-  for (i = 0; i < keys.length; i++) {
-    k = keys[i];
-    if (dirty(k)) {
-      p[k] = backVal(k, $(k).value.trim());
-      any = 1;
-    }
-  }
-  return any;
+  return typeof orig[k] !== 'undefined' && $(k).value.trim() !== orig[k];
 }
 function lockApply() {
   var els = document.querySelectorAll('main input,main select,main button');
@@ -280,10 +272,11 @@ function lockApply() {
   $('locknote').style.display = locked ? 'block' : 'none';
   if (locked)
     $('locknote').textContent = D.running
-      ? 'A diagnostic is running \u2014 controls are locked until it completes.'
+      ? 'A diagnostic is running: controls are locked until it completes.'
       : 'Settings are locked while the machine is busy (state: ' +
         (M.state || 'unknown') +
         ').';
+  updateSaveBar();
 }
 function setMode(m) {
   var el = $('msg-mode');
@@ -313,10 +306,34 @@ function setMode(m) {
     });
 }
 var TABS = ['status', 'machine', 'gfcloud', 'grbl', 'diag', 'logs', 'system'],
-  sysChecked = false;
+  sysChecked = false,
+  curTab = null,
+  hashRevert = false;
+function tabOf(hash) {
+  var h = hash.replace('#', '');
+  return TABS.indexOf(h) < 0 ? 'status' : h;
+}
+/* The hash router. Leaving a tab with unsaved changes puts the hash
+ * back and asks (navGuard, forms.js); the answer re-issues the move. */
+function onHash() {
+  if (hashRevert) {
+    hashRevert = false;
+    return;
+  }
+  var h = tabOf(location.hash);
+  if (curTab && h !== curTab && dirtyCount()) {
+    hashRevert = true;
+    location.hash = '#' + curTab;
+    navGuard(function () {
+      location.hash = '#' + h;
+    });
+    return;
+  }
+  tab();
+}
 function tab() {
-  var h = location.hash.replace('#', '');
-  if (TABS.indexOf(h) < 0) h = 'status';
+  var h = tabOf(location.hash);
+  curTab = h;
   for (var i = 0; i < TABS.length; i++) {
     var t = TABS[i];
     $('s-' + t).className = t === h ? 'on' : '';
@@ -331,7 +348,7 @@ function tab() {
     loadTail(false);
   }
 }
-window.onhashchange = tab;
+window.onhashchange = onHash;
 function snapUrl() {
   return '/cam/snapshot?cam=lid&res=half&t=' + Date.now();
 }
@@ -442,7 +459,7 @@ function toggleLive() {
   retries = 0;
   $('cammsg').textContent = '';
   $('live').textContent = liveOn ? 'Stop' : 'Live';
-  $('live').className = liveOn ? 'on' : '';
+  $('live').classList.toggle('on', liveOn);
   $('snapbtn').disabled = liveOn;
   if (liveOn) {
     startH264();
@@ -637,11 +654,12 @@ function renderGrbl() {
   );
   $('grblinfo').innerHTML = g;
 }
-function fill() {
+function fill(force) {
+  fillForce = !!force;
   $('mode-grbl').className =
     'segbtn' + ((S.controller_mode || 'grbl') === 'grbl' ? ' segon' : '');
   $('mode-cloud').className = 'segbtn' + (S.controller_mode === 'cloud' ? ' segon' : '');
-  $('ui_units').value = S.ui_units || 'metric';
+  setF('ui_units', S.ui_units || 'metric');
   setF('homing_mode', S.homing_mode || 'none');
   setF('gfcloud_home_x', S.gfcloud_home_x);
   setF('gfcloud_home_y', S.gfcloud_home_y);
@@ -659,9 +677,9 @@ function fill() {
   setF('lid_lamp_idle', S.lid_lamp_idle);
   setF('wifi_country', S.wifi_country || '00');
   setF('gf_serial', S.gf_serial);
-  $('gf_password').value = '';
+  if (fillForce) $('gf_password').value = '';
   $('gf_password').placeholder = S.gf_password_set
-    ? '(override set \u2014 blank keeps it)'
+    ? '(override set: blank keeps it)'
     : '(factory fuses)';
   var uu = document.querySelectorAll('.ulen'),
     ui;
@@ -671,27 +689,20 @@ function fill() {
   for (var pk in PH)
     $(pk).placeholder = fnum(PH[pk][1] === 'ta' ? dTa(PH[pk][0]) : dTd(PH[pk][0]), 1);
   $('host').textContent = (S.machine_id || '') + (S.version ? ' \u00b7 ' + S.version : '');
+  fillForce = false;
   renderGateNotes();
   renderGatesBanner();
   renderStat();
+  updateSaveBar();
 }
 (function () {
   for (var k in GN) if ($(k)) $(k).addEventListener('input', renderGateNotes);
 })();
-function post(pairs, msgId) {
-  var q = '',
-    k;
-  for (k in pairs)
-    q += (q ? '&' : '') + encodeURIComponent(k) + '=' + encodeURIComponent(pairs[k]);
+/* An immediate settings write outside the save bar (an action button):
+ * the reply refills the page, keeping any edit in progress. */
+function postNow(pairs, msgId) {
   $(msgId).textContent = 'saving\u2026';
-  fx('/settings?' + q, { method: 'POST' })
-    .then(function (r) {
-      if (!r.ok)
-        return r.text().then(function (t) {
-          throw t;
-        });
-      return r.json();
-    })
+  postSettings(pairs)
     .then(function (s) {
       S = s;
       fill();
@@ -704,93 +715,10 @@ function post(pairs, msgId) {
       $(msgId).textContent = String(e || 'save failed');
     });
 }
-function saveUnits() {
-  post({ ui_units: $('ui_units').value }, 'msg-u');
-}
-function saveMachine() {
-  var p = {};
-  if (!pick(p, ['homing_mode', 'gfcloud_home_x', 'gfcloud_home_y', 'gfcloud_home_z'])) {
-    $('msg-m').textContent = 'no changes';
-    return;
-  }
-  post(p, 'msg-m');
-}
-function saveCooling() {
-  var p = {};
-  if (!pick(p, CK)) {
-    $('msg-c').textContent = 'no changes';
-    return;
-  }
-  post(p, 'msg-c');
-}
-function saveGrbl() {
-  var p = {};
-  if (!pick(p, ['laser_button_timeout_s', 'laser_disarm_s'])) {
-    $('msg-g').textContent = 'no changes';
-    return;
-  }
-  post(p, 'msg-g');
-}
-function saveLid() {
-  var p = {};
-  if (!pick(p, ['lid_policy'])) {
-    $('msg-l').textContent = 'no changes';
-    return;
-  }
-  post(p, 'msg-l');
-}
-function saveRail() {
-  var p = {};
-  if (!pick(p, ['rail_settle_s'])) {
-    $('msg-r').textContent = 'no changes';
-    return;
-  }
-  post(p, 'msg-r');
-}
-function saveLamp() {
-  var p = {};
-  if (!pick(p, ['lid_lamp_idle'])) {
-    $('msg-lamp').textContent = 'no changes';
-    return;
-  }
-  post(p, 'msg-lamp');
-}
-function saveIdentity() {
-  var p = {};
-  pick(p, ['gf_serial']);
-  if ($('gf_password').value) p.gf_password = $('gf_password').value.trim();
-  if (!Object.keys(p).length) {
-    $('msg-i').textContent = 'no changes';
-    return;
-  }
-  post(p, 'msg-i');
-}
 function clearIdentity() {
-  post({ gf_serial: '', gf_password: '' }, 'msg-i');
-}
-function saveSession() {
-  var p = {};
-  if (!pick(p, ['gfcloud_home_timeout_s'])) {
-    $('msg-s').textContent = 'no changes';
-    return;
-  }
-  post(p, 'msg-s');
-}
-function savePause() {
-  var p = {};
-  if (!pick(p, ['cloud_pause_backtrack_ticks', 'cloud_resume_lead_ticks'])) {
-    $('msg-p').textContent = 'no changes';
-    return;
-  }
-  post(p, 'msg-p');
-}
-function saveJobSize() {
-  var p = {};
-  if (!pick(p, ['pulse_warn_threshold_bytes', 'pulse_reject_threshold_bytes'])) {
-    $('msg-js').textContent = 'no changes';
-    return;
-  }
-  post(p, 'msg-js');
+  $('gf_serial').value = orig.gf_serial || '';
+  $('gf_password').value = '';
+  postNow({ gf_serial: '', gf_password: '' }, 'msg-i');
 }
 var RG =
   "AF Afghanistan;AX Aland Islands;AL Albania;DZ Algeria;AS American Samoa;AD Andorra;AO Angola;AI Anguilla;AG Antigua & Barbuda;AR Argentina;AM Armenia;AW Aruba;AU Australia;AT Austria;AZ Azerbaijan;BS Bahamas;BH Bahrain;BD Bangladesh;BB Barbados;BY Belarus;BE Belgium;BZ Belize;BJ Benin;BM Bermuda;BT Bhutan;BO Bolivia;BQ Bonaire, Sint Eustatius and Saba;BA Bosnia and Herzegovina;BW Botswana;BR Brazil;IO British Indian Ocean Territory;VG British Virgin Islands;BN Brunei;BG Bulgaria;BF Burkina Faso;BI Burundi;CV Cabo Verde;KH Cambodia;CM Cameroon;CA Canada;KY Cayman Islands;CF Central African Republic;TD Chad;CL Chile;CN China;CX Christmas Island;CC Cocos (Keeling) Islands;CO Colombia;KM Comoros;CG Congo;CD Congo (DRC);CK Cook Islands;CR Costa Rica;CI Cote d'Ivoire;HR Croatia;CU Cuba;CW Curacao;CY Cyprus;CZ Czechia;DK Denmark;DJ Djibouti;DM Dominica;DO Dominican Republic;EC Ecuador;EG Egypt;SV El Salvador;GQ Equatorial Guinea;ER Eritrea;EE Estonia;SZ Eswatini;ET Ethiopia;FK Falkland Islands;FO Faroe Islands;FJ Fiji;FI Finland;FR France;GF French Guiana;PF French Polynesia;GA Gabon;GM Gambia;GE Georgia;DE Germany;GH Ghana;GI Gibraltar;GR Greece;GL Greenland;GD Grenada;GP Guadeloupe;GU Guam;GT Guatemala;GG Guernsey;GN Guinea;GW Guinea-Bissau;GY Guyana;HT Haiti;HN Honduras;HK Hong Kong SAR;HU Hungary;IS Iceland;IN India;ID Indonesia;IR Iran;IQ Iraq;IE Ireland;IM Isle of Man;IL Israel;IT Italy;JM Jamaica;JP Japan;JE Jersey;JO Jordan;KZ Kazakhstan;KE Kenya;KI Kiribati;KR Korea;XK Kosovo;KW Kuwait;KG Kyrgyzstan;LA Laos;LV Latvia;LB Lebanon;LS Lesotho;LR Liberia;LY Libya;LI Liechtenstein;LT Lithuania;LU Luxembourg;MO Macao SAR;MG Madagascar;MW Malawi;MY Malaysia;MV Maldives;ML Mali;MT Malta;MH Marshall Islands;MQ Martinique;MR Mauritania;MU Mauritius;YT Mayotte;MX Mexico;FM Micronesia;MD Moldova;MC Monaco;MN Mongolia;ME Montenegro;MS Montserrat;MA Morocco;MZ Mozambique;MM Myanmar;NA Namibia;NR Nauru;NP Nepal;NL Netherlands;NC New Caledonia;NZ New Zealand;NI Nicaragua;NE Niger;NG Nigeria;NU Niue;NF Norfolk Island;KP North Korea;MK North Macedonia;MP Northern Mariana Islands;NO Norway;OM Oman;PK Pakistan;PW Palau;PS Palestinian Authority;PA Panama;PG Papua New Guinea;PY Paraguay;PE Peru;PH Philippines;PN Pitcairn Islands;PL Poland;PT Portugal;PR Puerto Rico;QA Qatar;RE Reunion;RO Romania;RU Russia;RW Rwanda;WS Samoa;SM San Marino;ST Sao Tome & Principe;SA Saudi Arabia;SN Senegal;RS Serbia;SC Seychelles;SL Sierra Leone;SG Singapore;SX Sint Maarten;SK Slovakia;SI Slovenia;SB Solomon Islands;SO Somalia;ZA South Africa;SS South Sudan;ES Spain;LK Sri Lanka;SH St Helena, Ascension, Tristan da Cunha;BL St. Barthelemy;KN St. Kitts & Nevis;LC St. Lucia;MF St. Martin;PM St. Pierre & Miquelon;VC St. Vincent & Grenadines;SD Sudan;SR Suriname;SJ Svalbard & Jan Mayen;SE Sweden;CH Switzerland;SY Syria;TW Taiwan;TJ Tajikistan;TZ Tanzania;TH Thailand;TL Timor-Leste;TG Togo;TK Tokelau;TO Tonga;TT Trinidad & Tobago;TN Tunisia;TR Turkiye;TM Turkmenistan;TC Turks & Caicos Islands;TV Tuvalu;UM U.S. Outlying Islands;VI U.S. Virgin Islands;UG Uganda;UA Ukraine;AE United Arab Emirates;GB United Kingdom;US United States;UY Uruguay;UZ Uzbekistan;VU Vanuatu;VA Vatican City;VE Venezuela;VN Vietnam;WF Wallis & Futuna;YE Yemen;ZM Zambia;ZW Zimbabwe";
@@ -802,14 +730,6 @@ var RG =
   for (i = 0; i < a.length; i++)
     s.add(new Option(a[i].slice(3) + ' (' + a[i].slice(0, 2) + ')', a[i].slice(0, 2)));
 })();
-function saveWifi() {
-  var p = {};
-  if (!pick(p, ['wifi_country'])) {
-    $('msg-w').textContent = 'no changes';
-    return;
-  }
-  post(p, 'msg-w');
-}
 function showFuse() {
   fx('/fuse-identity')
     .then(function (r) {
@@ -857,7 +777,7 @@ function abortDiag() {
   fx('/diag/abort', { method: 'POST' });
 }
 function applyRec(v) {
-  post({ cool_flow_rise: String(v) }, 'msg-d');
+  postNow({ cool_flow_rise: String(v) }, 'msg-d');
 }
 function fmtEl(s) {
   return Math.floor(s / 60) + ':' + ('0' + (s % 60)).slice(-2);
@@ -946,7 +866,7 @@ function renderDiag() {
             ' ' +
             uT() +
             '</span> ' +
-            "<button class='pri' onclick='applyRec(" +
+            "<button class='btn btn-sm btn-primary' onclick='applyRec(" +
             r.recommend +
             ")'>Apply</button>"
         );
@@ -987,7 +907,9 @@ function slotRow(n, s) {
       : '(not present)';
   var act =
     s.present === 'yes' && !s.next
-      ? " <button data-boot='" + n + "'>Set next boot</button>"
+      ? " <button class='btn btn-sm btn-outline-secondary' data-boot='" +
+        n +
+        "'>Set next boot</button>"
       : '';
   return (
     "<div class='kv'><span>" + SLNAME[n] + '</span><span>' + lbl + b + act + '</span></div>'
@@ -1058,7 +980,7 @@ function renderLists() {
       ' \u00b7 ' +
       Math.round(e.bytes / 1048576) +
       ' MB' +
-      " <button class='pri' data-apply='" +
+      " <button class='btn btn-sm btn-primary' data-apply='" +
       n +
       "' data-ver='" +
       esc(e.version || 'this image') +
@@ -1077,7 +999,7 @@ function renderLists() {
       "</span><span class='mono'>" +
       Math.round(a.bytes / 1048576) +
       ' MB' +
-      " <button data-restore='" +
+      " <button class='btn btn-sm btn-outline-secondary' data-restore='" +
       esc(a.file) +
       "' data-ver='" +
       esc(a.version ? 'v' + a.version : a.date || a.file) +
@@ -1319,7 +1241,7 @@ function lvlSel(id, cur) {
       '>' +
       L[i] +
       '</option>';
-  return "<select id='" + id + "'>" + o + '</select>';
+  return "<select class='form-select form-select-sm' id='" + id + "'>" + o + '</select>';
 }
 function renderLogs() {
   if (!LG.loggers) return;
@@ -1367,62 +1289,6 @@ function loadLogs() {
     })
     .catch(function () {});
 }
-function postLogs(p, msgId) {
-  var q = '',
-    k;
-  for (k in p) q += (q ? '&' : '') + encodeURIComponent(k) + '=' + encodeURIComponent(p[k]);
-  $(msgId).textContent = 'saving\u2026';
-  fx('/settings?' + q, { method: 'POST' })
-    .then(function (r) {
-      if (!r.ok)
-        return r.text().then(function (t) {
-          throw t;
-        });
-      return r.json();
-    })
-    .then(function (s) {
-      S = s;
-      $(msgId).textContent = 'saved \u2014 applies at the next reboot';
-      loadLogs();
-    })
-    .catch(function (e) {
-      $(msgId).textContent = String(e || 'save failed');
-    });
-}
-function saveLogLevels() {
-  var p = {},
-    i,
-    l,
-    d,
-    r;
-  if (!LG.loggers) return;
-  for (i = 0; i < LG.loggers.length; i++) {
-    l = LG.loggers[i];
-    d = $('ld-' + l.name).value;
-    r = $('lr-' + l.name).value;
-    if (d !== l.disk) p['log_' + l.name + '_disk'] = d;
-    if (r !== l.remote) p['log_' + l.name + '_remote'] = r;
-  }
-  if (!Object.keys(p).length) {
-    $('msg-ll').textContent = 'no changes';
-    return;
-  }
-  postLogs(p, 'msg-ll');
-}
-function saveSyslog() {
-  var p = {},
-    s = $('syslog_server').value.trim(),
-    pt = $('syslog_port').value.trim(),
-    pr = $('syslog_proto').value;
-  if (s !== (LG.syslog_server || '')) p.syslog_server = s;
-  if (pt !== (LG.syslog_port || '')) p.syslog_port = pt;
-  if (pr !== (LG.syslog_proto || 'udp')) p.syslog_proto = pr;
-  if (!Object.keys(p).length) {
-    $('msg-ls').textContent = 'no changes';
-    return;
-  }
-  postLogs(p, 'msg-ls');
-}
 function loadTail(reset) {
   var n = $('logsel').value || logName,
     ln = $('loglines').value,
@@ -1462,12 +1328,12 @@ function toggleFollow() {
   if (logTimer) {
     clearInterval(logTimer);
     logTimer = null;
-    $('logfollow').className = '';
+    $('logfollow').classList.remove('on');
   } else {
     logTimer = setInterval(function () {
       loadTail(false);
     }, 2000);
-    $('logfollow').className = 'on';
+    $('logfollow').classList.add('on');
     loadTail(false);
   }
 }
@@ -1560,9 +1426,10 @@ fetch('/settings')
   })
   .then(function (s) {
     S = s;
-    fill();
+    fill(true);
   })
   .catch(function () {});
+initHelp();
 loadMach();
 setInterval(loadMach, 2500);
 loadCam();

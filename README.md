@@ -43,8 +43,13 @@ ownership, and logging — is [docs/SERVICES.md](docs/SERVICES.md).
 
 ## The control panel (`GET /`)
 
-A self-contained single page (no external assets) carrying the
-OpenGlow visual identity, tabbed:
+A self-contained single page (no external assets) on Bootstrap, carrying
+the OpenGlow visual identity in a light and a dark theme (the header
+toggle: light, dark, or the system preference). Every settings field on
+every tab shares one save bar: it appears while anything is unsaved,
+posts every change in one request, and leaving a tab or the page with
+unsaved changes asks first. Each card and field has a "?" that opens its
+help, with a link into the documentation site. Tabbed:
 
 - **Status** — the live controller-mode selector (switches through the
   supervisor; the setting persists for boot), live operational status
@@ -203,11 +208,19 @@ the recipe, which also installs the sysvinit script from `init/`.
 ## Developing the panel
 
 The panel is a plain static page under `src/ui/` - `index.html`,
-`panel.css`, `panel.js` (ES5, no external assets). The build bundles the
-three into one self-contained page and embeds it in the daemon
-(`src/ui/embed.cmake`, run by CMake; the bundled page also lands in
-`build/ui/index.html`), so what ships is still a single response with the
-token substituted at serve time. `tools/devserver.py` (Python 3, standard
+`theme.css` (the OpenGlow theme: every color as a token, light and dark,
+mapped onto Bootstrap's component variables), `help.js` (the help text,
+one entry per "?" button, each with its documentation link), `forms.js`
+(the shared dirty set, the save bar, the tab guard, the theme toggle,
+toasts), `panel.js` (the tabs, telemetry rendering, and every action),
+and Bootstrap under `vendor/` (pinned, with its license; no external
+assets, no build tooling beyond CMake). The build bundles them into one
+self-contained page, gzips it, and embeds the compressed bytes in the
+daemon (`src/ui/embed.cmake`, run by CMake; the bundled page also lands
+in `build/ui/index.html`); the daemon inflates it once at first request
+and substitutes the token, so what ships is still a single plain
+response. The page lives compressed in the binary because the rootfs is
+raw ext4: bytes in `.rodata` are bytes on the image. `tools/devserver.py` (Python 3, standard
 library only) serves the files as they are, with live reload: the browser
 sees real file names and line numbers, and the open tab reloads whenever
 anything under `src/ui/` is saved (`--bundle` serves the page inlined the
