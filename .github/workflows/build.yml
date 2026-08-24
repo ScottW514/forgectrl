@@ -36,5 +36,7 @@ jobs:
         run: ./build/airflow_test
       - name: Cooling status document
         run: ./build/coolfmt_test
+      - name: Loopback peer check
+        run: ./build/auth_peer_test
       - name: Fragmented-MP4 muxer
         run: ./build/mp4mux_test

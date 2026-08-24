@@ -30,6 +30,7 @@
 #define _GNU_SOURCE
 #include "auth.h"
 #include "fflog.h"
+#include "peer.h"
 
 #include <ctype.h>
 #include <fcntl.h>
@@ -199,27 +200,6 @@ static int origin_ok(const struct _u_request *req)
     return 1;
 }
 
-static int peer_is_loopback(const struct _u_request *req)
-{
-    const struct sockaddr *sa = req->client_address;
-    if (!sa)
-        return 0;
-    if (sa->sa_family == AF_INET) {
-        const struct sockaddr_in *s = (const struct sockaddr_in *)sa;
-        return (ntohl(s->sin_addr.s_addr) >> 24) == 127;
-    }
-    if (sa->sa_family == AF_INET6) {
-        const struct sockaddr_in6 *s = (const struct sockaddr_in6 *)sa;
-        const uint8_t *a = s->sin6_addr.s6_addr;
-        static const uint8_t lo[16] = { [15] = 1 };
-        if (!memcmp(a, lo, 16))
-            return 1;                       /* ::1 */
-        if (a[10] == 0xff && a[11] == 0xff && a[12] == 127)
-            return 1;                       /* ::ffff:127.0.0.0/8 */
-    }
-    return 0;
-}
-
 int auth_read_ok(const struct _u_request *req, struct _u_response *res)
 {
     if (!origin_ok(req))
@@ -253,7 +233,12 @@ int auth_loopback_ok(const struct _u_request *req, struct _u_response *res)
 {
     if (!origin_ok(req))
         return deny(res, 403, "request origin refused");
-    if (!peer_is_loopback(req))
+    /* The peer must be the whole sockaddr: ulfius 2.7.15 copies only
+     * sizeof(struct sockaddr) into client_address, which truncates the
+     * sockaddr_in6 a dual-stack listener reports for every peer, and a
+     * truncated copy fails this check closed. The image carries the
+     * ulfius patch that copies the family's length. */
+    if (!peer_is_loopback(req->client_address))
         return deny(res, 403, "loopback only");
     return 1;
 }
