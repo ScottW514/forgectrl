@@ -573,6 +573,8 @@ static int valid_recheck_s(const char *v)  { return valid_range(v, 0, 3600); }
 static int valid_confirm_s(const char *v)  { return valid_range(v, 60, 3600); }
 /* C per raw-second of pic/hv_current; the bench measured 3.06e-5. */
 static int valid_laser_heat(const char *v) { return valid_range(v, 0, 2e-4); }
+/* ADC counts at the air-assist run duty; the bench measured about 20. */
+static int valid_aa_offset(const char *v)  { return valid_range(v, 0, 60); }
 static int valid_cool_s(const char *v)     { return valid_range(v, 0, 1800); }
 
 /* GRBL-mode tunables, read by the controller from the same file. The
@@ -633,6 +635,7 @@ static const struct {
     { "cool_confirm_max_s",     valid_confirm_s,   0 },
     { "cool_laser_heat_cw",     valid_laser_heat,  0 },
     { "cool_laser_heat_density", valid_laser_heat, 0 },
+    { "cool_aa_offset_counts",  valid_aa_offset,   0 },
     { "cool_temp_max",          valid_temp_max,    0 },
     { "cool_temp_resume",       valid_temp_resume, 0 },
     { "cool_temp_critical_c",   valid_temp_critical, 0 },
@@ -1513,6 +1516,8 @@ int main(int argc, char **argv)
                                &cb_diag_start, "flow-verify");
     ulfius_add_endpoint_by_val(&inst, "POST", "/diag/flow-calibrate", NULL,
                                0, &cb_diag_start, "flow-calibrate");
+    ulfius_add_endpoint_by_val(&inst, "POST", "/diag/aa-offset-calibrate", NULL,
+                               0, &cb_diag_start, "aa-offset-calibrate");
     ulfius_add_endpoint_by_val(&inst, "POST", "/diag/abort", NULL, 0,
                                &cb_diag_abort, NULL);
     ulfius_add_endpoint_by_val(&inst, "GET", "/diag/status", NULL, 0,

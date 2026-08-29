@@ -779,6 +779,9 @@ function abortDiag() {
 function applyRec(v) {
   postNow({ cool_flow_rise: String(v) }, 'msg-d');
 }
+function applyAa(v) {
+  postNow({ cool_aa_offset_counts: String(v) }, 'msg-d');
+}
 function fmtEl(s) {
   return Math.floor(s / 60) + ':' + ('0' + (s % 60)).slice(-2);
 }
@@ -868,6 +871,31 @@ function renderDiag() {
             '</span> ' +
             "<button class='btn btn-sm btn-primary' onclick='applyRec(" +
             r.recommend +
+            ")'>Apply</button>"
+        );
+    }
+    if (typeof r.offset_counts !== 'undefined') {
+      g += txt(
+        'Air-assist offset',
+        r.offset_counts.toFixed(1) +
+          ' counts (spread ' +
+          r.spread_counts.toFixed(1) +
+          ')  edges: ' +
+          (r.steps || [])
+            .map(function (s) {
+              return s[0].toFixed(0) + '/' + s[1].toFixed(0);
+            })
+            .join(', '),
+        r.error ? 'b-warn' : 'b-ok'
+      );
+      if (typeof r.recommend !== 'undefined')
+        g += kv(
+          'Recommended cool_aa_offset_counts',
+          "<span class='mono'>" +
+            r.recommend.toFixed(1) +
+            '</span> ' +
+            "<button class='btn btn-sm btn-primary' onclick='applyAa(" +
+            r.recommend.toFixed(1) +
             ")'>Apply</button>"
         );
     }

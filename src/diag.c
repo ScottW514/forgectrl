@@ -20,6 +20,11 @@
  *   flow-verify     one check with the pump on, one with the pump
  *                   commanded off, against the configured threshold.
  *                   PASS = the threshold separates the two readings.
+ *   aa-offset-calibrate  the air-assist fan's ground shift on the two
+ *                   coolant readings, in ADC counts: the fan stepped
+ *                   idle <-> run three times, tube dark, heater off,
+ *                   and the step at every edge averaged; recommends
+ *                   cool_aa_offset_counts (see cool.c, AA_OFFSET_*).
  *   flow-calibrate  3 trials per case, alternating; reports both
  *                   bands and recommends threshold = band midpoint
  *                   (no recommendation when the gap is too small to
@@ -444,6 +449,165 @@ out_norestart:
     return NULL;
 }
 
+/* ------------------------------------------- aa-offset-calibrate */
+
+/* The air-assist fan's return current shifts both coolant thermistor
+ * readings by a voltage the ADC sees as a constant number of counts
+ * while the fan runs (cool.c, AA_OFFSET_*). This tool measures that
+ * number on this machine: pump on, heater off, tube dark, the air assist
+ * stepped idle -> run -> idle AA_CYCLES times with both sensors read at
+ * AA_HZ, the step at every edge taken as the mean of the 1.5 s after the
+ * edge (from 0.3 s) minus the mean of the 1.5 s before, in counts, on
+ * each sensor; the recommendation is the mean of the edges' magnitudes,
+ * and the spread across them is reported so a noisy loop refuses rather
+ * than recommends. */
+#define AA_CYCLES     3
+#define AA_HZ         4
+#define AA_DWELL_S    8
+#define AA_IDLE       204
+#define AA_RUN        1023
+#define AA_EDGES      (AA_CYCLES * 2)
+#define AA_MAX_SPREAD 8.0
+#define AA_MIN_COUNTS 3.0
+
+static void aa_write(long duty)
+{
+    char v[16];
+    snprintf(v, sizeof(v), "%ld", duty);
+    wr_attr("head/air_assist_pwm", v);
+}
+
+/* One edge: settle the fan's new state and read the step on both
+ * sensors. Returns 0, -1 on abort. */
+static int aa_edge(long duty, double *step_down, double *step_up)
+{
+    enum { N = (int)(1.5 * AA_HZ) };
+    double b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+    int nb = 0, na = 0;
+    for (int i = 0; i < N; i++) {
+        long r1 = rd_long("pic/water_temp_1"), r2 = rd_long("pic/water_temp_2");
+        if (r1 > 0 && r2 > 0) {
+            b1 += (double)r1;
+            b2 += (double)r2;
+            nb++;
+        }
+        usleep(1000000 / AA_HZ);
+        if (aborted())
+            return -1;
+    }
+    aa_write(duty);
+    usleep(300000);
+    for (int i = 0; i < N; i++) {
+        long r1 = rd_long("pic/water_temp_1"), r2 = rd_long("pic/water_temp_2");
+        if (r1 > 0 && r2 > 0) {
+            a1 += (double)r1;
+            a2 += (double)r2;
+            na++;
+        }
+        usleep(1000000 / AA_HZ);
+        if (aborted())
+            return -1;
+    }
+    if (!nb || !na)
+        return -1;
+    *step_down = a1 / na - b1 / nb;
+    *step_up = a2 / na - b2 / nb;
+    /* The rest of the dwell, so the loop is steady before the next edge. */
+    for (int i = 0; i < AA_DWELL_S - 2; i++) {
+        double d, u;
+        sample(&d, &u);
+        sleep(1);
+        if (aborted())
+            return -1;
+    }
+    return 0;
+}
+
+static void *runner_aa(void *arg)
+{
+    (void)arg;
+    dlog("start: air assist %d <-> %d, %d cycles", AA_IDLE, AA_RUN, AA_CYCLES);
+    set_phase("stopping the motion controller");
+    if (controller_stop()) {
+        set_result("{\"error\":\"could not stop the motion controller\"}");
+        controller_start();
+        goto out_norestart;
+    }
+    close(open(MARKER, O_CREAT | O_WRONLY, 0644));
+
+    double sd[AA_EDGES], su[AA_EDGES];
+    int n = 0;
+    pump(1);
+    heater_pct(0);
+    fans_idle();
+    aa_write(AA_IDLE);
+    set_phase("settling with the fans idle");
+    for (int i = 0; i < 6; i++) {
+        double d, u;
+        sample(&d, &u);
+        sleep(1);
+        if (aborted())
+            goto out_aborted;
+    }
+    for (int c = 0; c < AA_CYCLES; c++) {
+        set_phase("cycle %d/%d: air assist to run", c + 1, AA_CYCLES);
+        if (aa_edge(AA_RUN, &sd[n], &su[n]))
+            goto out_aborted;
+        dlog("edge %d (to run): down %+.1f, up %+.1f counts", n + 1, sd[n], su[n]);
+        n++;
+        set_phase("cycle %d/%d: air assist to idle", c + 1, AA_CYCLES);
+        if (aa_edge(AA_IDLE, &sd[n], &su[n]))
+            goto out_aborted;
+        dlog("edge %d (to idle): down %+.1f, up %+.1f counts", n + 1, sd[n], su[n]);
+        n++;
+    }
+    {
+        double sum = 0, lo = 1e9, hi = -1e9;
+        for (int i = 0; i < n; i++) {
+            double m1 = sd[i] < 0 ? -sd[i] : sd[i];
+            double m2 = su[i] < 0 ? -su[i] : su[i];
+            sum += m1 + m2;
+            if (m1 < lo) lo = m1;
+            if (m2 < lo) lo = m2;
+            if (m1 > hi) hi = m1;
+            if (m2 > hi) hi = m2;
+        }
+        double counts = sum / (2.0 * n), spread = hi - lo;
+        char steps[256];
+        int off = 0;
+        for (int i = 0; i < n && off < (int)sizeof(steps) - 24; i++)
+            off += snprintf(steps + off, sizeof(steps) - off, "%s[%.1f,%.1f]",
+                            i ? "," : "", sd[i], su[i]);
+        if (spread > AA_MAX_SPREAD)
+            set_result("{\"steps\":[%s],\"offset_counts\":%.1f,\"spread_counts\":%.1f,"
+                       "\"error\":\"edges disagree by %.1f counts - the loop is not "
+                       "quiet, or a fan did not follow its duty; rerun\"}",
+                       steps, counts, spread, spread);
+        else
+            set_result("{\"steps\":[%s],\"offset_counts\":%.1f,\"spread_counts\":%.1f,"
+                       "\"recommend\":%.1f}",
+                       steps, counts, spread, counts < AA_MIN_COUNTS ? 0.0 : counts);
+        dlog("offset %.1f counts (spread %.1f) over %d edges", counts, spread, n);
+    }
+    goto out;
+
+out_aborted:
+    set_result("{\"error\":\"aborted by operator\"}");
+out:
+    set_phase("standing down");
+    aa_write(AA_IDLE);
+    stand_down();
+    controller_start();
+    unlink(MARKER);
+out_norestart:
+    dlog("done");
+    set_phase("done");
+    pthread_mutex_lock(&mu);
+    st_running = 0;
+    pthread_mutex_unlock(&mu);
+    return NULL;
+}
+
 /* --------------------------------------------------------------- api */
 
 void diag_init(void)
@@ -468,11 +632,15 @@ int diag_running(void)
 int diag_start(const char *tool)
 {
     int calibrate;
+    void *(*fn)(void *) = runner;
     if (!strcmp(tool, "flow-verify"))
         calibrate = 0;
     else if (!strcmp(tool, "flow-calibrate"))
         calibrate = 1;
-    else
+    else if (!strcmp(tool, "aa-offset-calibrate")) {
+        calibrate = 0;
+        fn = runner_aa;
+    } else
         return -3;
 
     pthread_mutex_lock(&mu);
@@ -497,7 +665,7 @@ int diag_start(const char *tool)
     pthread_attr_t at;
     pthread_attr_init(&at);
     pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
-    if (pthread_create(&th, &at, runner,
+    if (pthread_create(&th, &at, fn,
                        calibrate ? (void *)1 : NULL) != 0) {
         pthread_mutex_lock(&mu);
         st_running = 0;

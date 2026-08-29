@@ -242,6 +242,21 @@ lag to the sensor), subtracts that share from the rise, at most 3 C, and
 judges the remainder against `cool_flow_rise`. The verdict line carries the
 share taken off and the raw rise.
 
+A third rides with the coolant readings themselves: `cool_aa_offset_counts`
+(ADC counts, default 0, legal 0 to 60). The air-assist fan's return current
+shares a ground with the two coolant thermistors' reference, so both read low
+by a fixed number of counts while the fan runs (about 20 counts, 1.2 C near
+22 C, at the run duty on the bench machine; nothing below the fan's start
+duty 256, in proportion to the fan's current between). The engine commands
+that fan, takes the setting's share off both raw readings before the
+conversion at every tick (more counts read colder, so the lift reads as a
+drop), and `/status` applies the same correction, so the
+over-temperature gates and the panel read the coolant as it is. The value is
+the machine's own: the `aa-offset-calibrate` diagnostic (the fan stepped idle
+to run and back three times, tube dark, heater off, the step on both sensors
+at every edge averaged) recommends it and the panel's Apply writes it. Zero,
+the default, is the factory behavior, which never corrected the shift.
+
 What an off gate does: the engine skips the comparison (no verdict, no hold
 from it) and keeps measuring. With `coolant_max` off, the first reading in a
 run session over the shipped default is logged once as what the gate would

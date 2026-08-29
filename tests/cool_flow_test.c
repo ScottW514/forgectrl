@@ -306,9 +306,46 @@ int main(void)
     CHECK(flow_laser_c > 0.9f && flow_laser_c < 1.4f,
           "the share is the density coefficient's (0.77 of CW)");
 
+    printf("G. the air-assist offset is taken off in counts while the fan runs\n");
+    /* The fan's ground lift raises the raw counts, and more counts read
+       colder. The model writes raw counts with no such lift in them, so
+       with the setting at 20 the engine must read both sensors 20 counts
+       LOWER than the raw (warmer) while the run profile is on, and the raw
+       when it is not. The flow check must not care (both ends shift
+       alike). */
+    kv[0] = "laser_power_model"; kv[1] = "density";
+    kv[2] = "cool_aa_offset_counts"; kv[3] = "20"; kv[4] = NULL;
+    L.flow = 1;
+    L.lit = 0;
+    v = run_check(&L, 0, 200);
+    CHECK(v == Flow_Normal, "the check still verifies flow with the offset setting in force");
+    CHECK(cool_coolant_offset_counts() == 20, "the run profile commands the fan: 20 counts added");
+    {
+        long raw = get_long("pic/water_temp_2");            /* the model's last raw upstream */
+        float engine_up = pub_up;
+        float expect = (float)coolant_degc(raw - 20);
+        CHECK(fabs(engine_up - expect) < 0.05,
+              "the published upstream reading is the raw less 20 counts");
+        CHECK(engine_up > (float)coolant_degc(raw) + 0.8,
+              "the correction is worth about a degree at this temperature");
+    }
+    close_session(&L);
+    CHECK(cool_coolant_offset_counts() == 0, "the fan idle: no counts added");
+    kv[2] = "cool_aa_offset_counts"; kv[3] = "500"; kv[4] = NULL;
+    conf_reload();
+    aa_write(1023);
+    CHECK(cool_coolant_offset_counts() == 60, "an absurd setting is bounded at 60 counts");
+    aa_write(600);
+    CHECK(cool_coolant_offset_counts() > 20 && cool_coolant_offset_counts() < 40,
+          "a part duty adds part of the setting (600 of 1023)");
+    aa_write(204);
+    kv[2] = NULL;
+    conf_reload();
+
     printf(failures ? "FAIL: %d check(s) failed\n"
                     : "PASS: the flow check reads means, takes the tube's share off, "
-                      "bounds it, and still sees a stopped pump under a lit tube\n",
+                      "bounds it, still sees a stopped pump under a lit tube, and takes "
+                      "the air-assist offset off while the fan runs\n",
            failures);
     return failures ? 1 : 0;
 }

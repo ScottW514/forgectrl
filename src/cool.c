@@ -266,6 +266,25 @@
 #define LASER_HEAT_DENSITY  2.36e-5f    /* 0.77 of it under density */
 #define LASER_HEAT_MAX_C    3.0f    /* the most a check may subtract */
 
+/* The air-assist fan's return current shares a ground with the coolant
+ * thermistors' reference, so both sensors read low by a voltage offset,
+ * constant in ADC counts, while the fan runs: measured on the bench
+ * about 20 counts (1.2 C near 22 C) at the run duty 1023, nothing below
+ * the fan's start (256), and in between in proportion to the fan's
+ * current. More counts read colder in this conversion, so the lift reads
+ * as a drop. The engine commands that fan, so it knows the duty at every
+ * tick and takes the lift off both raw readings before conversion; the
+ * same correction goes into /status through
+ * cool_coolant_offset_counts(). The value is the machine's own
+ * (cool_aa_offset_counts, measured by the aa-offset-calibrate
+ * diagnostic); zero, the default, is the factory behavior, which never
+ * corrected it. The flow check is indifferent (its baseline and end are
+ * read under the same duty); the over-temperature gates are what the
+ * correction is for. Bounded so no setting can move the ceiling far. */
+#define AA_OFFSET_START      256    /* the fan does not turn below this duty */
+#define AA_OFFSET_FULL       1023   /* the duty the setting is measured at */
+#define AA_OFFSET_MAX_COUNTS 60.0f
+
 /* Lid IR fire watch: ADC counts of rise above the run-start baseline
  * that read as a fire signal, sustained for FIRE_IR_TICKS consecutive
  * ticks. 0 = watch-only (log the dataset, never trip) - the shipped
@@ -352,6 +371,8 @@ static float flow_laser_c;          /* the tube's share of the rise, this check 
 static float laser_heat_cw = LASER_HEAT_CW;
 static float laser_heat_density = LASER_HEAT_DENSITY;
 static int laser_model_density = 1; /* laser_power_model, read per run */
+static float aa_offset_counts = 0.0f;   /* cool_aa_offset_counts, at duty 1023 */
+static long aa_cmd = 204;               /* the air-assist duty last commanded */
 static double phase_until;          /* smoke end / thermal timeout */
 static int over_temp_gate = 0;      /* hysteresis: >max sets, <=resume clears */
 static int critical_alarm = 0;      /* latched coolant fault, this run session */
@@ -473,7 +494,10 @@ static int read_temp(const char *attr, float *c)
     long raw = rd_long(attr);
     if (raw < 0)
         return 0;
-    *c = (float)coolant_degc(raw);
+    /* The air-assist ground shift lifts the raw counts (more counts read
+     * colder): take them off before the conversion. */
+    long raw_c = raw - cool_coolant_offset_counts();
+    *c = (float)coolant_degc(raw_c > 0 ? raw_c : raw);
     return 1;
 }
 
@@ -501,9 +525,30 @@ static void heater_set_pct(uint32_t pct)
     wr_attr_long("thermal/heater_pwm", (long)pct * 65535 / 100);
 }
 
+/* Every air-assist write goes through here: the coolant readings'
+ * correction follows the duty the engine last commanded. */
+static void aa_write(long duty)
+{
+    aa_cmd = duty;
+    wr_attr_long("head/air_assist_pwm", duty);
+}
+
+long cool_coolant_offset_counts(void)
+{
+    float k = aa_offset_counts;
+    if (k <= 0.0f || aa_cmd <= AA_OFFSET_START)
+        return 0;
+    if (k > AA_OFFSET_MAX_COUNTS)
+        k = AA_OFFSET_MAX_COUNTS;
+    float frac = (float)(aa_cmd - AA_OFFSET_START) / (float)(AA_OFFSET_FULL - AA_OFFSET_START);
+    if (frac > 1.0f)
+        frac = 1.0f;
+    return (long)(k * frac + 0.5f);
+}
+
 static void fans_idle(void)
 {
-    wr_attr_long("head/air_assist_pwm", AIR_ASSIST_IDLE);
+    aa_write(AIR_ASSIST_IDLE);
     wr_attr_long("thermal/exhaust_pwm", EXHAUST_IDLE);
     wr_attr_long("thermal/intake_pwm", INTAKE_IDLE);
 }
@@ -518,14 +563,14 @@ static void fans_run(void)
     cmd_duty[0] = airflow_run_duty(AIR_ASSIST_RUN, run_duty[0], eff_armed);
     cmd_duty[1] = airflow_run_duty(EXHAUST_RUN, run_duty[1], eff_armed);
     cmd_duty[2] = airflow_run_duty(INTAKE_RUN, run_duty[2], eff_armed);
-    wr_attr_long("head/air_assist_pwm", cmd_duty[0]);
+    aa_write(cmd_duty[0]);
     wr_attr_long("thermal/exhaust_pwm", cmd_duty[1]);
     wr_attr_long("thermal/intake_pwm", cmd_duty[2]);
 }
 
 static void fans_cool(void)
 {
-    wr_attr_long("head/air_assist_pwm", AIR_ASSIST_IDLE);
+    aa_write(AIR_ASSIST_IDLE);
     wr_attr_long("thermal/exhaust_pwm", EXHAUST_COOL);
     wr_attr_long("thermal/intake_pwm", INTAKE_COOL);
 }
@@ -622,6 +667,8 @@ static struct {
       LASER_HEAT_CW,          &laser_heat_cw,   NULL, 0 },
     { "GFCOOL_LASER_HEAT_DENSITY", "cool_laser_heat_density",
       LASER_HEAT_DENSITY,     &laser_heat_density, NULL, 0 },
+    { "GFCOOL_AA_OFFSET_COUNTS", "cool_aa_offset_counts",
+      0.0f,                   &aa_offset_counts, NULL, 0 },
     { "GFCOOL_FIRE_IR_DELTA",   "cool_fire_ir_delta",
       FIRE_IR_DELTA,          NULL,             &fire_ir_delta, 0 },
     { "GFCOOL_TACH_EXHAUST_MIN", "cool_tach_exhaust_min_rpm",

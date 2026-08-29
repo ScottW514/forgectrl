@@ -18,6 +18,7 @@
  */
 #define _GNU_SOURCE
 #include "status.h"
+#include "cool.h"
 #include "diag.h"
 
 #include <dirent.h>
@@ -464,6 +465,13 @@ int machine_status_json(char *buf, size_t len, const char *extra)
 
     long t1 = rd_attr_long("pic/water_temp_1", -1);
     long t2 = rd_attr_long("pic/water_temp_2", -1);
+    /* The air-assist ground shift lifts the raw counts (more counts read
+     * colder); take them off, the same correction the engine applies. */
+    long aa_off = cool_coolant_offset_counts();
+    if (t1 > aa_off)
+        t1 -= aa_off;
+    if (t2 > aa_off)
+        t2 -= aa_off;
     long ilk = rd_attr_long("cnc/interlock_circuit", -1);
     unsigned long sw = read_switches();
 

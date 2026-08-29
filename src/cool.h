@@ -74,6 +74,13 @@ int cool_status_json(char *buf, size_t len);
  * arrived (the supervisor uses this to see a controller come alive). */
 double cool_report_age(void);
 
+/* The counts the air-assist fan's ground shift adds to a raw coolant
+ * thermistor reading at the duty the engine last commanded (more counts
+ * read colder): cool_aa_offset_counts scaled by the fan's current above
+ * its start, bounded; zero when the setting is zero or the fan is idle.
+ * Every consumer of the two readings takes it off before the conversion. */
+long cool_coolant_offset_counts(void);
+
 /* The gates whose setting sits at its off end, as a JSON array of gate
  * names ("[]" when every gate is on), from the engine's resolved
  * tunables at the last run start. /status carries it beside the
