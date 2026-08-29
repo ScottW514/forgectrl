@@ -111,8 +111,12 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifndef GF_SYSFS                /* the host test points these at a fake tree */
 #define GF_SYSFS     "/sys/glowforge/"
+#endif
+#ifndef VERDICT_DIR
 #define VERDICT_DIR  "/run/forgefirm"
+#endif
 #define VERDICT_FILE VERDICT_DIR "/cooling.state"
 #define VERDICT_TMP  VERDICT_DIR "/.cooling.state.tmp"
 
@@ -231,6 +235,37 @@
  * a marginal pump or recurring airlock. */
 #define FLOW_TREND_N       3
 
+/* The rise is read from means, never from single samples. The coolant
+ * ADC carries a common-mode offset of about 1 C while the run airflow
+ * profile is on: it steps in at the session open, out when the fans go
+ * idle, and toggles between two levels in between, on both sensors
+ * together. One sample at the start of the check and one at its end
+ * can therefore differ by a degree with no heat behind it. The
+ * baseline is the mean of the settled window the gate has just verified
+ * (FLOW_SETTLE_WIN samples); the end reading is the mean of the check's
+ * last FLOW_END_WIN samples. */
+#define FLOW_END_WIN        5       /* 1 Hz samples */
+
+/* The tube warms the same loop the heater does, and with a prompt press
+ * the tube is lit for most of the arm-time window. Measured on the
+ * bench (four CW bursts of 20 to 60 s, the offset steps masked): the
+ * downstream rise at burst end is linear in the integral of
+ * pic/hv_current, 3.06e-5 C per raw-second (r2 0.98), 0.030 C per lit
+ * second at full duty, so a window lit from its start carries about
+ * 1.5 C of tube heat against a 1.6 C margin. Under the density model
+ * the heat per raw-second is 0.77 of that: every pulse pays a strike
+ * delay the current sees and the tube does not. The heat reaches the
+ * sensor 10 to 20 s after emission, so emission in the window's last
+ * FLOW_LAG_S seconds is not counted (under-correcting, the safe side)
+ * and emission in the FLOW_LAG_S seconds before the window is. The
+ * share is subtracted from the measured rise before the limit, and it
+ * is bounded so that no setting can subtract the check away: a stopped
+ * pump reads 16 C and more, the bound leaves 13 C of that. */
+#define FLOW_LAG_S          15      /* 1 Hz samples of hv history */
+#define LASER_HEAT_CW       3.06e-5f    /* C per raw-second, full duty */
+#define LASER_HEAT_DENSITY  2.36e-5f    /* 0.77 of it under density */
+#define LASER_HEAT_MAX_C    3.0f    /* the most a check may subtract */
+
 /* Lid IR fire watch: ADC counts of rise above the run-start baseline
  * that read as a fire signal, sustained for FIRE_IR_TICKS consecutive
  * ticks. 0 = watch-only (log the dataset, never trip) - the shipped
@@ -307,6 +342,16 @@ static float flow_dt_sum;
 static uint32_t flow_dt_n;
 static double flow_suspect_since;
 static uint32_t flow_episodes = 0;  /* cleared suspicions this job */
+static float flow_end_hist[FLOW_END_WIN];
+static uint32_t flow_end_n;
+static long hv_hist[FLOW_LAG_S];    /* pic/hv_current, the last FLOW_LAG_S ticks */
+static uint32_t hv_hist_n;
+static long hv_last = -1;           /* this tick's reading, -1 = none */
+static double flow_hv_dose;         /* raw-seconds counted for this check */
+static float flow_laser_c;          /* the tube's share of the rise, this check */
+static float laser_heat_cw = LASER_HEAT_CW;
+static float laser_heat_density = LASER_HEAT_DENSITY;
+static int laser_model_density = 1; /* laser_power_model, read per run */
 static double phase_until;          /* smoke end / thermal timeout */
 static int over_temp_gate = 0;      /* hysteresis: >max sets, <=resume clears */
 static int critical_alarm = 0;      /* latched coolant fault, this run session */
@@ -573,6 +618,10 @@ static struct {
       FLOW_FAULT_RISE_C,      &flow_fault_rise, NULL, 0 },
     { "GFCOOL_CONFIRM_MAX_S",   "cool_confirm_max_s",
       FLOW_CONFIRM_MAX_S,     NULL,             &confirm_max_s, 0 },
+    { "GFCOOL_LASER_HEAT_CW",   "cool_laser_heat_cw",
+      LASER_HEAT_CW,          &laser_heat_cw,   NULL, 0 },
+    { "GFCOOL_LASER_HEAT_DENSITY", "cool_laser_heat_density",
+      LASER_HEAT_DENSITY,     &laser_heat_density, NULL, 0 },
     { "GFCOOL_FIRE_IR_DELTA",   "cool_fire_ir_delta",
       FIRE_IR_DELTA,          NULL,             &fire_ir_delta, 0 },
     { "GFCOOL_TACH_EXHAUST_MIN", "cool_tach_exhaust_min_rpm",
@@ -745,6 +794,10 @@ static void conf_reload(void)
         else
             *tunables[i].u = f < 0.0f ? 0 : (uint32_t)f;
     }
+    /* The tube's share of a heater rise depends on the power model. */
+    char model[16];
+    laser_model_density = !(settings_get("laser_power_model", model, sizeof(model)) == 0
+                            && !strcmp(model, "analog"));
     gates_apply();
 }
 
@@ -800,6 +853,27 @@ static void flow_check_start(double now)
 {
     flow_check_active = 1;
     flow_base_set = 0;
+    /* The baseline: the mean of the settled window the gate has just
+     * verified when there is one, the first in-check sample otherwise. */
+    uint32_t n = down_hist_n < FLOW_SETTLE_WIN ? down_hist_n : FLOW_SETTLE_WIN;
+    if (n) {
+        float sum = 0.0f;
+        for (uint32_t i = 0; i < n; i++)
+            sum += down_hist[(down_hist_n - n + i) % FLOW_SETTLE_WIN];
+        flow_base_down = sum / (float)n;
+        flow_base_set = 1;
+    }
+    flow_end_n = 0;
+    /* Emission in the lag before the window reaches the sensor inside
+     * it: the tube current of the last FLOW_LAG_S ticks opens the dose. */
+    flow_hv_dose = 0.0;
+    uint32_t h = hv_hist_n < FLOW_LAG_S ? hv_hist_n : FLOW_LAG_S;
+    for (uint32_t i = 0; i < h; i++) {
+        long v = hv_hist[(hv_hist_n - h + i) % FLOW_LAG_S];
+        if (v > 0)
+            flow_hv_dose += (double)v;
+    }
+    flow_laser_c = 0.0f;
     flow_establish_at = now + FLOW_ESTABLISH_S;
     flow_check_end = now + (double)flow_check_s;
     flow_dt_sum = 0.0f;
@@ -814,6 +888,11 @@ static void flood_apply(int on, double now)
 {
     if (on) {
         conf_reload();              /* GUI changes apply per job */
+        /* The run airflow shifts the coolant ADC by about a degree, so
+         * the settled window a check's baseline comes from must be
+         * taken entirely under the run profile: start the history
+         * fresh, and the arm-time check waits FLOW_SETTLE_WIN ticks. */
+        down_hist_n = 0;
         off_would_warned = 0;
         for (int i = 0; i < Fan_N; i++)
             airflow_reset(&fan_gate[i]);
@@ -1100,13 +1179,19 @@ static void engine_tick(void)
     }
     if (cool_state == Cool_Run) {
         long hv = rd_long("pic/hv_current");
+        hv_last = hv;
         if (hv >= 0) {
             if (hv_lo < 0 || hv < hv_lo)
                 hv_lo = hv;
             if (hv > hv_hi)
                 hv_hi = hv;
         }
-    }
+    } else
+        hv_last = -1;
+    /* The tube current of the last FLOW_LAG_S ticks, for a flow check
+     * that starts inside a lit run (flow_check_start). */
+    hv_hist[hv_hist_n % FLOW_LAG_S] = hv_last;
+    hv_hist_n++;
     pthread_mutex_lock(&mu);
     pub_fire_watch = fire_alarm ? "ALARM"
                    : fire_ir_delta > 0 ? "armed" : "watch";
@@ -1324,15 +1409,35 @@ static void engine_tick(void)
             flow_base_down = down;
             flow_base_set = 1;
         }
+        flow_end_hist[flow_end_n % FLOW_END_WIN] = down;
+        flow_end_n++;
+        /* The tube's heat lags the sensor by FLOW_LAG_S: emission in the
+         * window's last FLOW_LAG_S seconds has not arrived by its end. */
+        if (hv_last > 0 && now < flow_check_end - (double)FLOW_LAG_S)
+            flow_hv_dose += (double)hv_last;
         if (now >= flow_establish_at) {
             flow_dt_sum += down - up;
             flow_dt_n++;
         }
         if (now >= flow_check_end) {
-            float rise = down - flow_base_down;
+            uint32_t n_end = flow_end_n < FLOW_END_WIN ? flow_end_n : FLOW_END_WIN;
+            float end_sum = 0.0f;
+            for (uint32_t i = 0; i < n_end; i++)
+                end_sum += flow_end_hist[i];
+            float rise_raw = end_sum / (float)n_end - flow_base_down;
+            float k = laser_model_density ? laser_heat_density : laser_heat_cw;
+            flow_laser_c = (float)(flow_hv_dose * (double)k);
+            if (flow_laser_c < 0.0f)
+                flow_laser_c = 0.0f;
+            if (flow_laser_c > LASER_HEAT_MAX_C)
+                flow_laser_c = LASER_HEAT_MAX_C;
+            float rise = rise_raw - flow_laser_c;
             float dt = flow_dt_n ? flow_dt_sum / (float)flow_dt_n : 0.0f;
-            char msg[112];
+            char msg[112], laser[32] = "";
 
+            if (flow_laser_c >= 0.05f)
+                snprintf(laser, sizeof(laser), "; laser %.1f off %.1f",
+                         flow_laser_c, rise_raw);
             flow_check_active = 0;
             heater_set_pct(0);
             /* Schedule the next interrogation if the run is still on. */
@@ -1349,21 +1454,21 @@ static void engine_tick(void)
                     flow_pending_since = now;
                     flow_settle_warned = 0;
                     snprintf(msg, sizeof(msg),
-                             "COOLANT FLOW SUSPECT: heater rise %.1f C (limit %.1f, dT %.1f) - re-checking",
-                             rise, flow_fault_rise, dt);
+                             "COOLANT FLOW SUSPECT: heater rise %.1f C (limit %.1f, dT %.1f%s) - re-checking",
+                             rise, flow_fault_rise, dt, laser);
                 } else {
                     flow_verdict = Flow_Fault;
                     snprintf(msg, sizeof(msg),
-                             "COOLANT FLOW FAULT: heater rise %.1f C (limit %.1f, dT %.1f) - check the pump",
-                             rise, flow_fault_rise, dt);
+                             "COOLANT FLOW FAULT: heater rise %.1f C (limit %.1f, dT %.1f%s) - check the pump",
+                             rise, flow_fault_rise, dt, laser);
                 }
                 warn(msg);
             } else if (flow_verdict != Flow_Normal) {
                 snprintf(msg, sizeof(msg),
                          flow_verdict == Flow_Suspect
-                           ? "coolant flow suspicion cleared (heater rise %.1f C, dT %.1f C)"
-                           : "coolant flow recovered (heater rise %.1f C, dT %.1f C)",
-                         rise, dt);
+                           ? "coolant flow suspicion cleared (heater rise %.1f C, dT %.1f C%s)"
+                           : "coolant flow recovered (heater rise %.1f C, dT %.1f C%s)",
+                         rise, dt, laser);
                 flow_verdict = Flow_Normal;
                 info(msg);
                 pthread_mutex_lock(&mu);
@@ -1377,8 +1482,8 @@ static void engine_tick(void)
                 }
             } else {
                 snprintf(msg, sizeof(msg),
-                         "coolant flow verified (heater rise %.1f C, dT %.1f C)",
-                         rise, dt);
+                         "coolant flow verified (heater rise %.1f C, dT %.1f C%s)",
+                         rise, dt, laser);
                 info(msg);
             }
         }

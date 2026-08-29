@@ -32,6 +32,8 @@ jobs:
         run: ./build/camhealth_test
       - name: Gate settings table
         run: ./build/cool_gate_test
+      - name: Flow check reading (means, the tube's share, the bound)
+        run: ./build/cool_flow_test
       - name: Airflow gate
         run: ./build/airflow_test
       - name: Cooling status document

@@ -108,6 +108,15 @@ add_executable(cool_gate_test tests/cool_gate_test.c src/gates.c)
 target_compile_options(cool_gate_test PRIVATE -Wall -Wextra)
 target_link_libraries(cool_gate_test m)
 
+# Host unit test for the flow check's reading: the baseline as the mean
+# of the settled window, the end as the mean of the last samples, the
+# tube's share subtracted from the rise and bounded, and a stopped pump
+# still read as stopped under a lit tube. Includes the engine source
+# against a fake sysfs tree and a fake clock; CI runs it after the build.
+add_executable(cool_flow_test tests/cool_flow_test.c src/gates.c src/airflow.c src/coolfmt.c)
+target_compile_options(cool_flow_test PRIVATE -Wall -Wextra)
+target_link_libraries(cool_flow_test m pthread)
+
 # Host unit test for the per-fan airflow gate: grace, the three-tick
 # debounce, the latch, off by value, and the tach conversions. CI runs
 # it after the build.

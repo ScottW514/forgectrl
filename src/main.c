@@ -571,6 +571,8 @@ static int valid_grace_s(const char *v)     { return valid_gate("cool_fan_grace_
 static int valid_heater_pct(const char *v) { return valid_range(v, 0, 100); }
 static int valid_recheck_s(const char *v)  { return valid_range(v, 0, 3600); }
 static int valid_confirm_s(const char *v)  { return valid_range(v, 60, 3600); }
+/* C per raw-second of pic/hv_current; the bench measured 3.06e-5. */
+static int valid_laser_heat(const char *v) { return valid_range(v, 0, 2e-4); }
 static int valid_cool_s(const char *v)     { return valid_range(v, 0, 1800); }
 
 /* GRBL-mode tunables, read by the controller from the same file. The
@@ -629,6 +631,8 @@ static const struct {
     { "cool_flow_check_s",      valid_check_s,     0 },
     { "cool_recheck_s",         valid_recheck_s,   0 },
     { "cool_confirm_max_s",     valid_confirm_s,   0 },
+    { "cool_laser_heat_cw",     valid_laser_heat,  0 },
+    { "cool_laser_heat_density", valid_laser_heat, 0 },
     { "cool_temp_max",          valid_temp_max,    0 },
     { "cool_temp_resume",       valid_temp_resume, 0 },
     { "cool_temp_critical_c",   valid_temp_critical, 0 },

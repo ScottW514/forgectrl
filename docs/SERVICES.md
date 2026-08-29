@@ -231,6 +231,17 @@ that table.
 | `cool_purge_min_current` | `purge` (current, raw) | 300 | 0 to 1023 | 150 to 500 | 0 |
 | `cool_fan_grace_s` | (the spin-up window, no gate) | 15 s | 0 to 120 s | 5 to 30 s | never |
 
+Two tunables ride with `flow` and are not gates: `cool_laser_heat_cw` and
+`cool_laser_heat_density`, the tube's share of a heater rise in C per
+raw-second of `pic/hv_current` under each power model (defaults 3.06e-5 and
+2.36e-5, legal 0 to 2e-4; `laser_power_model` selects which applies). The
+check reads its baseline as the mean of the settled window the gate verified
+and its end as the mean of its last 5 s, never single samples; it counts the
+tube current from 15 s before the window to 15 s before its end (the heat's
+lag to the sensor), subtracts that share from the rise, at most 3 C, and
+judges the remainder against `cool_flow_rise`. The verdict line carries the
+share taken off and the raw rise.
+
 What an off gate does: the engine skips the comparison (no verdict, no hold
 from it) and keeps measuring. With `coolant_max` off, the first reading in a
 run session over the shipped default is logged once as what the gate would
