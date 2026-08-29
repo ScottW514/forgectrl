@@ -124,6 +124,14 @@ static long rd_attr_long(const char *attr, long fallback)
  * divider and 1.3 gain, 10-bit ADC) - the curve recovered from the
  * factory firmware and verified against this machine's cloud coolant
  * setpoints and a thermometer. */
+/* The air-assist ground shift on the coolant readings is the cooling
+ * engine's to know (cool.c owns the fan); without the engine linked in, a
+ * host test that reads status alone takes the raw counts. */
+__attribute__((weak)) long cool_coolant_offset_counts(void)
+{
+    return 0;
+}
+
 double coolant_degc(long raw)
 {
     static const double adc_f = 1024.0 * 1.3;
