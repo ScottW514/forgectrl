@@ -461,9 +461,15 @@ out_norestart:
  * each sensor; the recommendation is the mean of the edges' magnitudes,
  * and the spread across them is reported so a noisy loop refuses rather
  * than recommends. */
+/* The single-sample noise on these sensors is about 5 counts, so an
+ * edge read as the difference of two short means needs long ones: 3 s
+ * at 8 Hz is 24 samples a side, about 1 count of noise on each mean.
+ * (1.5 s at 4 Hz read 10 to 21 counts across six edges of a 16-count
+ * step, and refused its own result.) */
 #define AA_CYCLES     3
-#define AA_HZ         4
-#define AA_DWELL_S    8
+#define AA_HZ         8
+#define AA_WIN_S      3.0
+#define AA_DWELL_S    10
 #define AA_IDLE       204
 #define AA_RUN        1023
 #define AA_EDGES      (AA_CYCLES * 2)
@@ -481,7 +487,7 @@ static void aa_write(long duty)
  * sensors. Returns 0, -1 on abort. */
 static int aa_edge(long duty, double *step_down, double *step_up)
 {
-    enum { N = (int)(1.5 * AA_HZ) };
+    enum { N = (int)(AA_WIN_S * AA_HZ) };
     double b1 = 0, b2 = 0, a1 = 0, a2 = 0;
     int nb = 0, na = 0;
     for (int i = 0; i < N; i++) {
@@ -496,7 +502,7 @@ static int aa_edge(long duty, double *step_down, double *step_up)
             return -1;
     }
     aa_write(duty);
-    usleep(300000);
+    usleep(500000);                     /* the fan's current settles */
     for (int i = 0; i < N; i++) {
         long r1 = rd_long("pic/water_temp_1"), r2 = rd_long("pic/water_temp_2");
         if (r1 > 0 && r2 > 0) {
@@ -513,7 +519,7 @@ static int aa_edge(long duty, double *step_down, double *step_up)
     *step_down = a1 / na - b1 / nb;
     *step_up = a2 / na - b2 / nb;
     /* The rest of the dwell, so the loop is steady before the next edge. */
-    for (int i = 0; i < AA_DWELL_S - 2; i++) {
+    for (int i = 0; i < AA_DWELL_S - (int)AA_WIN_S - 1; i++) {
         double d, u;
         sample(&d, &u);
         sleep(1);
