@@ -157,12 +157,12 @@ var HELP = {
     ]
   },
   power_model: {
-    t: 'Laser power model',
-    d: 'panel/grbl#laser-power-model',
+    t: 'Laser dose',
+    d: 'panel/grbl#laser-dose',
     p: [
-      'How a commanded power becomes light. Density keeps every pulse at full power and sets the dose by how many ticks of each period fire, which is what the factory does: every level marks, and a low level is sparse full pulses. Analog sets the PWM duty to the level and fires continuously; the beam is steady, and the response is close to linear above the floor.',
-      'Each model has a floor, the bottom of the S range as a percent of full: under density the lowest pulse density that still marks (10 on the bench machine), under analog the duty the tube lases at (16). The controller loads the selected model\'s floor into $35 at every arm, so $35 is not a setting to type. A job selects a model for itself with M101 P0 (analog) or M101 P1 (density) after an M5; it reverts at the end of the program unless the line carries Q1.',
-      'The pulse period and shortest pulse shape the density model: one tick is 35.5 us at the 28160 Hz stream rate, the default period of 20 ticks is the factory\'s 1.43 kHz, and a pulse shorter than 3 ticks does not strike this supply. Changes apply at the next job.'
+      'Every pulse fires at full power, and the commanded power sets how many ticks of each period fire - the way the factory drives this tube. Every power level marks, low levels included, because no pulse is ever too weak to strike.',
+      'The floor is the bottom of the power range as a percent of full: the lowest pulse density that still marks (10 on the bench machine). The controller loads it into $35 at every start and every job, so $35 is not a setting to type.',
+      'The pulse period and shortest pulse shape the dither: one tick is 35.5 us at the 28160 Hz stream rate, the default period of 20 ticks is the factory\'s 1.43 kHz, and a pulse shorter than 3 ticks does not strike this supply. Changes apply at the next job.'
     ]
   },
   lid_policy: {

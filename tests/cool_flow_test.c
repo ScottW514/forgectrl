@@ -260,7 +260,11 @@ static int failures;
 int main(void)
 {
     make_tree();
-    kv[0] = "laser_power_model"; kv[1] = "analog"; kv[2] = NULL;
+    /* The coefficient is selected by the model the controller reports
+     * (the config key is gone; density is the only product model, and
+     * the analog value survives for the host-test reference builds). */
+    cool_state_model(0);
+    kv[0] = NULL;
     loop_t L = { .flow = 1, .lit = 0, .k_true = LASER_HEAT_CW };
 
     printf("A. dark, flow\n");
@@ -291,14 +295,14 @@ int main(void)
     CHECK(v == Flow_Suspect, "a lit check without flow is still SUSPECT");
 
     printf("E. an absurd coefficient cannot subtract the check away\n");
-    kv[2] = "cool_laser_heat_cw"; kv[3] = "1e-3"; kv[4] = NULL;
+    kv[0] = "cool_laser_heat_cw"; kv[1] = "1e-3"; kv[2] = NULL;
     v = run_check(&L, 1, 200);
     CHECK(flow_laser_c <= LASER_HEAT_MAX_C + 0.001f, "the share is bounded");
     CHECK(v == Flow_Suspect, "no flow is still SUSPECT under the bound");
-    kv[2] = NULL;
+    kv[0] = NULL;
 
     printf("F. the density model takes its own coefficient\n");
-    kv[0] = "laser_power_model"; kv[1] = "density"; kv[2] = NULL;
+    cool_state_model(1);
     L.flow = 1;
     L.k_true = LASER_HEAT_DENSITY;
     v = run_check(&L, 1, 200);
@@ -313,8 +317,7 @@ int main(void)
        LOWER than the raw (warmer) while the run profile is on, and the raw
        when it is not. The flow check must not care (both ends shift
        alike). */
-    kv[0] = "laser_power_model"; kv[1] = "density";
-    kv[2] = "cool_aa_offset_counts"; kv[3] = "20"; kv[4] = NULL;
+    kv[0] = "cool_aa_offset_counts"; kv[1] = "20"; kv[2] = NULL;
     L.flow = 1;
     L.lit = 0;
     v = run_check(&L, 0, 200);
@@ -331,7 +334,7 @@ int main(void)
     }
     close_session(&L);
     CHECK(cool_coolant_offset_counts() == 0, "the fan idle: no counts added");
-    kv[2] = "cool_aa_offset_counts"; kv[3] = "500"; kv[4] = NULL;
+    kv[0] = "cool_aa_offset_counts"; kv[1] = "500"; kv[2] = NULL;
     conf_reload();
     aa_write(1023);
     CHECK(cool_coolant_offset_counts() == 60, "an absurd setting is bounded at 60 counts");
@@ -339,7 +342,7 @@ int main(void)
     CHECK(cool_coolant_offset_counts() > 20 && cool_coolant_offset_counts() < 40,
           "a part duty adds part of the setting (600 of 1023)");
     aa_write(204);
-    kv[2] = NULL;
+    kv[0] = NULL;
     conf_reload();
 
     printf(failures ? "FAIL: %d check(s) failed\n"

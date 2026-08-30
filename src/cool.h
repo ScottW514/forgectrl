@@ -61,9 +61,9 @@ int cool_state_report(const char *mode, int armed,
                       const cool_limits_t *lim);
 
 /* The dose model the controller reports it is cutting with: 1 density,
- * 0 analog, -1 not said (the laser_power_model key applies). Read when a
- * run's tunables load, so the tube-heat share follows the model in force
- * rather than the configured default an M101 may have overridden. */
+ * 0 analog (the host-test reference mode; density is the only model a
+ * machine runs), -1 not said (density is assumed). Read when a run's
+ * tunables load, so the tube-heat share follows the model in force. */
 void cool_state_model(int density);
 
 /* Engine state as JSON (verdict, temps, phase, last report age, the

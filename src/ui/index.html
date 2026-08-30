@@ -295,22 +295,11 @@
               ><input class="form-control form-control-sm" id="laser_disarm_s" inputmode="numeric" placeholder="60" />
             </div>
           </div>
-          <h3>Laser power model<button class="hlp" data-help="power_model" data-nolock="1" type="button">?</button></h3>
-          <div class="frow">
-            <label for="laser_power_model">Default model</label
-            ><select class="form-select form-select-sm" id="laser_power_model">
-              <option value="density">Density: full-power pulses, dose by pulse density (factory)</option>
-              <option value="analog">Analog: continuous beam, dose by PWM duty</option>
-            </select>
-          </div>
+          <h3>Laser dose<button class="hlp" data-help="power_model" data-nolock="1" type="button">?</button></h3>
           <div class="grid2">
             <div class="frow">
-              <label for="laser_floor_density">Density floor<span class="u">%</span></label
+              <label for="laser_floor_density">Power floor<span class="u">%</span></label
               ><input class="form-control form-control-sm" id="laser_floor_density" inputmode="decimal" placeholder="10" />
-            </div>
-            <div class="frow">
-              <label for="laser_floor_analog">Analog floor<span class="u">%</span></label
-              ><input class="form-control form-control-sm" id="laser_floor_analog" inputmode="decimal" placeholder="16" />
             </div>
             <div class="frow">
               <label for="laser_pulse_ticks">Pulse period<span class="u">ticks</span></label

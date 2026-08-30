@@ -843,12 +843,9 @@ static void conf_reload(void)
             *tunables[i].u = f < 0.0f ? 0 : (uint32_t)f;
     }
     /* The tube's share of a heater rise depends on the power model: the
-     * one the controller reports it is cutting with (an M101 can differ
-     * from the default), else the configured default. */
-    char model[16];
-    int conf_density = !(settings_get("laser_power_model", model, sizeof(model)) == 0
-                         && !strcmp(model, "analog"));
-    laser_model_density = rep_model >= 0 ? rep_model : conf_density;
+     * one the controller reports it is cutting with, else density, the
+     * only model a machine runs. */
+    laser_model_density = rep_model >= 0 ? rep_model : 1;
     gates_apply();
 }
 

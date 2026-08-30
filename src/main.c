@@ -585,13 +585,11 @@ static int valid_cool_s(const char *v)     { return valid_range(v, 0, 1800); }
 static int valid_button_s(const char *v)   { return valid_range(v, 1, 3600); }
 static int valid_disarm_s(const char *v)   { return valid_range(v, 1, 3600); }
 
-/* The laser dose model the controller boots into (M101 in a job overrides
- * it for that program), the S-range floor of each model in percent of
- * full (loaded into $35 at every arm and switch: the lowest density that
- * marks, the duty the tube lases at), and the density model's base period
- * and shortest pulse in machine ticks (the stream caps the period at
- * 1024). All read by the controller at the arm. */
-static int valid_power_model(const char *v) { return !strcmp(v, "density") || !strcmp(v, "analog"); }
+/* The laser dose floor in percent of full (loaded into $35 at every
+ * precompute: the lowest density that marks), and the density model's
+ * base period and shortest pulse in machine ticks (the stream caps the
+ * period at 1024). Density is the only dose model; the analog rendering
+ * exists solely as the controller's host-test reference. */
 static int valid_floor_pct(const char *v)  { return valid_range(v, 0, 100); }
 static int valid_pulse_ticks(const char *v){ return valid_range(v, 1, 1024); }
 static int valid_settle_s(const char *v)   { return valid_range(v, 0, 30); }
@@ -658,9 +656,7 @@ static const struct {
     { "cool_fan_grace_s",             valid_grace_s,     0 },
     { "laser_button_timeout_s", valid_button_s,    0 },
     { "laser_disarm_s",         valid_disarm_s,    0 },
-    { "laser_power_model",      valid_power_model, 0 },
     { "laser_floor_density",    valid_floor_pct,   0 },
-    { "laser_floor_analog",     valid_floor_pct,   0 },
     { "laser_pulse_ticks",      valid_pulse_ticks, 0 },
     { "laser_pulse_min_ticks",  valid_pulse_ticks, 0 },
     { "rail_settle_s",          valid_settle_s,    0 },
@@ -1177,9 +1173,9 @@ static int cb_cool_state(const struct _u_request *req,
 
     const char *v = setting_param(req, "armed");
     int armed = v && atoi(v) != 0;
-    /* The dose model the controller is cutting with, when it says (GRBL
-     * mode does; an M101 in a job can differ from the configured default).
-     * Absent or unknown reads as unknown, and the config key applies. */
+    /* The dose model the controller is cutting with, when it says.
+     * Density is the only model on a machine; the analog value is kept
+     * for the host-test builds that still exercise the reference mode. */
     v = setting_param(req, "model");
     cool_state_model(!v ? -1 : !strcmp(v, "density") ? 1 : !strcmp(v, "analog") ? 0 : -1);
     long duty[3] = {-1, -1, -1};

@@ -235,8 +235,8 @@ Two tunables ride with `flow` and are not gates: `cool_laser_heat_cw` and
 `cool_laser_heat_density`, the tube's share of a heater rise in C per
 raw-second of `pic/hv_current` under each power model (defaults 3.06e-5 and
 2.36e-5, legal 0 to 2e-4; the model the controller reports with its job
-state selects which applies, the `laser_power_model` key when the report
-carries none). The
+state selects which applies - density, on every machine - and density is
+assumed when the report carries none). The
 check reads its baseline as the mean of the settled window the gate verified
 and its end as the mean of its last 5 s, never single samples; it counts the
 tube current from 15 s before the window to 15 s before its end (the heat's
@@ -338,8 +338,8 @@ The engine also runs the **physical-evidence witnesses** at its 1 Hz tick:
 The GRBL controller publishes its own state the other way, as two files
 under `/run/forgefirm` (the directory of the cooling verdict file),
 written atomically on change from the controller's protocol thread:
-`grbl.settings` (the `$$` view, rewritten when a setting changes, the
-M101 dose-model switch included) and `grbl.state` (one JSON object:
+`grbl.settings` (the `$$` view, rewritten when a setting changes or the
+derived floor moves) and `grbl.state` (one JSON object:
 `ts_mono` for age, the machine state and alarm code, the sender session
 - connected, generation, seconds connected, peer address - the laser's
 armed window, arming wait, dose model and floor, the exact `[GC:...]`

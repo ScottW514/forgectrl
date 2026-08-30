@@ -2,3 +2,4 @@ build/
 build-arm/
 .env
 build-host/
+__pycache__/
