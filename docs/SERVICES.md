@@ -335,6 +335,23 @@ The engine also runs the **physical-evidence witnesses** at its 1 Hz tick:
 
 ### Job-state reports (controller → forgectrl)
 
+The GRBL controller publishes its own state the other way, as two files
+under `/run/forgefirm` (the directory of the cooling verdict file),
+written atomically on change from the controller's protocol thread:
+`grbl.settings` (the `$$` view, rewritten when a setting changes, the
+M101 dose-model switch included) and `grbl.state` (one JSON object:
+`ts_mono` for age, the machine state and alarm code, the sender session
+- connected, generation, seconds connected, peer address - the laser's
+armed window, arming wait, dose model and floor, the exact `[GC:...]`
+modal report, the feed and rapid override percents, and the driver
+version; rewritten on change plus a 5 s heartbeat). forgectrl echoes
+`grbl.state` in `GET /status` as `"grbl":{"age_s":...,"report":{...}}`
+only while the supervisor holds a live GRBL controller - a dead
+controller, a torn body or an absurd age all read as no block - and
+serves `grbl.settings` verbatim at `GET /grbl/settings` (404 with no
+live controller). Position stays out by design: it changes per segment
+and is served from the homing-anchored kernel counters.
+
 `POST /cool/state`, query or form parameters:
 
 ```

@@ -546,6 +546,16 @@ class Mock:
             if path == '/status':
                 s = dict(self.status)
                 s['diag'] = self.diag['running']
+                if self.mode == 'grbl':
+                    s['grbl'] = {'age_s': 1.2, 'report': {
+                        'state': 'Idle', 'alarm': 0,
+                        'sender': {'connected': True, 'generation': 3,
+                                   'for_s': 754, 'peer': '172.16.1.20'},
+                        'laser': {'armed': False, 'arming': False,
+                                  'model': 'density', 'floor_pct': 10},
+                        'modals': '[GC:G0 G54 G17 G21 G91 G94 M5 M9 T0 F600 S500.]',
+                        'overrides': {'feed': 100, 'rapid': 100},
+                        'driver': '260809'}}
                 return J(200, s)
             if path == '/mode':
                 return J(200, {'mode': self.mode, 'controller': 'running',

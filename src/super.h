@@ -32,4 +32,9 @@ void super_controller_start(void);
 /* {"mode":"grbl","controller":"running|stopped|standby","pid":N} */
 int super_status_json(char *buf, size_t len);
 
+/* True while the machine is in GRBL mode with its controller process
+ * alive: the gate for echoing the controller's published state files
+ * (a dead controller's files must read as absent, not as truth). */
+int super_grbl_running(void);
+
 #endif

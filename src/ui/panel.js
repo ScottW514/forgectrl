@@ -652,7 +652,30 @@ function renderGrbl() {
     'Camera stream',
     "<span class='mono'>http://" + esc(location.host) + '/?action=stream</span>'
   );
+  var G = M.grbl;
+  if (G && G.report) {
+    var r = G.report,
+      sn = r.sender || {},
+      lz = r.laser || {},
+      stale = G.age_s > 30;
+    g += txt('Controller', r.state + (r.alarm ? ' (alarm ' + r.alarm + ')' : ''),
+      stale ? 'b-warn' : r.state === 'Alarm' ? 'b-warn' : '');
+    if (sn.connected)
+      g += kv('Sender', "<span class='mono'>" + esc(sn.peer || '?') + '</span> for ' + fmtDur(sn.for_s));
+    else g += txt('Sender', 'not connected');
+    g += txt('Laser', (lz.armed ? 'armed' : lz.arming ? 'waiting for the button' : 'disarmed') +
+      ' (' + lz.model + ', floor ' + lz.floor_pct + ' %)', lz.armed ? 'b-warn' : '');
+    if (r.modals) g += kv('Modals', "<span class='mono'>" + esc(r.modals) + '</span>');
+    if (stale) g += txt('Report age', G.age_s.toFixed(0) + ' s', 'b-warn');
+  } else if ((S.controller_mode || 'grbl') === 'grbl')
+    g += txt('Controller', 'no report');
   $('grblinfo').innerHTML = g;
+}
+function fmtDur(s) {
+  s = Math.max(0, Math.round(s || 0));
+  if (s < 90) return s + ' s';
+  if (s < 5400) return Math.round(s / 60) + ' min';
+  return (s / 3600).toFixed(1) + ' h';
 }
 function fill(force) {
   fillForce = !!force;
@@ -1439,6 +1462,7 @@ function loadMach() {
       renderCooling();
       renderSwitches();
       renderGfSvc();
+      renderGrbl();
     })
     .catch(function () {});
 }

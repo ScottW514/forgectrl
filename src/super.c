@@ -732,6 +732,14 @@ void super_controller_start(void)
     pthread_mutex_unlock(&mu);
 }
 
+int super_grbl_running(void)
+{
+    pthread_mutex_lock(&mu);
+    int up = child_pid > 0 && strcmp(ctl_name(want), "grbl") == 0;
+    pthread_mutex_unlock(&mu);
+    return up;
+}
+
 int super_status_json(char *buf, size_t len)
 {
     pthread_mutex_lock(&mu);

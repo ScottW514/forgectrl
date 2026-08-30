@@ -16,6 +16,11 @@
  * reads sysfs only, so engine state arrives this way. */
 int machine_status_json(char *buf, size_t len, const char *extra);
 
+/* The controller's published $$ settings text (grbl.settings under the
+ * run dir), for GET /grbl/settings. -1 when the GRBL controller is not
+ * running or the file is absent. */
+int grbl_settings_text(char *buf, size_t len);
+
 /* True only when the motion driver reports the idle state. Fails closed:
  * any read failure - including fd exhaustion under a connection flood
  * (EMFILE) - reports not-idle, so a destructive action (flash, mode

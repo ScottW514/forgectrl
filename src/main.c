@@ -928,13 +928,27 @@ static int cb_machine_status(const struct _u_request *req,
     (void)user_data;
     if (!auth_read_ok(req, res))
         return U_CALLBACK_COMPLETE;
-    char body[1536], gates[128];
+    char body[3072], gates[128];
     cool_gates_off_json(gates, sizeof(gates));
     char extra[160];
     snprintf(extra, sizeof(extra), "\"gates_off\":%s", gates);
     machine_status_json(body, sizeof(body), extra);
     ulfius_set_string_body_response(res, 200, body);
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
+static int cb_grbl_settings(const struct _u_request *req,
+                            struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    char body[4096];
+    if (grbl_settings_text(body, sizeof(body)) != 0)
+        return reply_error(res, 404, "no grbl controller");
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "text/plain");
     return U_CALLBACK_CONTINUE;
 }
 
@@ -1514,6 +1528,8 @@ int main(int argc, char **argv)
                                &cb_status, NULL);
     ulfius_add_endpoint_by_val(&inst, "GET", "/settings", NULL, 0,
                                &cb_settings_get, NULL);
+    ulfius_add_endpoint_by_val(&inst, "GET", "/grbl/settings", NULL, 0,
+                               &cb_grbl_settings, NULL);
     ulfius_add_endpoint_by_val(&inst, "POST", "/settings", NULL, 0,
                                &cb_settings_post, NULL);
     ulfius_add_endpoint_by_val(&inst, "GET", "/status", NULL, 0,

@@ -26,6 +26,7 @@
 
 /* status.c's only external dependency. */
 int diag_running(void) { return 0; }
+int super_grbl_running(void) { return 0; }
 
 static int failures;
 

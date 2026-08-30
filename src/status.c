@@ -18,6 +18,7 @@
  */
 #define _GNU_SOURCE
 #include "status.h"
+#include "super.h"
 #include "cool.h"
 #include "diag.h"
 
@@ -462,6 +463,60 @@ static double mem_used_pct(void)
     return 100.0 * (double)(total - avail) / (double)total;
 }
 
+/* The controller's published state file (glowforge_status.c in the
+ * driver): one JSON object under the run dir, written atomically with a
+ * ts_mono for age. Read whole and validated the way the controller
+ * validates the cooling verdict file - a torn body (no closing brace)
+ * reads as absent. GF_RUN_DIR overrides the directory for host tests. */
+static const char *run_dir(void)
+{
+    const char *d = getenv("GF_RUN_DIR");
+    return d && *d ? d : "/run/forgefirm";
+}
+
+static int read_state_file(const char *name, char *buf, size_t len)
+{
+    char path[192];
+    snprintf(path, sizeof(path), "%s/%s", run_dir(), name);
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return -1;
+    size_t n = fread(buf, 1, len - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    return n ? 0 : -1;
+}
+
+int grbl_settings_text(char *buf, size_t len)
+{
+    if (!super_grbl_running())
+        return -1;
+    return read_state_file("grbl.settings", buf, len);
+}
+
+/* Append the controller's grbl.state report with its age, only while
+ * the supervisor holds a live GRBL controller: forgectrl supervises the
+ * process, so liveness is knowledge, never inference from file age. */
+static void append_grbl(char *buf, size_t len, size_t *off)
+{
+    char body[1024];
+    if (!super_grbl_running() || read_state_file("grbl.state", body, sizeof(body)) != 0)
+        return;
+    char *end = strrchr(body, '}');
+    if (body[0] != '{' || !end)
+        return;                         /* torn or foreign: absent */
+    end[1] = '\0';
+    const char *ts = strstr(body, "\"ts_mono\":");
+    double age = -1;
+    if (ts) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        age = ((double)now.tv_sec + now.tv_nsec / 1e9) - strtod(ts + 10, NULL);
+    }
+    if (age >= 0 && age < 3600)
+        append(buf, len, off, "\"grbl\":{\"age_s\":%.1f,\"report\":%s},", age, body);
+}
+
 int machine_status_json(char *buf, size_t len, const char *extra)
 {
     char state[24] = "";
@@ -535,6 +590,7 @@ int machine_status_json(char *buf, size_t len, const char *extra)
      * count its unverified conversion does not earn a unit for. */
     double chassis = chassis_degc();
     long supply = supply_temp_raw();
+    append_grbl(buf, len, &off);
     append(buf, len, &off, "\"temps\":{\"chassis_c\":");
     if (chassis > -100)
         append(buf, len, &off, "%.1f", chassis);

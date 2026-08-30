@@ -70,6 +70,10 @@ target_link_libraries(status_idle_test m pthread)
 # memory utilization at once and CPU utilization once primed by a prior
 # read, and the document stays inside the handler's buffer. CI runs it
 # after the build.
+add_executable(status_grbl_test tests/status_grbl_test.c src/status.c)
+target_compile_options(status_grbl_test PRIVATE -Wall -Wextra)
+target_link_libraries(status_grbl_test m pthread)
+
 add_executable(status_sys_test tests/status_sys_test.c src/status.c)
 target_compile_options(status_sys_test PRIVATE -Wall -Wextra)
 target_link_libraries(status_sys_test m pthread)
