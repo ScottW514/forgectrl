@@ -370,7 +370,8 @@ static double flow_hv_dose;         /* raw-seconds counted for this check */
 static float flow_laser_c;          /* the tube's share of the rise, this check */
 static float laser_heat_cw = LASER_HEAT_CW;
 static float laser_heat_density = LASER_HEAT_DENSITY;
-static int laser_model_density = 1; /* laser_power_model, read per run */
+static int laser_model_density = 1; /* the model in force, read per run */
+static int rep_model = -1;          /* the controller's reported model, -1 unknown */
 static float aa_offset_counts = 0.0f;   /* cool_aa_offset_counts, at duty 1023 */
 static long aa_cmd = 204;               /* the air-assist duty last commanded */
 static double phase_until;          /* smoke end / thermal timeout */
@@ -841,10 +842,13 @@ static void conf_reload(void)
         else
             *tunables[i].u = f < 0.0f ? 0 : (uint32_t)f;
     }
-    /* The tube's share of a heater rise depends on the power model. */
+    /* The tube's share of a heater rise depends on the power model: the
+     * one the controller reports it is cutting with (an M101 can differ
+     * from the default), else the configured default. */
     char model[16];
-    laser_model_density = !(settings_get("laser_power_model", model, sizeof(model)) == 0
-                            && !strcmp(model, "analog"));
+    int conf_density = !(settings_get("laser_power_model", model, sizeof(model)) == 0
+                         && !strcmp(model, "analog"));
+    laser_model_density = rep_model >= 0 ? rep_model : conf_density;
     gates_apply();
 }
 
@@ -1720,6 +1724,11 @@ void cool_shutdown(void)
         fans_idle();
         unlink(VERDICT_FILE);   /* missing file = fire blocked at readers */
     }
+}
+
+void cool_state_model(int density)
+{
+    rep_model = density < 0 ? -1 : !!density;   /* one aligned int: atomic on this core */
 }
 
 int cool_state_report(const char *mode, int armed,

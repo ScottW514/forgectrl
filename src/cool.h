@@ -60,6 +60,12 @@ int cool_state_report(const char *mode, int armed,
                       long air_assist, long exhaust, long intake,
                       const cool_limits_t *lim);
 
+/* The dose model the controller reports it is cutting with: 1 density,
+ * 0 analog, -1 not said (the laser_power_model key applies). Read when a
+ * run's tunables load, so the tube-heat share follows the model in force
+ * rather than the configured default an M101 may have overridden. */
+void cool_state_model(int density);
+
 /* Engine state as JSON (verdict, temps, phase, last report age, the
  * effective limits and the per-fan gate states) for the UI and bench
  * tooling. A buffer of COOL_STATUS_JSON_MAX bytes always holds the

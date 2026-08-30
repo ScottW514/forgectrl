@@ -672,6 +672,11 @@ function fill(force) {
   for (var ci = 0; ci < CK.length; ci++) setF(CK[ci], S[CK[ci]]);
   setF('laser_button_timeout_s', S.laser_button_timeout_s);
   setF('laser_disarm_s', S.laser_disarm_s);
+  setF('laser_power_model', S.laser_power_model || 'density');
+  setF('laser_floor_density', S.laser_floor_density);
+  setF('laser_floor_analog', S.laser_floor_analog);
+  setF('laser_pulse_ticks', S.laser_pulse_ticks);
+  setF('laser_pulse_min_ticks', S.laser_pulse_min_ticks);
   setF('lid_policy', S.lid_policy || 'cancel');
   setF('rail_settle_s', S.rail_settle_s);
   setF('lid_lamp_idle', S.lid_lamp_idle);

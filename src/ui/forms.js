@@ -31,6 +31,11 @@ var FIELDS_BASE = [
   'pulse_reject_threshold_bytes',
   'laser_button_timeout_s',
   'laser_disarm_s',
+  'laser_power_model',
+  'laser_floor_density',
+  'laser_floor_analog',
+  'laser_pulse_ticks',
+  'laser_pulse_min_ticks',
   'lid_policy',
   'rail_settle_s',
   'lid_lamp_idle',
@@ -43,7 +48,7 @@ function fieldKeys() {
 /* When a saved key takes effect, for the toast after a save. */
 function appliesWhen(k) {
   if (k.indexOf('log_') === 0 || k.indexOf('syslog_') === 0) return 'reboot';
-  if (k.indexOf('cool_') === 0) return 'job';
+  if (k.indexOf('cool_') === 0 || k.indexOf('laser_') === 0) return 'job';
   return 'now';
 }
 function logPairs() {
