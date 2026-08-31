@@ -1141,12 +1141,13 @@ static int cb_settings_post(const struct _u_request *req,
     if (!floor_off && !start_off && tmin >= tstart)
         return reply_error(res, 400,
             "cool_temp_min must be below cool_temp_start");
-    if (!start_off && !ceiling_off && tstart >= tmax)
-        return reply_error(res, 400,
-            "cool_temp_start must be below cool_temp_max");
     if (!floor_off && !ceiling_off && tmin >= tmax)
         return reply_error(res, 400,
             "cool_temp_min must be below cool_temp_max");
+    /* The start gate is deliberately not pinned under the ceiling: a
+     * bench drill drops the ceiling to the loop's own reading (the
+     * gate-off trip leg, the critical-tier drill), and a start gate
+     * above such a ceiling holds twice over - odd, and safe. */
     /* The TEC's hysteresis pair: off under on, and the pair above the
      * floor, so the TEC cannot chill the loop into the COLD hold. */
     double teon, teoff;
