@@ -174,6 +174,13 @@ int main(void)
     st.gates_off = "[]"; st.limits = "{}"; st.fan_gates = "{}"; st.reason = "";
     CHECK(coolfmt_status(doc, sizeof(doc), &st) == 0 && is_json(doc), "empty fragments still make a document");
 
+    printf("armed flag\n");
+    CHECK(coolfmt_armed(1, 0.0, 5.0), "a fresh armed report shows armed");
+    CHECK(coolfmt_armed(1, 5.0, 5.0), "at the timeout it still does");
+    CHECK(!coolfmt_armed(1, 5.1, 5.0), "past the timeout a stale armed report shows false");
+    CHECK(!coolfmt_armed(1, -1.0, 5.0), "and so does no report at all");
+    CHECK(!coolfmt_armed(0, 0.0, 5.0), "a fresh unarmed report shows false");
+
     printf("json acceptor\n");
     CHECK(!is_json("{\"a\":{\"b\":60,\"c\":{}}"), "the acceptor rejects the cut document this test exists for");
     CHECK(!is_json("{\"a\":1"), "and a missing brace");

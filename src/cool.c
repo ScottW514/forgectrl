@@ -46,7 +46,9 @@
  *   thermal phase at reduced duty (fan airflow measurably cools the
  *   loop) until the upstream temp is back under the resume gate or a
  *   timeout expires; heater off throughout (it would fight the
- *   cooling).
+ *   cooling). A session that never had the armed window open (a
+ *   homing motion, a hunt, a dark job) has no smoke to clear: its
+ *   smoke phase is zero length, the thermal gate still applies.
  * - OVER-TEMP: if the upstream temp exceeds the run ceiling the
  *   verdict goes OVERTEMP with hold=true and cooling airflow forced;
  *   it recovers (resume_ok) once the temp is back under the resume
@@ -407,6 +409,7 @@ static int diag_had = 0;            /* diagnostics held the hardware */
 static long run_duty[3] = {-1, -1, -1};
 static long cmd_duty[3] = {-1, -1, -1};   /* what fans_run last wrote */
 static int eff_armed = 0;                 /* the armed window, as reported */
+static int session_armed = 0;             /* this run session has been armed */
 static unsigned long verdict_seq = 0;
 
 /* Gate settings at their off end (gates.c): the coolant ceiling at its
@@ -976,7 +979,7 @@ static void flood_apply(int on, double now)
         hv_lo = hv_hi = -1;
     } else if (cool_state == Cool_Run) {
         cool_state = Cool_Smoke;
-        phase_until = now + (double)smoke_s;
+        phase_until = now + (session_armed ? (double)smoke_s : 0.0);
         /* A fan fault is the session's: it ends with it, because the next
          * session re-proves every fan after the grace before anything can
          * fire. Left standing, the hold would cancel jogs at idle and the
@@ -1116,6 +1119,13 @@ static void engine_tick(void)
     memcpy(run_duty, duty, sizeof(run_duty));
     int armed_rose = armed && !eff_armed;
     eff_armed = armed;
+    /* The session's armed history decides its smoke phase: cleared as
+     * a session opens (this tick, before flood_apply), set on any tick
+     * the window is open. */
+    if (flood && !flood_on)
+        session_armed = 0;
+    if (flood && armed)
+        session_armed = 1;
     /* Reapply for a duty change carried by a run report, or for the
      * armed window opening (armed, a job's profile may no longer hold a
      * fan below run duty). Only those: a run-ending report drops the
@@ -1770,11 +1780,13 @@ double cool_report_age(void)
 int cool_status_json(char *buf, size_t len)
 {
     pthread_mutex_lock(&mu);
+    double age = rep_at < 0 ? -1 : wall_s() - rep_at;
     coolfmt_status_t st = {
         .phase = pub_phase, .verdict = pub_verdict, .reason = pub_reason,
         .fire_watch = pub_fire_watch, .fire_ok = pub_fire_ok, .hold = pub_hold,
-        .armed = rep_armed, .down_c = pub_down, .up_c = pub_up,
-        .report_age_s = rep_at < 0 ? -1 : wall_s() - rep_at,
+        .armed = coolfmt_armed(rep_armed, age, REPORT_TIMEOUT_S),
+        .down_c = pub_down, .up_c = pub_up,
+        .report_age_s = age,
         .gates_off = pub_gates_off, .limits = pub_limits,
         .fan_gates = pub_fan_gates,
     };

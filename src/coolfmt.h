@@ -63,4 +63,9 @@ typedef struct {
 /* Returns 0, or -1 when len was too small for the document. */
 int coolfmt_status(char *buf, size_t len, const coolfmt_status_t *s);
 
+/* The armed flag the document shows: the last report's flag while that
+ * report is fresh (0 <= age <= timeout), false once the report is stale
+ * or there has been none (age < 0). */
+int coolfmt_armed(int reported, double report_age_s, double timeout_s);
+
 #endif

@@ -71,3 +71,8 @@ int coolfmt_status(char *buf, size_t len, const coolfmt_status_t *s)
                      s->gates_off, s->limits, s->fan_gates);
     return n < 0 || (size_t)n >= len ? -1 : 0;
 }
+
+int coolfmt_armed(int reported, double report_age_s, double timeout_s)
+{
+    return reported && report_age_s >= 0 && report_age_s <= timeout_s;
+}

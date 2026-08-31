@@ -411,7 +411,11 @@ mode=idle|run|cooldown & armed=0|1 [& model=density|analog]
   engine publishes `fire_ok=false` immediately and stands down through the
   normal cooldown path (smoke clear is the right physical behavior for a job
   that died mid-cut), ending at the idle profile (pump on, fans idle, heater
-  off). Silence with the armed window open — or with `cnc/state` still
+  off). `GET /cool/status` shows `armed` false from that point (`report_age_s`
+  tells the age of the last report).
+- A run session that never had the armed window open (a homing motion, a
+  hunt, a dark job) has no smoke to clear: its smoke phase is zero length
+  and the cooldown goes straight to the thermal gate and the idle profile. Silence with the armed window open — or with `cnc/state` still
   reading `running` (cloud mode preloads whole jobs, so the ring can play
   for minutes with no live feeder) — is the **hung-controller dead-man**:
   the engine itself writes `cnc/stop` + `cnc/laser_latch=1` (the supervisor
@@ -568,17 +572,17 @@ fd — the real-time feed path is never proxied.
   a writer runs leaves the writer's dup as the last reference, so the
   writer's own exit becomes the final close — the kernel backstop either
   way.
-- **Rail policy [contract]:** `cnc/enable`/`cnc/disable` are forgectrl's
+- **Rail policy [implemented]:** `cnc/enable`/`cnc/disable` are forgectrl's
   writes (the liveness ladder, diagnostics under its takeover rules), and
   every deliberate re-enable observes `rail_settle_s`. **The rail stays up
-  while the machine is on — there is no idle-rail-off policy**: the stepper
+  while the machine is on; there is no idle-rail-off policy**: the stepper
   drivers can come out of any power-up unserviceable, so each cycle is a
   fresh gamble and the cheapest policy is not to cycle. With a brokered fd
-  in play no client drops the rail on a handback or a takeover, and takeover
-  settles are skipped because the rail never went down (an emergency halt
-  may still disable it deliberately). The GRBL controller's `cnc/enable` at
-  init and at homing resume are the one residual controller write:
-  idempotent against a rail that is already up (listed in the ownership
+  in play no client writes the rail: no client drops it on a handback or a
+  takeover, takeover settles are skipped because the rail never went down
+  (an emergency halt may still disable it deliberately), and the GRBL
+  controller writes `cnc/enable` at init and at homing resume only when it
+  runs standalone, on a device it opened itself (listed in the ownership
   table below).
 
 **Watchdog scope:** the i.MX6 hardware watchdog is a boot/system watchdog,
@@ -799,7 +803,7 @@ Readers are unrestricted.
 |---|---|---|---|
 | `thermal/*` fans/pump/TEC/heater, `head/air_assist_pwm`, `head/purge_air` | forgectrl engine (+ the controller's stale-verdict fallback) | forgectrl engine (+ fallback) | forgectrl runner (engine suspended, fire blocked) |
 | `cnc/*` motion, `/dev/glowforge` ring | GRBL controller, through the brokered fd | cloud client, through the brokered fd | — (controller suspended) |
-| `cnc/enable` / `cnc/disable` (40 V rail) | forgectrl; the controller's enable-at-init is the one residual write (rail policy above) | forgectrl | forgectrl |
+| `cnc/enable` / `cnc/disable` (40 V rail) | forgectrl (a standalone controller, no broker, enables at init; rail policy above) | forgectrl | forgectrl |
 | `cnc/laser_latch` | GRBL controller (locked by forgectrl across handovers and on writer death) | cloud client (same) | — |
 | Button LEDs (`/sys/class/leds/button_led_*`) | GRBL controller (arm flow) | cloud client | — |
 | Head/lid illumination (camera lamps) | forgectrl (`lamp` on snapshot); the lid lamp's idle level is the `lid_lamp_idle` setting (0-255, default 236), asserted at daemon start, on a settings change, and at every controller spawn | the cloud client drives the lid lamp while it runs (its `LLvl`); forgectrl re-asserts the idle level at the next spawn | forgectrl |
