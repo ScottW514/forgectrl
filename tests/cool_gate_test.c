@@ -45,7 +45,7 @@ int main(void)
     const gate_setting_t *t = gate_settings(&n);
 
     printf("table shape\n");
-    CHECK(n == 12, "twelve gate settings");
+    CHECK(n == 14, "fourteen gate settings");
     for (size_t i = 0; i < n; i++) {
         char msg[128];
         snprintf(msg, sizeof(msg), "%s: lo <= band_lo <= def <= band_hi <= hi", t[i].key);
@@ -94,6 +94,12 @@ int main(void)
     CHECK(sta && sta->gate && !strcmp(sta->gate, "warm_up") && sta->off_end < 0 && sta->lo == 0.0,
           "the start gate is the warm_up gate, off at zero");
     CHECK(flo->def < sta->def && sta->def < tmax->def, "floor under start under ceiling by default");
+
+    const gate_setting_t *ton = gate_setting_find("cool_tec_on_c");
+    const gate_setting_t *tof = gate_setting_find("cool_tec_off_c");
+    CHECK(ton && !ton->gate && ton->off_end == 0, "the TEC on threshold is not a gate of its own");
+    CHECK(tof && !tof->gate && tof->off_end == 0, "the TEC off threshold is not a gate of its own");
+    CHECK(tof->def < ton->def && flo->def < tof->def, "TEC off under on, both over the floor, by default");
 
     printf("floor hysteresis\n");
     CHECK(!gate_floor_trip(0, 5.0, 5.0, 1.0), "at the floor, not under it: no trip");

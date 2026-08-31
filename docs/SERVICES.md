@@ -225,6 +225,8 @@ that table.
 | `cool_temp_critical_c` | `coolant_critical` (the fail tier above the ceiling; kept above it while the ceiling gates) | 38 C | 6 to 70 C | 36 to 45 C | 70 C |
 | `cool_temp_min` | `coolant_min` (the floor, a fire gate; clears 1 C above itself; a header floor can only raise it) | 5 C | 0 to 40 C | 3 to 8 C | 0 |
 | `cool_temp_start` | `warm_up` (a session opening under it holds with the heater on until it is reached; kept between the floor and the ceiling) | 16 C | 0 to 40 C | 12 to 20 C | 0 |
+| `cool_tec_on_c` | (the TEC's on threshold; kept above `cool_tec_off_c`) | 20 C | 6 to 32 C | 18 to 24 C | never |
+| `cool_tec_off_c` | (the TEC's off threshold; kept above the floor) | 18 C | 5 to 31 C | 16 to 22 C | never |
 | `cool_flow_check_s` | `flow` (flow verification) | 50 s | 0 to 300 s | 30 to 120 s | 0 |
 | `cool_flow_rise` | (tunes `flow`; set from flow calibrate) | 14.4 C | 1 to 40 C | 8 to 16 C | never |
 | `cool_tach_exhaust_min_rpm` | `exhaust` | 6400 rpm | 0 to 20000 | 5800 to 7000 | 0 |
@@ -232,6 +234,20 @@ that table.
 | `cool_tach_air_assist_min_rpm` | `air_assist` | 6000 rpm | 0 to 30000 | 5500 to 6600 | 0 |
 | `cool_purge_min_current` | `purge` (current, raw) | 300 | 0 to 1023 | 150 to 500 | 0 |
 | `cool_fan_grace_s` | (the spin-up window, no gate) | 15 s | 0 to 120 s | 5 to 30 s | never |
+
+**The TEC** (`thermal/tec_on`, a bare output with no readback): driven only
+when `cool_tec_present` is `1` (the Machine tab's "TEC (Pro chiller)";
+default `0`, and ForgeFIRM never touches the line otherwise - presence
+cannot be detected, so it is the operator's word, which also covers
+retrofits). When present: hysteresis on the upstream reading, on above
+`cool_tec_on_c`, off below `cool_tec_off_c`, and only while the fans run
+(the run, smoke-clear and thermal phases, or a forced cooldown) - the
+cooler's heat sink sits in their airflow. Off at idle, off in the warm-up
+hold, off within a degree of the coolant floor. Turning off is immediate;
+turning on waits a 30 s dwell after the last switch so sensor noise cannot
+chatter the part. The factory drives a Pro's TEC above its own threshold
+on the filtered upstream reading; what a Pro sets is unknown (no Pro
+capture), so the defaults here are chosen, not inherited.
 
 Two tunables ride with `flow` and are not gates: `cool_laser_heat_cw` and
 `cool_laser_heat_density`, the tube's share of a heater rise in C per

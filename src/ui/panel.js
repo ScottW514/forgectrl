@@ -68,6 +68,9 @@ var CK = [
   'cool_temp_critical_c',
   'cool_temp_min',
   'cool_temp_start',
+  'cool_tec_present',
+  'cool_tec_on_c',
+  'cool_tec_off_c',
   'cool_cooldown_s',
   'cool_cooldown_max_s',
   'cool_tach_exhaust_min_rpm',
@@ -121,7 +124,9 @@ var FT = {
   cool_temp_resume: 'ta',
   cool_temp_critical_c: 'ta',
   cool_temp_min: 'ta',
-  cool_temp_start: 'ta'
+  cool_temp_start: 'ta',
+  cool_tec_on_c: 'ta',
+  cool_tec_off_c: 'ta'
 };
 var PH = {
   cool_flow_rise: [14.4, 'td'],
@@ -129,7 +134,9 @@ var PH = {
   cool_temp_resume: [31, 'ta'],
   cool_temp_critical_c: [38, 'ta'],
   cool_temp_min: [5, 'ta'],
-  cool_temp_start: [16, 'ta']
+  cool_temp_start: [16, 'ta'],
+  cool_tec_on_c: [20, 'ta'],
+  cool_tec_off_c: [18, 'ta']
 };
 var orig = {};
 /* The gate settings (S.gates, from /settings): each carries its legal
@@ -142,6 +149,8 @@ var GN = {
   cool_temp_critical_c: 'Coolant critical',
   cool_temp_min: 'Coolant floor',
   cool_temp_start: 'Warm-up gate',
+  cool_tec_on_c: 'TEC on above',
+  cool_tec_off_c: 'TEC off below',
   cool_flow_check_s: 'Flow check window',
   cool_flow_rise: 'Flow fault rise',
   cool_tach_exhaust_min_rpm: 'Exhaust floor',
@@ -737,6 +746,7 @@ function fill(force) {
   setF('laser_corner_gamma', S.laser_corner_gamma);
   setF('laser_pulse_ticks', S.laser_pulse_ticks);
   setF('laser_pulse_min_ticks', S.laser_pulse_min_ticks);
+  setF('cool_tec_present', S.cool_tec_present || '0');
   setF('lid_policy', S.lid_policy || 'cancel');
   setF('rail_settle_s', S.rail_settle_s);
   setF('lid_lamp_idle', S.lid_lamp_idle);

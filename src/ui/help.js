@@ -91,6 +91,7 @@ var HELP = {
     p: [
       'The coolant ceiling pauses a job until the loop is back under the resume gate. The critical line above it is a fault that holds the job with no resume, like a stopped fan.',
       'The coolant floor blocks fire under it and clears a degree above it. A job that starts under the warm-up gate holds with the loop heater on and the fans idle until the coolant reaches the gate, then runs and verifies flow; a loop that stops warming keeps holding and says so. A floor or a warm-up gate of 0 is off.',
+      'A Pro has a thermoelectric cooler; set TEC to fitted and the engine drives it on its own hysteresis (on above, off below), only while the fans run (its heat sink needs their airflow) and never at the coolant floor. The line has no readback, so leave it not fitted on a Basic or a Plus.',
       'Smoke clear is how long the fans keep running after a job; the cooldown limit caps that run.'
     ]
   },

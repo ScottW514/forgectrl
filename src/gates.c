@@ -42,6 +42,14 @@
  *   until the reading reaches the gate, then runs and verifies flow.
  *   Zero is the gate off. Kept between the floor and the ceiling by the
  *   settings cross-check.
+ * cool_tec_on_c / cool_tec_off_c: the TEC's hysteresis pair on the
+ *   upstream reading (on above, off below), used only when
+ *   cool_tec_present is set. Not gates of their own (nothing trips);
+ *   the settings cross-check keeps off under on and above the floor.
+ *   The factory turns a Pro's TEC on above its own threshold; what a
+ *   Pro sets is unknown (no Pro capture), so these defaults are chosen:
+ *   around the observed Pro loop point, above the warm-up gate, above
+ *   the dew point of an ordinary room.
  * cool_flow_check_s: the flow interrogation window. Zero is no
  *   interrogation at all, the one off-by-value the engine has always
  *   had; the band is the window the characterization found useful.
@@ -66,6 +74,8 @@ static const gate_setting_t table[] = {
     { "cool_temp_critical_c",       "coolant_critical", 38.0, 6.0, 70.0, 36.0, 45.0, +1 },
     { "cool_temp_min",              "coolant_min",  5.0,  0.0,    40.0,  3.0,   8.0, -1 },
     { "cool_temp_start",            "warm_up",     16.0,  0.0,    40.0, 12.0,  20.0, -1 },
+    { "cool_tec_on_c",              NULL,          20.0,  6.0,    32.0, 18.0,  24.0,  0 },
+    { "cool_tec_off_c",             NULL,          18.0,  5.0,    31.0, 16.0,  22.0,  0 },
     { "cool_flow_check_s",          "flow",        50.0,  0.0,   300.0, 30.0, 120.0, -1 },
     { "cool_flow_rise",             NULL,          14.4,  1.0,    40.0,  8.0,  16.0,  0 },
     { "cool_tach_exhaust_min_rpm",  "exhaust",   6400.0,  0.0, 20000.0, 5800.0, 7000.0, -1 },

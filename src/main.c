@@ -566,6 +566,9 @@ static int valid_temp_resume(const char *v){ return valid_gate("cool_temp_resume
 static int valid_temp_critical(const char *v){ return valid_gate("cool_temp_critical_c", v); }
 static int valid_temp_min(const char *v)   { return valid_gate("cool_temp_min", v); }
 static int valid_temp_start(const char *v) { return valid_gate("cool_temp_start", v); }
+static int valid_tec_on(const char *v)     { return valid_gate("cool_tec_on_c", v); }
+static int valid_tec_off(const char *v)    { return valid_gate("cool_tec_off_c", v); }
+static int valid_tec_present(const char *v){ return !strcmp(v, "0") || !strcmp(v, "1"); }
 static int valid_exhaust_rpm(const char *v) { return valid_gate("cool_tach_exhaust_min_rpm", v); }
 static int valid_intake_rpm(const char *v)  { return valid_gate("cool_tach_intake_min_rpm", v); }
 static int valid_air_rpm(const char *v)     { return valid_gate("cool_tach_air_assist_min_rpm", v); }
@@ -668,6 +671,9 @@ static const struct {
     { "cool_temp_critical_c",   valid_temp_critical, 0 },
     { "cool_temp_min",          valid_temp_min,    0 },
     { "cool_temp_start",        valid_temp_start,  0 },
+    { "cool_tec_present",       valid_tec_present, 0 },
+    { "cool_tec_on_c",          valid_tec_on,      0 },
+    { "cool_tec_off_c",         valid_tec_off,     0 },
     { "cool_cooldown_s",        valid_cool_s,      0 },
     { "cool_cooldown_max_s",    valid_cool_s,      0 },
     { "cool_tach_exhaust_min_rpm",    valid_exhaust_rpm, 0 },
@@ -1132,6 +1138,17 @@ static int cb_settings_post(const struct _u_request *req,
     if (!floor_off && !ceiling_off && tmin >= tmax)
         return reply_error(res, 400,
             "cool_temp_min must be below cool_temp_max");
+    /* The TEC's hysteresis pair: off under on, and the pair above the
+     * floor, so the TEC cannot chill the loop into the COLD hold. */
+    double teon, teoff;
+    effective_temp(req, "cool_tec_on_c", 20.0, &teon);
+    effective_temp(req, "cool_tec_off_c", 18.0, &teoff);
+    if (teoff >= teon)
+        return reply_error(res, 400,
+            "cool_tec_off_c must be below cool_tec_on_c");
+    if (!floor_off && teoff <= tmin)
+        return reply_error(res, 400,
+            "cool_tec_off_c must be above cool_temp_min");
 
     /* One atomic write for the whole request: no reader (grblHAL at $H,
      * gfhome at session start) can observe it half-applied, and a

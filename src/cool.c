@@ -49,6 +49,17 @@
  *   cooling). A session that never had the armed window open (a
  *   homing motion, a hunt, a dark job) has no smoke to clear: its
  *   smoke phase is zero length, the thermal gate still applies.
+ * - TEC: a Pro's chiller, driven only when cool_tec_present is set
+ *   (the line has no readback, so presence is the operator's word; a
+ *   Basic or a Plus has no part on it). Hysteresis on the upstream
+ *   reading, on above cool_tec_on_c and off below cool_tec_off_c, and
+ *   only while the fans run (run, smoke clear, thermal, or a forced
+ *   cooldown): the cooler's heat sink sits in the airflow path, so no
+ *   airflow means no TEC. Off at idle, off in the warm-up hold (it
+ *   would fight the heater), off within a degree of the coolant floor
+ *   (the settings cross-check keeps the pair above the floor). Turning
+ *   off is immediate; turning on again waits a short dwell so sensor
+ *   noise cannot chatter the part.
  * - COLD / WARM-UP: the coolant floor (cool_temp_min) is a fire gate
  *   under the ceiling with a degree of hysteresis; the warm-up gate
  *   (cool_temp_start) holds a session that opens under it with the
@@ -164,6 +175,9 @@
 #define WARMUP_STALL_S        300       /* no progress this long: named once */
 #define WARMUP_STALL_C          0.2f    /* what counts as progress */
 #define WARMUP_WIN            60        /* 1 Hz samples; the bulk, not a slug */
+#define TEC_ON_C_DEFAULT       20.0f    /* chosen, not the factory's (unknown on a Pro) */
+#define TEC_OFF_C_DEFAULT      18.0f
+#define TEC_DWELL_S            30       /* minimum off-to-on spacing */
 /* Airflow floors (gates.c carries the rationale and the ranges). */
 #define TACH_EXHAUST_MIN_RPM     6400.0f
 #define TACH_INTAKE_MIN_RPM      2290.0f
@@ -359,6 +373,12 @@ static float temp_resume_c = TEMP_RESUME_C_DEFAULT;
 static float temp_critical_c = TEMP_CRITICAL_C_DEFAULT;
 static float temp_min_c = TEMP_MIN_C_DEFAULT;
 static float temp_start_c = TEMP_START_C_DEFAULT;
+static uint32_t tec_present = 0;
+static float tec_on_c = TEC_ON_C_DEFAULT;
+static float tec_off_c = TEC_OFF_C_DEFAULT;
+static int tec_on_state = 0;        /* what the engine wants driven */
+static int tec_written = -1;        /* last value written; -1 = write next */
+static double tec_switched_at = 0;
 static float tach_exhaust_min_rpm = TACH_EXHAUST_MIN_RPM;
 static float tach_intake_min_rpm = TACH_INTAKE_MIN_RPM;
 static float tach_air_assist_min_rpm = TACH_AIR_ASSIST_MIN_RPM;
@@ -701,6 +721,12 @@ static struct {
       TEMP_MIN_C_DEFAULT,     &temp_min_c,      NULL, 0 },
     { "GFCOOL_TEMP_START",      "cool_temp_start",
       TEMP_START_C_DEFAULT,   &temp_start_c,    NULL, 0 },
+    { "GFCOOL_TEC_PRESENT",     "cool_tec_present",
+      0.0f,                   NULL,             &tec_present, 0 },
+    { "GFCOOL_TEC_ON",          "cool_tec_on_c",
+      TEC_ON_C_DEFAULT,       &tec_on_c,        NULL, 0 },
+    { "GFCOOL_TEC_OFF",         "cool_tec_off_c",
+      TEC_OFF_C_DEFAULT,      &tec_off_c,       NULL, 0 },
     { "GFCOOL_FLOW_RISE",       "cool_flow_rise",
       FLOW_FAULT_RISE_C,      &flow_fault_rise, NULL, 0 },
     { "GFCOOL_CONFIRM_MAX_S",   "cool_confirm_max_s",
@@ -740,6 +766,10 @@ static double engine_gate_value(const gate_setting_t *g, void *ctx)
         return temp_min_c;
     if (!strcmp(g->key, "cool_temp_start"))
         return temp_start_c;
+    if (!strcmp(g->key, "cool_tec_on_c"))
+        return tec_on_c;
+    if (!strcmp(g->key, "cool_tec_off_c"))
+        return tec_off_c;
     if (!strcmp(g->key, "cool_flow_check_s"))
         return flow_check_s;
     if (!strcmp(g->key, "cool_flow_rise"))
@@ -1157,6 +1187,7 @@ static void engine_tick(void)
         /* diag stood the loop down to idle; reassert our phase. */
         wr_attr("thermal/water_pump_on", "1");
         fans_apply_phase();
+        tec_written = -1;               /* rewrite the TEC's state too */
     }
 
     /* Snapshot the report. */
@@ -1790,6 +1821,42 @@ static void engine_tick(void)
             cool_state = Cool_Idle;
             fans_idle();
             flow_episodes = 0;
+        }
+    }
+
+    /* The TEC. Wanted only with the part declared present, a reading in
+     * hand, the fans running (its heat sink sits in their airflow), the
+     * hysteresis satisfied, and the loop clear of the floor. Off is
+     * immediate; on waits the dwell after the last switch. Written on
+     * change only (and re-written after a diagnostic hand-back). */
+    {
+        int airflow = cool_state == Cool_Run || cool_state == Cool_Smoke ||
+                      cool_state == Cool_Thermal || forced_cool;
+        int want = tec_present && have_up && airflow &&
+                   up > (tec_on_state ? tec_off_c : tec_on_c);
+        if (!gate_floor_off && have_up &&
+            up <= eff_temp_min_c + TEMP_MIN_HYST_C)
+            want = 0;
+        if (want && !tec_on_state && tec_switched_at > 0 &&
+            now - tec_switched_at < (double)TEC_DWELL_S)
+            want = tec_on_state;        /* hold the dwell before an on */
+        if (want != tec_on_state) {
+            tec_on_state = want;
+            tec_switched_at = now;
+            char msg[96];
+            if (want)
+                snprintf(msg, sizeof(msg), "TEC on: coolant %.1f C over "
+                         "%.1f C, airflow up", up, tec_on_c);
+            else
+                snprintf(msg, sizeof(msg), "TEC off: %s",
+                         !airflow ? "no airflow" : !tec_present ? "not fitted"
+                         : have_up && up <= eff_temp_min_c + TEMP_MIN_HYST_C
+                           ? "at the coolant floor" : "coolant cooled");
+            info(msg);
+        }
+        if (tec_written != tec_on_state) {
+            wr_attr("thermal/tec_on", tec_on_state ? "1" : "0");
+            tec_written = tec_on_state;
         }
     }
 
