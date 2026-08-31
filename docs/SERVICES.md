@@ -176,6 +176,13 @@ Laser-safety enforcement is the hardware AND-gate; everything below is
 
 ## Telemetry [implemented]
 
+The HTTP surface carries accept-side caps: 64 connections in total and 16
+per client address (`MHD_OPTION_CONNECTION_LIMIT` and the per-IP limit),
+so a flood is bounded before it reaches a request thread; the camera
+pipeline's setup children (media-ctl, v4l2-ctl) run in their own process
+groups under a 10 s deadline and are killed past it, so a wedged V4L2
+pipeline costs one bounded error, never a pinned thread.
+
 `GET /status` on forgectrl (port 8080) is the machine-state source for every
 latency-tolerant consumer: the control panel, the cloud client's reporting, and
 anything external. It carries motion state, position (homing-anchored kernel
@@ -495,8 +502,11 @@ rename) at ~1 Hz and on every verdict change:
 - `fire_ok` additionally requires a fresh job-state report: an armed window
   the engine cannot see never reads `fire_ok=true`. A controller about to
   fire is, by this contract, reporting at 1 Hz.
-- While a diagnostic owns the hardware the engine suspends its writes and
-  publishes `fire_ok=false, hold=true` until the diagnostic finishes.
+- A diagnostic owns the thermal hardware between `cool_diag_take` and
+  `cool_diag_release`: take succeeds only from an idle engine, every tool
+  write goes through the engine's guarded diag helpers (one owner), the
+  tick publishes phase `diag` with `fire_ok=false, hold=true` and touches
+  nothing, and the release reasserts the idle posture in one place.
 - **Emergency fallback:** if the verdict goes stale while the laser is armed,
   the controller (besides gating fire and holding) writes the run fan duties
   directly once — compiled-in factory values, no config dependency — then
@@ -837,7 +847,7 @@ Readers are unrestricted.
 
 | Hardware | GRBL mode | Cloud mode | Diagnostics |
 |---|---|---|---|
-| `thermal/*` fans/pump/TEC/heater, `head/air_assist_pwm`, `head/purge_air` | forgectrl engine (+ the controller's stale-verdict fallback) | forgectrl engine (+ fallback) | forgectrl runner (engine suspended, fire blocked) |
+| `thermal/*` fans/pump/TEC/heater, `head/air_assist_pwm`, `head/purge_air` | forgectrl engine (+ the controller's stale-verdict fallback) | forgectrl engine (+ fallback) | forgectrl runner, through the engine's guarded diag writes (take/release; fire blocked) |
 | `cnc/*` motion, `/dev/glowforge` ring | GRBL controller, through the brokered fd | cloud client, through the brokered fd | — (controller suspended) |
 | `cnc/enable` / `cnc/disable` (40 V rail) | forgectrl (a standalone controller, no broker, enables at init; rail policy above) | forgectrl | forgectrl |
 | `cnc/laser_latch` | GRBL controller (locked by forgectrl across handovers and on writer death) | cloud client (same) | — |

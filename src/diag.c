@@ -99,18 +99,9 @@ static char st_result[768];      /* JSON object, or "" while running */
 
 /* ------------------------------------------------------- hardware io */
 
-static int wr_attr(const char *attr, const char *val)
-{
-    char path[128];
-    snprintf(path, sizeof(path), GF_SYSFS "%s", attr);
-    int fd = open(path, O_WRONLY);
-    if (fd < 0)
-        return -1;
-    int ret = write(fd, val, strlen(val)) < 0 ? -1 : 0;
-    close(fd);
-    return ret;
-}
-
+/* Every write goes through the engine's guarded diag helpers
+ * (cool_diag_*): one owner for the thermal hardware. This file only
+ * reads. */
 static long rd_long(const char *attr)
 {
     char path[128], buf[24];
@@ -140,44 +131,6 @@ static void sample(double *down, double *up)
     st_down = *down;
     st_up = *up;
     pthread_mutex_unlock(&mu);
-}
-
-static void heater_pct(double pct)
-{
-    char v[16];
-    snprintf(v, sizeof(v), "%d", (int)(65535.0 * pct / 100.0));
-    wr_attr("thermal/heater_pwm", v);
-}
-
-static void pump(int on)
-{
-    wr_attr("thermal/water_pump_on", on ? "1" : "0");
-}
-
-/* Cut-profile chassis fans during a trial - the condition the bands
- * were characterized under and the one the engine's in-job check runs
- * in. Idle values on stand-down; the engine reapplies its own fan
- * policy when it takes back over. */
-static void fans_run(void)
-{
-    char v[16];
-    snprintf(v, sizeof(v), "%d", COOL_EXHAUST_RUN);
-    wr_attr("thermal/exhaust_pwm", v);
-    snprintf(v, sizeof(v), "%d", COOL_INTAKE_RUN);
-    wr_attr("thermal/intake_pwm", v);
-}
-
-static void fans_idle(void)
-{
-    wr_attr("thermal/exhaust_pwm", "0");
-    wr_attr("thermal/intake_pwm", "0");
-}
-
-static void stand_down(void)
-{
-    heater_pct(0);
-    pump(1);
-    fans_idle();
 }
 
 /* ------------------------------------------------- controller service */
@@ -296,13 +249,13 @@ static int trial(int flow, double duty, int secs,
 {
     double down = 20, up = 20;
 
-    pump(flow);
-    fans_run();
+    cool_diag_pump(flow);
+    cool_diag_fans_run();
     sleep(3);
     sample(&down, &up);
     double base = down;
 
-    heater_pct(duty);
+    cool_diag_heater_pct(duty);
     int rc = 0;
     for (int t = 0; t < secs; t++) {
         if (aborted()) {
@@ -317,8 +270,8 @@ static int trial(int flow, double duty, int secs,
         }
         sleep(1);
     }
-    heater_pct(0);
-    pump(1);
+    cool_diag_heater_pct(0);
+    cool_diag_pump(1);
 
     *rise = down - base;
     *dt = down - up;
@@ -345,6 +298,7 @@ static void *runner(void *arg)
         /* The stop already un-suspended on timeout; this additionally
          * clears any motion fault and resets the respawn backoff, so a
          * failed takeover can never leave the machine controller-less. */
+        cool_diag_release();
         controller_start();
         goto out_norestart;
     }
@@ -437,7 +391,7 @@ out_aborted:
     set_result("{\"error\":\"aborted by operator\"}");
 out:
     set_phase("standing down");
-    stand_down();
+    cool_diag_release();
     controller_start();
     unlink(MARKER);
 out_norestart:
@@ -476,13 +430,6 @@ out_norestart:
 #define AA_MAX_SPREAD 8.0
 #define AA_MIN_COUNTS 3.0
 
-static void aa_write(long duty)
-{
-    char v[16];
-    snprintf(v, sizeof(v), "%ld", duty);
-    wr_attr("head/air_assist_pwm", v);
-}
-
 /* One edge: settle the fan's new state and read the step on both
  * sensors. Returns 0, -1 on abort. */
 static int aa_edge(long duty, double *step_down, double *step_up)
@@ -501,7 +448,7 @@ static int aa_edge(long duty, double *step_down, double *step_up)
         if (aborted())
             return -1;
     }
-    aa_write(duty);
+    cool_diag_aa(duty);
     usleep(500000);                     /* the fan's current settles */
     for (int i = 0; i < N; i++) {
         long r1 = rd_long("pic/water_temp_1"), r2 = rd_long("pic/water_temp_2");
@@ -536,6 +483,7 @@ static void *runner_aa(void *arg)
     set_phase("stopping the motion controller");
     if (controller_stop()) {
         set_result("{\"error\":\"could not stop the motion controller\"}");
+        cool_diag_release();
         controller_start();
         goto out_norestart;
     }
@@ -543,10 +491,10 @@ static void *runner_aa(void *arg)
 
     double sd[AA_EDGES], su[AA_EDGES];
     int n = 0;
-    pump(1);
-    heater_pct(0);
-    fans_idle();
-    aa_write(AA_IDLE);
+    cool_diag_pump(1);
+    cool_diag_heater_pct(0);
+    cool_diag_fans_idle();
+    cool_diag_aa(AA_IDLE);
     /* The edges are read against a trend-free baseline: the same
      * stationary-loop gate the flow tools use (drift and down/up
      * agreement), so a loop still mixing after a heater trial waits
@@ -609,8 +557,8 @@ out_aborted:
     set_result("{\"error\":\"aborted by operator\"}");
 out:
     set_phase("standing down");
-    aa_write(AA_IDLE);
-    stand_down();
+    cool_diag_aa(AA_IDLE);
+    cool_diag_release();
     controller_start();
     unlink(MARKER);
 out_norestart:
@@ -627,9 +575,10 @@ out_norestart:
 void diag_init(void)
 {
     if (access(MARKER, F_OK) == 0) {
-        fflog(LOG_WARNING, "stale diagnostic marker - standing "
-                           "down and restarting the controller");
-        stand_down();
+        /* cool_init runs next and asserts the idle posture, so only
+         * the controller needs restarting here. */
+        fflog(LOG_WARNING, "stale diagnostic marker - restarting the "
+                           "controller");
         controller_start();
         unlink(MARKER);
     }
@@ -675,12 +624,23 @@ int diag_start(const char *tool)
     snprintf(st_tool, sizeof(st_tool), "%s", tool);
     pthread_mutex_unlock(&mu);
 
+    /* The engine hands the thermal hardware over before the tool's
+     * thread exists; a busy engine (a session, its cooldown, another
+     * takeover) refuses here. */
+    if (cool_diag_take() != 0) {
+        pthread_mutex_lock(&mu);
+        st_running = 0;
+        pthread_mutex_unlock(&mu);
+        return -2;
+    }
+
     pthread_t th;
     pthread_attr_t at;
     pthread_attr_init(&at);
     pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
     if (pthread_create(&th, &at, fn,
                        calibrate ? (void *)1 : NULL) != 0) {
+        cool_diag_release();
         pthread_mutex_lock(&mu);
         st_running = 0;
         pthread_mutex_unlock(&mu);

@@ -126,7 +126,6 @@
 #include "airflow.h"
 #include "cool.h"
 #include "coolfmt.h"
-#include "diag.h"
 #include "fflog.h"
 #include "gates.h"
 #include "settings.h"
@@ -468,7 +467,6 @@ static int ir_over_ticks = 0;
 static int fire_alarm = 0;          /* latched lid-IR fire signal */
 static long hv_lo = -1, hv_hi = -1; /* session hv_current range */
 static const char *pub_fire_watch = "watch";
-static int diag_had = 0;            /* diagnostics held the hardware */
 static long run_duty[3] = {-1, -1, -1};
 static long cmd_duty[3] = {-1, -1, -1};   /* what fans_run last wrote */
 static int eff_armed = 0;                 /* the armed window, as reported */
@@ -963,6 +961,91 @@ static void conf_reload(void)
     gates_apply();
 }
 
+/* ---------------------------------------------- diagnostic ownership */
+
+/* The flow and aa tools own the thermal hardware between
+ * cool_diag_take and cool_diag_release: the tick publishes phase
+ * "diag" with fire blocked and touches nothing, the tools write only
+ * through the guarded helpers, and the release reasserts the idle
+ * posture in one place. Take succeeds only from an idle engine (the
+ * HTTP layer additionally gates on an idle machine), so a takeover
+ * never lands inside a run session or its cooldown. */
+static int diag_owned = 0;
+
+int cool_diag_take(void)
+{
+    pthread_mutex_lock(&mu);
+    if (diag_owned || cool_state != Cool_Idle) {
+        pthread_mutex_unlock(&mu);
+        return -1;
+    }
+    diag_owned = 1;
+    pthread_mutex_unlock(&mu);
+    warn("diagnostics own the thermal hardware");
+    return 0;
+}
+
+void cool_diag_release(void)
+{
+    heater_set_pct(0);
+    wr_attr("thermal/water_pump_on", "1");
+    fans_idle();
+    tec_written = -1;               /* the tick rewrites the TEC's state */
+    pthread_mutex_lock(&mu);
+    diag_owned = 0;
+    pub_reason[0] = '\0';
+    pthread_mutex_unlock(&mu);
+    fflog(LOG_INFO, "cool: diagnostics handed the thermal hardware back");
+}
+
+static int diag_guard(const char *what)
+{
+    pthread_mutex_lock(&mu);
+    int own = diag_owned;
+    pthread_mutex_unlock(&mu);
+    if (!own)
+        fflog(LOG_ERR, "cool: %s refused - diagnostics do not own the "
+              "thermal hardware", what);
+    return own ? 0 : -1;
+}
+
+void cool_diag_pump(int on)
+{
+    if (diag_guard("diag pump write") == 0)
+        wr_attr("thermal/water_pump_on", on ? "1" : "0");
+}
+
+void cool_diag_heater_pct(double pct)
+{
+    if (diag_guard("diag heater write") == 0)
+        heater_set_pct(pct < 0 ? 0 : (uint32_t)pct);
+}
+
+/* The tools' airflow profile, kept exactly as the flow bands were
+ * characterized: exhaust and intake at the configured run duty, the
+ * air assist untouched. */
+void cool_diag_fans_run(void)
+{
+    if (diag_guard("diag fan write") == 0) {
+        wr_attr_long("thermal/exhaust_pwm", EXHAUST_RUN);
+        wr_attr_long("thermal/intake_pwm", INTAKE_RUN);
+    }
+}
+
+void cool_diag_fans_idle(void)
+{
+    if (diag_guard("diag fan write") == 0) {
+        wr_attr_long("thermal/exhaust_pwm", EXHAUST_IDLE);
+        wr_attr_long("thermal/intake_pwm", INTAKE_IDLE);
+    }
+}
+
+void cool_diag_aa(long duty)
+{
+    if (diag_guard("diag air-assist write") == 0)
+        aa_write(duty);
+}
+
 /* ------------------------------------------------------ verdict file */
 
 /* Atomic publish: write-temp + rename, ~1 Hz and on every change (the
@@ -1194,29 +1277,18 @@ static void engine_tick(void)
 {
     double now = wall_s();
 
-    /* Diagnostics own the hardware while they run; hold everything and
-     * publish fire-blocked until they hand back. */
-    if (diag_running()) {
-        if (!diag_had) {
-            diag_had = 1;
-            flood_apply(0, now);
-            warn("diagnostics own the thermal hardware");
-        }
+    /* Diagnostics own the hardware between cool_diag_take and
+     * cool_diag_release: publish the phase, keep fire blocked, and
+     * touch nothing until the release reasserts the idle posture. */
+    pthread_mutex_lock(&mu);
+    int dia = diag_owned;
+    pthread_mutex_unlock(&mu);
+    if (dia) {
         pthread_mutex_lock(&mu);
         pub_phase = "diag";
         pthread_mutex_unlock(&mu);
         verdict_publish(0, "OK", 1, 0, 0, 0, 0);
         return;
-    }
-    if (diag_had) {
-        diag_had = 0;
-        pthread_mutex_lock(&mu);
-        pub_reason[0] = '\0';
-        pthread_mutex_unlock(&mu);
-        /* diag stood the loop down to idle; reassert our phase. */
-        wr_attr("thermal/water_pump_on", "1");
-        fans_apply_phase();
-        tec_written = -1;               /* rewrite the TEC's state too */
     }
 
     /* Snapshot the report. */

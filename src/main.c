@@ -71,6 +71,7 @@
 #include <string.h>
 #include <sys/resource.h>
 #include <time.h>
+#include <microhttpd.h>
 #include <ulfius.h>
 #include <unistd.h>
 #include <zlib.h>
@@ -1728,7 +1729,24 @@ int main(int argc, char **argv)
     ulfius_set_upload_file_callback_function(&inst, &update_upload_sink,
                                              NULL);
 
-    if (ulfius_start_framework(&inst) != U_OK) {
+    /* The flags ulfius computes for this configuration (a thread per
+     * connection, its error log, the internal polling thread, dual
+     * stack from U_USE_ALL), reproduced verbatim so only the caps are
+     * new: a connection ceiling and a per-IP ceiling bound a flood at
+     * the accept side (uncapped, a 500-connection flood plateaued at
+     * 379 fds). Without ulfius' logger option MHD errors go to stderr,
+     * which the service's log captures. */
+    struct MHD_OptionItem mhd_ops[] = {
+        { MHD_OPTION_CONNECTION_LIMIT, 64, NULL },
+        { MHD_OPTION_PER_IP_CONNECTION_LIMIT, 16, NULL },
+        { MHD_OPTION_END, 0, NULL },
+    };
+    unsigned int mhd_flags = MHD_USE_THREAD_PER_CONNECTION |
+                             MHD_USE_ERROR_LOG |
+                             MHD_USE_INTERNAL_POLLING_THREAD |
+                             MHD_USE_DUAL_STACK;
+    if (ulfius_start_framework_with_mhd_options(&inst, mhd_flags,
+                                                mhd_ops) != U_OK) {
         fflog(LOG_ERR, "cannot start HTTP on port %u", port);
         ulfius_clean_instance(&inst);
         return 1;

@@ -55,6 +55,7 @@
 #include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -340,6 +341,111 @@ static int xioctl(int fd, unsigned long req, void *arg)
     return r;
 }
 
+/* ---------------------------------------------------- bounded children */
+
+/* Pipeline configuration shells out to media-ctl and v4l2-ctl. A wedged
+ * V4L2 pipeline can hang those forever, and with a thread per connection
+ * a hung child would pin its request thread and the camera control lock
+ * behind it. Every child therefore runs in its own process group under a
+ * hard deadline: past it the whole group is killed and the call fails. */
+#define CAM_CMD_TIMEOUT_S 10.0
+
+static pid_t child_spawn(const char *cmd, int *outfd)
+{
+    int pfd[2] = {-1, -1};
+    if (outfd && pipe(pfd) < 0)
+        return -1;
+    pid_t pid = fork();
+    if (pid < 0) {
+        if (outfd) {
+            close(pfd[0]);
+            close(pfd[1]);
+        }
+        return -1;
+    }
+    if (pid == 0) {
+        setpgid(0, 0);
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0)
+            dup2(devnull, STDIN_FILENO);
+        if (outfd) {
+            dup2(pfd[1], STDOUT_FILENO);
+            close(pfd[0]);
+            close(pfd[1]);
+        } else if (devnull >= 0) {
+            dup2(devnull, STDOUT_FILENO);
+        }
+        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        _exit(127);
+    }
+    if (outfd) {
+        close(pfd[1]);
+        *outfd = pfd[0];
+    }
+    return pid;
+}
+
+/* Read until EOF, a full buffer, or the deadline. NUL-terminates and
+ * returns the bytes read, or -1 on a timeout or a read error. */
+static ssize_t child_read_all(int fd, char *buf, size_t len, double deadline_s)
+{
+    size_t off = 0;
+    struct timespec t0, t;
+    now_ts(&t0);
+    while (off < len - 1) {
+        now_ts(&t);
+        double left = deadline_s - ts_diff(&t, &t0);
+        if (left <= 0)
+            return -1;
+        fd_set rf;
+        FD_ZERO(&rf);
+        FD_SET(fd, &rf);
+        struct timeval tv;
+        tv.tv_sec = (time_t)left;
+        tv.tv_usec = (suseconds_t)((left - (double)tv.tv_sec) * 1e6);
+        int s = select(fd + 1, &rf, NULL, NULL, &tv);
+        if (s < 0 && errno == EINTR)
+            continue;
+        if (s <= 0)
+            return -1;
+        ssize_t n = read(fd, buf + off, len - 1 - off);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n < 0)
+            return -1;
+        if (n == 0)
+            break;
+        off += (size_t)n;
+    }
+    buf[off] = '\0';
+    return (ssize_t)off;
+}
+
+/* Reap the child within the deadline; past it the group is killed.
+ * Returns the exit status, or -1 for a kill, a signal, or an error. */
+static int child_reap(pid_t pid, double deadline_s)
+{
+    struct timespec t0, t;
+    int st;
+    now_ts(&t0);
+    for (;;) {
+        pid_t r = waitpid(pid, &st, WNOHANG);
+        if (r == pid)
+            return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+        if (r < 0 && errno != EINTR)
+            return -1;
+        now_ts(&t);
+        if (ts_diff(&t, &t0) >= deadline_s) {
+            kill(-pid, SIGKILL);
+            waitpid(pid, &st, 0);
+            fflog(LOG_ERR, "cam: child past its %.0f s deadline - killed",
+                  deadline_s);
+            return -1;
+        }
+        usleep(50 * 1000);
+    }
+}
+
 /* Run a shell command, logging and returning nonzero on failure. */
 static int run(const char *fmt, ...)
 {
@@ -348,9 +454,13 @@ static int run(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(cmd, sizeof(cmd), fmt, ap);
     va_end(ap);
-    int rc = system(cmd);
-    if (rc == -1 || !WIFEXITED(rc) || WEXITSTATUS(rc) != 0) {
-        fflog(LOG_ERR, "cam: command failed (%d): %s", rc, cmd);
+    pid_t pid = child_spawn(cmd, NULL);
+    if (pid < 0) {
+        fflog(LOG_ERR, "cam: cannot spawn: %s", cmd);
+        return -1;
+    }
+    if (child_reap(pid, CAM_CMD_TIMEOUT_S) != 0) {
+        fflog(LOG_ERR, "cam: command failed: %s", cmd);
         return -1;
     }
     return 0;
@@ -364,20 +474,22 @@ static int run_read(char *out, size_t outlen, const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(cmd, sizeof(cmd), fmt, ap);
     va_end(ap);
-    FILE *p = popen(cmd, "r");
-    if (!p)
+    int fd = -1;
+    pid_t pid = child_spawn(cmd, &fd);
+    if (pid < 0)
         return -1;
-    out[0] = '\0';
-    if (!fgets(out, (int)outlen, p)) {
-        pclose(p);
-        return -1;
-    }
-    int rc = pclose(p);
-    out[strcspn(out, "\r\n")] = '\0';
-    if (rc == -1 || !WIFEXITED(rc) || WEXITSTATUS(rc) != 0 || !out[0]) {
+    char buf[1024];
+    ssize_t n = child_read_all(fd, buf, sizeof(buf), CAM_CMD_TIMEOUT_S);
+    close(fd);
+    if (n < 0)
+        kill(-pid, SIGKILL);
+    int rc = child_reap(pid, 1.0);
+    buf[n > 0 ? strcspn(buf, "\r\n") : 0] = '\0';
+    if (n <= 0 || rc != 0 || !buf[0]) {
         fflog(LOG_ERR, "cam: command failed: %s", cmd);
         return -1;
     }
+    snprintf(out, outlen, "%s", buf);
     return 0;
 }
 
@@ -445,29 +557,45 @@ static int sensor_entity(int bus, char *out, size_t outlen)
     char needle[16];
     snprintf(needle, sizeof(needle), " %d-0036", bus);
 
-    FILE *p = popen("media-ctl -p", "r");
-    if (!p)
+    int fd = -1;
+    pid_t pid = child_spawn("media-ctl -p", &fd);
+    if (pid < 0)
         return -1;
-    char line[512];
-    int found = 0;
-    while (fgets(line, sizeof(line), p)) {
-        char *e = strstr(line, "entity ");
-        if (!e)
-            continue;
-        char *colon = strchr(e, ':');
-        char *hit = strstr(line, needle);
-        if (!colon || !hit || hit < colon)
-            continue;
-        char *start = colon + 2;
-        char *end = hit + strlen(needle);
-        if (end <= start || (size_t)(end - start) >= outlen)
-            continue;
-        memcpy(out, start, (size_t)(end - start));
-        out[end - start] = '\0';
-        found = 1;
-        break;
+    char *dump = malloc(32768);
+    if (!dump) {
+        close(fd);
+        kill(-pid, SIGKILL);
+        child_reap(pid, 1.0);
+        return -1;
     }
-    pclose(p);
+    ssize_t got = child_read_all(fd, dump, 32768, CAM_CMD_TIMEOUT_S);
+    close(fd);
+    if (got < 0)
+        kill(-pid, SIGKILL);
+    child_reap(pid, 1.0);
+    int found = 0;
+    char *line = got > 0 ? dump : NULL;
+    while (line && !found) {
+        char *nl = strchr(line, '\n');
+        if (nl)
+            *nl = '\0';
+        char *e = strstr(line, "entity ");
+        if (e) {
+            char *colon = strchr(e, ':');
+            char *hit = strstr(line, needle);
+            if (colon && hit && hit >= colon) {
+                char *start = colon + 2;
+                char *end = hit + strlen(needle);
+                if (end > start && (size_t)(end - start) < outlen) {
+                    memcpy(out, start, (size_t)(end - start));
+                    out[end - start] = '\0';
+                    found = 1;
+                }
+            }
+        }
+        line = nl ? nl + 1 : NULL;
+    }
+    free(dump);
     return found ? 0 : -1;
 }
 

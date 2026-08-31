@@ -17,6 +17,18 @@
 #define COOL_FLOW_HEATER_PCT 40     /* check heater duty */
 #define COOL_FLOW_CHECK_S    50     /* check window; 0 disables */
 /* Settle gate: baseline capture only from a stationary loop. */
+/* Diagnostic ownership: a flow or aa tool takes the thermal hardware
+ * for a bounded takeover and writes only through the guarded helpers.
+ * Take succeeds only from an idle engine; release reasserts the idle
+ * posture in one place. */
+int  cool_diag_take(void);
+void cool_diag_release(void);
+void cool_diag_pump(int on);
+void cool_diag_heater_pct(double pct);
+void cool_diag_fans_run(void);
+void cool_diag_fans_idle(void);
+void cool_diag_aa(long duty);
+
 #define COOL_SETTLE_DT_C     1.5f   /* |downstream - upstream| */
 #define COOL_SETTLE_DRIFT_C  0.4f   /* split-half mean difference */
 #define COOL_SETTLE_WIN      15     /* 1 Hz samples */
