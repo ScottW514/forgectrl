@@ -291,7 +291,7 @@ static void *record_thread(void *arg)
                     else if (!strncmp(rx, "error", 5) || !strncmp(rx, "ALARM", 5)) {
                         pthread_mutex_lock(&mu);
                         char why[112];
-                        rx[24] = ' ';   /* the code alone; frames can be long */
+                        rx[24] = '\0';   /* the code alone; frames can be long */
                         snprintf(why, sizeof(why), "the controller answered %.24s "
                                  "on line %d (%.40s)", rx, acked + 1,
                                  acked < ladder_n ? ladder_lines[acked] : "?");
