@@ -52,7 +52,9 @@
  * - COLD / WARM-UP: the coolant floor (cool_temp_min) is a fire gate
  *   under the ceiling with a degree of hysteresis; the warm-up gate
  *   (cool_temp_start) holds a session that opens under it with the
- *   loop heater on and the fans idle, releases at the gate, then
+ *   loop heater on and the fans idle, releases once the bulk reading
+ *   (a one-minute rolling minimum upstream, blind to the heater's
+ *   slugs passing the sensor) reaches the gate, then
  *   brings the run fans up and requests the flow check on a history
  *   the heater has not touched. Either at its off end (0) is no gate.
  *   A warm-up that stops making progress (the heater's plateau in a
@@ -161,6 +163,7 @@
 #define TEMP_MIN_HYST_C         1.0f    /* the floor clears this far above itself */
 #define WARMUP_STALL_S        300       /* no progress this long: named once */
 #define WARMUP_STALL_C          0.2f    /* what counts as progress */
+#define WARMUP_WIN            60        /* 1 Hz samples; the bulk, not a slug */
 /* Airflow floors (gates.c carries the rationale and the ranges). */
 #define TACH_EXHAUST_MIN_RPM     6400.0f
 #define TACH_INTAKE_MIN_RPM      2290.0f
@@ -400,6 +403,11 @@ static float warmup_gate_c = 0;     /* the start gate the session holds against 
 static float warmup_last_up = 0;    /* progress tracking for the stall warning */
 static double warmup_progress_at = 0;
 static int warmup_stall_warned = 0;
+/* The release judges the mixed bulk, not the heater's slug passing the
+ * sensor: the minimum of the upstream reading over the last WARMUP_WIN
+ * seconds (between slugs the reading falls back to the bulk). */
+static float warmup_win[WARMUP_WIN];
+static uint32_t warmup_win_n = 0;
 static int critical_alarm = 0;      /* latched coolant fault, this run session */
 /* The board temperatures, watched over the run session and named once
  * at its end; no gate behind them until the data says where one goes. */
@@ -1014,6 +1022,7 @@ static void flood_apply(int on, double now)
             warmup_last_up = up_now;
             warmup_progress_at = now;
             warmup_stall_warned = 0;
+            warmup_win_n = 0;
             fans_idle();
             heater_set_pct(flow_heater_pct);
             char msg[96];
@@ -1491,7 +1500,15 @@ static void engine_tick(void)
      * history). Under the gate a loop that stops warming is named once
      * and keeps holding. */
     if (cool_state == Cool_Warmup && have_up) {
-        if (up >= warmup_gate_c) {
+        warmup_win[warmup_win_n % WARMUP_WIN] = up;
+        warmup_win_n++;
+        float bulk = up;
+        if (warmup_win_n >= WARMUP_WIN) {
+            for (uint32_t i = 0; i < WARMUP_WIN; i++)
+                if (warmup_win[i] < bulk)
+                    bulk = warmup_win[i];
+        }
+        if (warmup_win_n >= WARMUP_WIN && bulk >= warmup_gate_c) {
             heater_set_pct(0);
             cool_state = Cool_Run;
             fans_run();
@@ -1505,13 +1522,13 @@ static void engine_tick(void)
             char msg[96];
             snprintf(msg, sizeof(msg),
                      "warm-up complete: coolant %.1f C at the %.0f C start "
-                     "gate - run", up, warmup_gate_c);
+                     "gate - run", bulk, warmup_gate_c);
             info(msg);
             pthread_mutex_lock(&mu);
             pub_reason[0] = '\0';
             pthread_mutex_unlock(&mu);
-        } else if (up >= warmup_last_up + WARMUP_STALL_C) {
-            warmup_last_up = up;
+        } else if (bulk >= warmup_last_up + WARMUP_STALL_C) {
+            warmup_last_up = bulk;
             warmup_progress_at = now;
         } else if (!warmup_stall_warned &&
                    now - warmup_progress_at > (double)WARMUP_STALL_S) {
@@ -1520,7 +1537,7 @@ static void engine_tick(void)
             snprintf(msg, sizeof(msg),
                      "warm-up stalled: coolant %.1f C flat for %d s, gate "
                      "%.0f C - lower it or warm the room",
-                     up, WARMUP_STALL_S, warmup_gate_c);
+                     bulk, WARMUP_STALL_S, warmup_gate_c);
             warn(msg);
         }
     }
