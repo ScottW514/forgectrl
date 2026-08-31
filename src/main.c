@@ -569,6 +569,10 @@ static int valid_temp_start(const char *v) { return valid_gate("cool_temp_start"
 static int valid_tec_on(const char *v)     { return valid_gate("cool_tec_on_c", v); }
 static int valid_tec_off(const char *v)    { return valid_gate("cool_tec_off_c", v); }
 static int valid_tec_present(const char *v){ return !strcmp(v, "0") || !strcmp(v, "1"); }
+static int valid_fire_q1a(const char *v)   { return valid_gate("cool_fire_q1_alert", v); }
+static int valid_fire_q1c(const char *v)   { return valid_gate("cool_fire_q1_critical", v); }
+static int valid_fire_q2a(const char *v)   { return valid_gate("cool_fire_q2_alert", v); }
+static int valid_fire_q2c(const char *v)   { return valid_gate("cool_fire_q2_critical", v); }
 static int valid_exhaust_rpm(const char *v) { return valid_gate("cool_tach_exhaust_min_rpm", v); }
 static int valid_intake_rpm(const char *v)  { return valid_gate("cool_tach_intake_min_rpm", v); }
 static int valid_air_rpm(const char *v)     { return valid_gate("cool_tach_air_assist_min_rpm", v); }
@@ -674,6 +678,10 @@ static const struct {
     { "cool_tec_present",       valid_tec_present, 0 },
     { "cool_tec_on_c",          valid_tec_on,      0 },
     { "cool_tec_off_c",         valid_tec_off,     0 },
+    { "cool_fire_q1_alert",     valid_fire_q1a,    0 },
+    { "cool_fire_q1_critical",  valid_fire_q1c,    0 },
+    { "cool_fire_q2_alert",     valid_fire_q2a,    0 },
+    { "cool_fire_q2_critical",  valid_fire_q2c,    0 },
     { "cool_cooldown_s",        valid_cool_s,      0 },
     { "cool_cooldown_max_s",    valid_cool_s,      0 },
     { "cool_tach_exhaust_min_rpm",    valid_exhaust_rpm, 0 },
@@ -903,7 +911,7 @@ static double setting_gate_value(const gate_setting_t *g, void *ctx)
 
 static int reply_settings(struct _u_response *res)
 {
-    char body[6144], val[128], mid[16], fwver[48];
+    char body[8192], val[128], mid[16], fwver[48];
     size_t off = 0;
 
     read_fw_version(fwver, sizeof(fwver));
@@ -928,7 +936,7 @@ static int reply_settings(struct _u_response *res)
      * its warnings from, and the record of any gate that is off by
      * value. The engine reports the same from its resolved tunables in
      * /cool/status and /status. */
-    char gates[2048];
+    char gates[3072];
     if (gates_json(gates, sizeof(gates), setting_gate_value, NULL) > 0)
         append(body, sizeof(body), &off, "\"gates\":%s,", gates);
     append(body, sizeof(body), &off,
@@ -1149,6 +1157,19 @@ static int cb_settings_post(const struct _u_request *req,
     if (!floor_off && teoff <= tmin)
         return reply_error(res, 400,
             "cool_tec_off_c must be above cool_temp_min");
+    /* The fire watch: within each quartile the alert must sit under the
+     * critical while both tiers are on (zero is a tier off). */
+    double fa, fc;
+    effective_temp(req, "cool_fire_q1_alert", 275.0, &fa);
+    effective_temp(req, "cool_fire_q1_critical", 688.0, &fc);
+    if (fa > 0 && fc > 0 && fa >= fc)
+        return reply_error(res, 400,
+            "cool_fire_q1_alert must be below cool_fire_q1_critical");
+    effective_temp(req, "cool_fire_q2_alert", 374.0, &fa);
+    effective_temp(req, "cool_fire_q2_critical", 1022.0, &fc);
+    if (fa > 0 && fc > 0 && fa >= fc)
+        return reply_error(res, 400,
+            "cool_fire_q2_alert must be below cool_fire_q2_critical");
 
     /* One atomic write for the whole request: no reader (grblHAL at $H,
      * gfhome at session start) can observe it half-applied, and a

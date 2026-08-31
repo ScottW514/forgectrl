@@ -42,6 +42,14 @@
  *   until the reading reaches the gate, then runs and verifies flow.
  *   Zero is the gate off. Kept between the floor and the ceiling by the
  *   settings cross-check.
+ * cool_fire_q1_alert .. cool_fire_q2_critical: the lid-IR fire watch,
+ *   the factory's shape. The four channels sorted ascending are the
+ *   quartiles; a sustained first or second quartile over its alert is
+ *   the pause tier, over its critical the fail tier. The defaults are
+ *   the thresholds the factory ships in every pulse header (quartiles
+ *   three and four it leaves at zero, off), and they sit far above a
+ *   fully lit lid lamp (161 to 177 counts) plus its drift: the watch
+ *   catches a developed flame, not a candle. Zero is that tier off.
  * cool_tec_on_c / cool_tec_off_c: the TEC's hysteresis pair on the
  *   upstream reading (on above, off below), used only when
  *   cool_tec_present is set. Not gates of their own (nothing trips);
@@ -76,6 +84,10 @@ static const gate_setting_t table[] = {
     { "cool_temp_start",            "warm_up",     16.0,  0.0,    40.0, 12.0,  20.0, -1 },
     { "cool_tec_on_c",              NULL,          20.0,  6.0,    32.0, 18.0,  24.0,  0 },
     { "cool_tec_off_c",             NULL,          18.0,  5.0,    31.0, 16.0,  22.0,  0 },
+    { "cool_fire_q1_alert",         "flame_q1_alert",    275.0, 0.0, 1023.0, 250.0,  450.0, -1 },
+    { "cool_fire_q1_critical",      "flame_q1_critical", 688.0, 0.0, 1023.0, 500.0, 1023.0, -1 },
+    { "cool_fire_q2_alert",         "flame_q2_alert",    374.0, 0.0, 1023.0, 300.0,  500.0, -1 },
+    { "cool_fire_q2_critical",      "flame_q2_critical", 1022.0, 0.0, 1023.0, 500.0, 1023.0, -1 },
     { "cool_flow_check_s",          "flow",        50.0,  0.0,   300.0, 30.0, 120.0, -1 },
     { "cool_flow_rise",             NULL,          14.4,  1.0,    40.0,  8.0,  16.0,  0 },
     { "cool_tach_exhaust_min_rpm",  "exhaust",   6400.0,  0.0, 20000.0, 5800.0, 7000.0, -1 },

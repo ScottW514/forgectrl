@@ -45,7 +45,7 @@ int main(void)
     const gate_setting_t *t = gate_settings(&n);
 
     printf("table shape\n");
-    CHECK(n == 14, "fourteen gate settings");
+    CHECK(n == 18, "eighteen gate settings");
     for (size_t i = 0; i < n; i++) {
         char msg[128];
         snprintf(msg, sizeof(msg), "%s: lo <= band_lo <= def <= band_hi <= hi", t[i].key);
@@ -100,6 +100,18 @@ int main(void)
     CHECK(ton && !ton->gate && ton->off_end == 0, "the TEC on threshold is not a gate of its own");
     CHECK(tof && !tof->gate && tof->off_end == 0, "the TEC off threshold is not a gate of its own");
     CHECK(tof->def < ton->def && flo->def < tof->def, "TEC off under on, both over the floor, by default");
+
+    const gate_setting_t *q1a = gate_setting_find("cool_fire_q1_alert");
+    const gate_setting_t *q1c = gate_setting_find("cool_fire_q1_critical");
+    const gate_setting_t *q2a = gate_setting_find("cool_fire_q2_alert");
+    const gate_setting_t *q2c = gate_setting_find("cool_fire_q2_critical");
+    CHECK(q1a && q1c && q2a && q2c, "every fire-watch key resolves");
+    CHECK(q1a->gate && !strcmp(q1a->gate, "flame_q1_alert") && q1a->off_end < 0 && q1a->lo == 0.0,
+          "the q1 alert is the flame_q1_alert gate, off at zero");
+    CHECK(q1c->gate && !strcmp(q1c->gate, "flame_q1_critical") && q1c->off_end < 0,
+          "the q1 critical is the flame_q1_critical gate, off at zero");
+    CHECK(q1a->def < q1c->def && q2a->def < q2c->def, "alert under critical in both quartiles by default");
+    CHECK(q1a->def > 200.0 && q2a->def > 200.0, "both alert defaults sit above a fully lit lamp");
 
     printf("floor hysteresis\n");
     CHECK(!gate_floor_trip(0, 5.0, 5.0, 1.0), "at the floor, not under it: no trip");
@@ -166,7 +178,7 @@ int main(void)
     CHECK(gate_effective(33.0, 30.0, 0, NULL) == 30.0, "a NULL from_header is accepted");
 
     printf("json\n");
-    char buf[2048];
+    char buf[3072];
     int r = gates_json(buf, sizeof(buf), value_default, NULL);
     CHECK(r > 0 && buf[0] == '{' && buf[r - 1] == '}', "gates_json is an object");
     CHECK(strstr(buf, "\"cool_temp_max\":{\"gate\":\"coolant_max\",\"def\":33,\"lo\":5,"

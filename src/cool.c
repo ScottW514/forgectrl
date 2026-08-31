@@ -96,11 +96,19 @@
  *   stops motion and locks the latch; laser power-good degradation
  *   during an armed window is warned. The four lid IR channels are
  *   polled every tick: their run-start baseline and session peaks are
- *   logged every job (the commissioning dataset), and when
- *   cool_fire_ir_delta is nonzero a sustained rise above baseline on
- *   any channel is a FIRE signal - motion stopped, latch locked,
- *   verdict FIRE with hold until the next run session. The delta ships
- *   0 (watch-only) until the sensors are characterized on the bench.
+ *   logged every job (the commissioning dataset), and through the run,
+ *   smoke and thermal phases the four readings sorted ascending (the
+ *   quartiles, the factory's statistic) are judged against two tiers
+ *   per quartile, the factory's own shape and defaults. A first or
+ *   second quartile over its alert threshold for two ticks is the
+ *   pause tier (verdict FLAME, hold, fire blocked; released once the
+ *   reading is back under for five ticks) - at least three of the four
+ *   channels lit well past the lamp. Over its critical threshold is
+ *   the fail tier: motion stopped, latch locked, verdict FIRE with
+ *   hold until the next run session, smoke airflow held. Zero is a
+ *   tier off; the thresholds sit above a fully lit lid lamp by
+ *   construction, so the lamp never trips them - and a candle-sized
+ *   flame stays under them too: this catches a developed fire.
  * - Controller silence: if the active controller stops reporting past
  *   REPORT_TIMEOUT_S, fire_ok goes false immediately and the engine
  *   stands down through the normal cooldown path (smoke clear is the
@@ -322,9 +330,9 @@
  * that read as a fire signal, sustained for FIRE_IR_TICKS consecutive
  * ticks. 0 = watch-only (log the dataset, never trip) - the shipped
  * default until the sensors are characterized on the bench and
- * cool_fire_ir_delta is set. GFCOOL_FIRE_IR_DELTA overrides. */
-#define FIRE_IR_DELTA      0
-#define FIRE_IR_TICKS      2
+ * the fire-watch tiers are armed. GFCOOL_FIRE_* override. */
+#define FIRE_IR_TICKS      2        /* sustained breach, alert or critical */
+#define FIRE_CLEAR_TICKS   5        /* a cleared alert releases after this */
 
 typedef enum {
     Cool_Idle = 0,
@@ -444,7 +452,12 @@ static int silent_warned = 0;
 static int silent_safed = 0;        /* hang dead-man fired this episode */
 
 /* Physical-evidence witnesses. */
-static uint32_t fire_ir_delta = FIRE_IR_DELTA;  /* 0 = watch-only */
+static float fire_q1_alert = 275.0f;    /* the factory's header defaults */
+static float fire_q1_critical = 688.0f;
+static float fire_q2_alert = 374.0f;
+static float fire_q2_critical = 1022.0f;
+static int flame_alert = 0;         /* the pause tier's hold */
+static int flame_clear_ticks = 0;
 static double last_armed_at = -1.0; /* last fresh armed report seen */
 static int emission_warned = 0;
 static int pgood_warned = 0;        /* once per run session */
@@ -737,8 +750,14 @@ static struct {
       LASER_HEAT_DENSITY,     &laser_heat_density, NULL, 0 },
     { "GFCOOL_AA_OFFSET_COUNTS", "cool_aa_offset_counts",
       0.0f,                   &aa_offset_counts, NULL, 0 },
-    { "GFCOOL_FIRE_IR_DELTA",   "cool_fire_ir_delta",
-      FIRE_IR_DELTA,          NULL,             &fire_ir_delta, 0 },
+    { "GFCOOL_FIRE_Q1_ALERT",   "cool_fire_q1_alert",
+      275.0f,                 &fire_q1_alert,   NULL, 0 },
+    { "GFCOOL_FIRE_Q1_CRIT",    "cool_fire_q1_critical",
+      688.0f,                 &fire_q1_critical, NULL, 0 },
+    { "GFCOOL_FIRE_Q2_ALERT",   "cool_fire_q2_alert",
+      374.0f,                 &fire_q2_alert,   NULL, 0 },
+    { "GFCOOL_FIRE_Q2_CRIT",    "cool_fire_q2_critical",
+      1022.0f,                &fire_q2_critical, NULL, 0 },
     { "GFCOOL_TACH_EXHAUST_MIN", "cool_tach_exhaust_min_rpm",
       TACH_EXHAUST_MIN_RPM,   &tach_exhaust_min_rpm, NULL, 0 },
     { "GFCOOL_TACH_INTAKE_MIN",  "cool_tach_intake_min_rpm",
@@ -770,6 +789,14 @@ static double engine_gate_value(const gate_setting_t *g, void *ctx)
         return tec_on_c;
     if (!strcmp(g->key, "cool_tec_off_c"))
         return tec_off_c;
+    if (!strcmp(g->key, "cool_fire_q1_alert"))
+        return fire_q1_alert;
+    if (!strcmp(g->key, "cool_fire_q1_critical"))
+        return fire_q1_critical;
+    if (!strcmp(g->key, "cool_fire_q2_alert"))
+        return fire_q2_alert;
+    if (!strcmp(g->key, "cool_fire_q2_critical"))
+        return fire_q2_critical;
     if (!strcmp(g->key, "cool_flow_check_s"))
         return flow_check_s;
     if (!strcmp(g->key, "cool_flow_rise"))
@@ -1082,6 +1109,8 @@ static void flood_apply(int on, double now)
             ir_base[i] = -1;
         ir_over_ticks = 0;
         fire_alarm = 0;
+        flame_alert = 0;
+        flame_clear_ticks = 0;
         pgood_warned = 0;
         hv_lo = hv_hi = -1;
     } else if (cool_state == Cool_Run || cool_state == Cool_Warmup) {
@@ -1313,10 +1342,10 @@ static void engine_tick(void)
     if (faults >= 0)
         last_faults = faults;
 
-    /* Lid IR fire watch + HV range. Baseline is the first complete
-     * reading of the run session; peaks build the commissioning
-     * dataset; the abort gate only arms once cool_fire_ir_delta is
-     * set from a characterized baseline. */
+    /* Lid IR fire watch + HV range. The run-session baseline and peaks
+     * build the commissioning dataset; the tiers judge the sorted
+     * readings (the quartiles) against the factory-shaped thresholds
+     * through the whole session tail. */
     long ir[4];
     int have_ir = 1;
     for (int i = 0; i < 4; i++) {
@@ -1331,24 +1360,56 @@ static void engine_tick(void)
             for (int i = 0; i < 4; i++)
                 ir_base[i] = ir_peak[i] = ir[i];
         } else {
-            int over = 0;
-            for (int i = 0; i < 4; i++) {
+            for (int i = 0; i < 4; i++)
                 if (ir[i] > ir_peak[i])
                     ir_peak[i] = ir[i];
-                if (fire_ir_delta > 0 &&
-                    ir[i] - ir_base[i] > (long)fire_ir_delta)
-                    over = 1;
-            }
-            ir_over_ticks = over ? ir_over_ticks + 1 : 0;
-            if (ir_over_ticks >= FIRE_IR_TICKS && !fire_alarm) {
-                fire_alarm = 1;
-                warn("LID IR FIRE SIGNAL - motion stopped, laser "
-                     "locked, smoke airflow held");
-                wr_attr("cnc/stop", "1");
-                wr_attr("cnc/laser_latch", "1");
-                fans_run();     /* full smoke-clear airflow */
-            }
         }
+    }
+    if (have_ir && (cool_state == Cool_Run || cool_state == Cool_Smoke ||
+                    cool_state == Cool_Thermal)) {
+        long q[4] = {ir[0], ir[1], ir[2], ir[3]};
+        for (int i = 0; i < 3; i++)         /* four values: sort them */
+            for (int j = i + 1; j < 4; j++)
+                if (q[j] < q[i]) { long t = q[i]; q[i] = q[j]; q[j] = t; }
+        int crit = (fire_q1_critical > 0 && q[0] > (long)fire_q1_critical) ||
+                   (fire_q2_critical > 0 && q[1] > (long)fire_q2_critical);
+        int alert = crit ||
+                    (fire_q1_alert > 0 && q[0] > (long)fire_q1_alert) ||
+                    (fire_q2_alert > 0 && q[1] > (long)fire_q2_alert);
+        ir_over_ticks = alert ? ir_over_ticks + 1 : 0;
+        if (crit && ir_over_ticks >= FIRE_IR_TICKS && !fire_alarm) {
+            fire_alarm = 1;
+            char msg[96];
+            snprintf(msg, sizeof(msg),
+                     "LID IR FIRE SIGNAL (quartiles %ld %ld) - motion "
+                     "stopped, laser locked, smoke airflow held", q[0], q[1]);
+            warn(msg);
+            wr_attr("cnc/stop", "1");
+            wr_attr("cnc/laser_latch", "1");
+            fans_run();     /* full smoke-clear airflow */
+        } else if (!crit && ir_over_ticks >= FIRE_IR_TICKS && !flame_alert
+                   && !fire_alarm) {
+            flame_alert = 1;
+            flame_clear_ticks = 0;
+            char msg[96];
+            snprintf(msg, sizeof(msg),
+                     "lid IR flame alert (quartiles %ld %ld) - job held, "
+                     "fire blocked until the signal clears", q[0], q[1]);
+            warn(msg);
+        }
+        if (flame_alert && !alert) {
+            if (++flame_clear_ticks >= FIRE_CLEAR_TICKS) {
+                flame_alert = 0;
+                info("lid IR flame alert cleared - released");
+                pthread_mutex_lock(&mu);
+                pub_reason[0] = '\0';
+                pthread_mutex_unlock(&mu);
+            }
+        } else if (flame_alert)
+            flame_clear_ticks = 0;
+    } else if (flame_alert) {
+        flame_alert = 0;        /* the session is over; nothing to hold */
+        flame_clear_ticks = 0;
     }
     if (cool_state == Cool_Run) {
         long hv = rd_long("pic/hv_current");
@@ -1367,7 +1428,10 @@ static void engine_tick(void)
     hv_hist_n++;
     pthread_mutex_lock(&mu);
     pub_fire_watch = fire_alarm ? "ALARM"
-                   : fire_ir_delta > 0 ? "armed" : "watch";
+                   : flame_alert ? "alert"
+                   : (fire_q1_alert > 0 || fire_q1_critical > 0 ||
+                      fire_q2_alert > 0 || fire_q2_critical > 0) ? "armed"
+                   : "watch";
     pthread_mutex_unlock(&mu);
 
     /* The airflow gates: a fan is judged while the run profile is
@@ -1866,6 +1930,7 @@ static void engine_tick(void)
      * window the engine cannot see must not fire. */
     int warming = cool_state == Cool_Warmup;
     const char *verdict = fire_alarm ? "FIRE"
+                        : flame_alert ? "FLAME"
                         : airflow_alarm ? "AIRFLOW"
                         : critical_alarm ? "CRITICAL"
                         : over_temp_gate ? "OVERTEMP"
@@ -1873,11 +1938,11 @@ static void engine_tick(void)
                         : warming ? "WARMUP"
                         : flow_verdict == Flow_Fault ? "FAULT"
                         : flow_verdict == Flow_Suspect ? "SUSPECT" : "OK";
-    int hold = fire_alarm || airflow_alarm || critical_alarm || over_temp_gate
-             || cold_gate || warming
+    int hold = fire_alarm || flame_alert || airflow_alarm || critical_alarm
+             || over_temp_gate || cold_gate || warming
              || (armed && flow_verdict != Flow_Normal);
-    int fire_ok = fresh && !fire_alarm && !airflow_alarm && !critical_alarm
-                && !over_temp_gate && !cold_gate && !warming
+    int fire_ok = fresh && !fire_alarm && !flame_alert && !airflow_alarm
+                && !critical_alarm && !over_temp_gate && !cold_gate && !warming
                 && flow_verdict != Flow_Fault;
 
     pthread_mutex_lock(&mu);

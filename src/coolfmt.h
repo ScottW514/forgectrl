@@ -21,7 +21,7 @@
 /* Fragment buffer sizes (bytes, NUL included). */
 #define COOL_VERDICT_MAX        12
 #define COOL_REASON_MAX         112
-#define COOL_GATES_OFF_JSON_MAX 128
+#define COOL_GATES_OFF_JSON_MAX 224
 #define COOL_LIMITS_JSON_MAX    256
 #define COOL_FAN_GATES_JSON_MAX 512
 

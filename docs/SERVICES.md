@@ -227,6 +227,10 @@ that table.
 | `cool_temp_start` | `warm_up` (a session opening under it holds with the heater on until it is reached; kept between the floor and the ceiling) | 16 C | 0 to 40 C | 12 to 20 C | 0 |
 | `cool_tec_on_c` | (the TEC's on threshold; kept above `cool_tec_off_c`) | 20 C | 6 to 32 C | 18 to 24 C | never |
 | `cool_tec_off_c` | (the TEC's off threshold; kept above the floor) | 18 C | 5 to 31 C | 16 to 22 C | never |
+| `cool_fire_q1_alert` | `flame_q1_alert` (lowest sorted lid-IR reading; pause tier) | 275 | 0 to 1023 | 250 to 450 | 0 |
+| `cool_fire_q1_critical` | `flame_q1_critical` (fail tier; kept above the alert) | 688 | 0 to 1023 | 500 to 1023 | 0 |
+| `cool_fire_q2_alert` | `flame_q2_alert` (second-lowest sorted reading; pause tier) | 374 | 0 to 1023 | 300 to 500 | 0 |
+| `cool_fire_q2_critical` | `flame_q2_critical` (fail tier; kept above the alert) | 1022 | 0 to 1023 | 500 to 1023 | 0 |
 | `cool_flow_check_s` | `flow` (flow verification) | 50 s | 0 to 300 s | 30 to 120 s | 0 |
 | `cool_flow_rise` | (tunes `flow`; set from flow calibrate) | 14.4 C | 1 to 40 C | 8 to 16 C | never |
 | `cool_tach_exhaust_min_rpm` | `exhaust` | 6400 rpm | 0 to 20000 | 5800 to 7000 | 0 |
@@ -308,12 +312,21 @@ The engine also runs the **physical-evidence witnesses** at its 1 Hz tick:
   warned once per session.
 - **Lid IR fire watch**: the four `pic/lid_ir_*` channels are polled every
   tick; each job logs its baseline and peaks (the characterization dataset).
-  When `cool_fire_ir_delta` is nonzero, a rise above the run-start baseline on
-  any channel sustained for two ticks is a FIRE signal: motion stopped, latch
-  locked, verdict `FIRE` with `hold` until the next run session, smoke-clear
-  airflow held. The delta ships 0 (watch-only) until the sensors are
-  characterized on the bench. `/cool/status` carries the watch state as
-  `fire_watch: watch | armed | ALARM`.
+  Through the run, smoke and thermal phases the four readings sorted
+  ascending (the quartiles, the factory's statistic) are judged against two
+  tiers per quartile, the factory's own shape: a first or second quartile
+  over its alert threshold for two ticks is the pause tier (verdict `FLAME`,
+  `hold`, fire blocked; released once the reading is back under the alert
+  for five ticks), over its critical threshold the fail tier (motion
+  stopped, latch locked, verdict `FIRE` with `hold` until the next run
+  session, smoke-clear airflow held). The defaults are the thresholds the
+  factory ships in every pulse header (quartiles three and four it leaves
+  at zero); they sit far above a fully lit lid lamp, so the lamp never
+  trips them, and a candle-sized flame stays under them too: this catches
+  a developed fire. Zero turns a tier off. The header's own `IR??` values
+  stay declared-ignored by the cloud client; the knobs are local.
+  `/cool/status` carries the watch state as
+  `fire_watch: watch | armed | alert | ALARM`.
 - **Airflow gates** (`src/airflow.c`): while the run profile is applied,
   the exhaust, both intakes and the air assist are held to a floor by
   tachometer and the purge-air fan by its current, each floor the effective
@@ -459,7 +472,8 @@ rename) at ~1 Hz and on every verdict change:
   `hold`, or `resume_ok` key takes the fail-safe value (`false`, `true`,
   `false`). The publisher never writes a document longer than its buffer.
 - `verdict`: `OK | SUSPECT | FAULT | OVERTEMP | COLD | WARMUP | CRITICAL |
-  AIRFLOW | FIRE`. `hold=true` asks the active controller for a feed hold;
+  AIRFLOW | FLAME | FIRE`. `FLAME` is the fire watch's pause tier (held
+  while the signal stands, released when it clears); `FIRE` its fail tier. `hold=true` asks the active controller for a feed hold;
   `resume_ok=true` signals recovery (auto-resume is the controller's call).
   `OVERTEMP` is the pause tier (the coolant over `cool_temp_max`, back in
   service under the resume gate); `COLD` (the coolant under `cool_temp_min`,
