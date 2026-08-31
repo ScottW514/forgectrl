@@ -574,6 +574,9 @@ static int valid_fire_q1a(const char *v)   { return valid_gate("cool_fire_q1_ale
 static int valid_fire_q1c(const char *v)   { return valid_gate("cool_fire_q1_critical", v); }
 static int valid_fire_q2a(const char *v)   { return valid_gate("cool_fire_q2_alert", v); }
 static int valid_fire_q2c(const char *v)   { return valid_gate("cool_fire_q2_critical", v); }
+static int valid_accel_xa(const char *v)   { return valid_gate("cool_accel_x_alert", v); }
+static int valid_accel_ya(const char *v)   { return valid_gate("cool_accel_y_alert", v); }
+static int valid_accel_ab(const char *v)   { return valid_gate("cool_accel_abort", v); }
 static int valid_exhaust_rpm(const char *v) { return valid_gate("cool_tach_exhaust_min_rpm", v); }
 static int valid_intake_rpm(const char *v)  { return valid_gate("cool_tach_intake_min_rpm", v); }
 static int valid_air_rpm(const char *v)     { return valid_gate("cool_tach_air_assist_min_rpm", v); }
@@ -683,6 +686,9 @@ static const struct {
     { "cool_fire_q1_critical",  valid_fire_q1c,    0 },
     { "cool_fire_q2_alert",     valid_fire_q2a,    0 },
     { "cool_fire_q2_critical",  valid_fire_q2c,    0 },
+    { "cool_accel_x_alert",     valid_accel_xa,    0 },
+    { "cool_accel_y_alert",     valid_accel_ya,    0 },
+    { "cool_accel_abort",       valid_accel_ab,    0 },
     { "cool_cooldown_s",        valid_cool_s,      0 },
     { "cool_cooldown_max_s",    valid_cool_s,      0 },
     { "cool_tach_exhaust_min_rpm",    valid_exhaust_rpm, 0 },
