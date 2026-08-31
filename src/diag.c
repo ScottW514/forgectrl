@@ -547,12 +547,20 @@ static void *runner_aa(void *arg)
     heater_pct(0);
     fans_idle();
     aa_write(AA_IDLE);
+    /* The edges are read against a trend-free baseline: the same
+     * stationary-loop gate the flow tools use (drift and down/up
+     * agreement), so a loop still mixing after a heater trial waits
+     * here instead of putting its trend into the first edge. */
     set_phase("settling with the fans idle");
-    for (int i = 0; i < 6; i++) {
+    {
         double d, u;
-        sample(&d, &u);
-        sleep(1);
-        if (aborted())
+        int rc = settle(&d, &u);
+        if (rc == -1) {
+            set_result("{\"error\":\"loop would not settle within %d s\"}",
+                       SETTLE_TIMEOUT_S);
+            goto out;
+        }
+        if (rc == -2)
             goto out_aborted;
     }
     for (int c = 0; c < AA_CYCLES; c++) {
