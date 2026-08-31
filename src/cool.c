@@ -123,6 +123,7 @@
  *   suspends its writes and publishes fire-blocked until they finish.
  */
 #define _GNU_SOURCE
+#include "accel.h"
 #include "airflow.h"
 #include "cool.h"
 #include "coolfmt.h"
@@ -467,6 +468,22 @@ static int ir_over_ticks = 0;
 static int fire_alarm = 0;          /* latched lid-IR fire signal */
 static long hv_lo = -1, hv_hi = -1; /* session hv_current range */
 static const char *pub_fire_watch = "watch";
+
+/* The head-accelerometer crash watch (accel.c): the LIS2HH12's own
+ * interrupt generators, armed over i2c-dev only while the laser is
+ * armed - liveness and gfhome read the accel through st_accel in
+ * unarmed sessions, and the watch owns the ODR and the +/-4 g full
+ * scale only inside the armed window. Thresholds in IG register
+ * units at +/-4 g (LSB ~15.6 mg), the factory's own cut-header
+ * values; zero is that tier off, Z is never armed (gravity). */
+static float accel_x_alert = 132.0f;
+static float accel_y_alert = 112.0f;
+static float accel_abort = 133.0f;
+static crash_watch_t crash_w;
+static int crash_hw_state = 0;      /* 0 unprobed, 1 open, -1 absent */
+static int crash_hw_armed = 0;
+static int crash_poll_errs = 0;     /* consecutive; 3 stands the watch down */
+static const char *pub_accel_watch = "watch";
 static long run_duty[3] = {-1, -1, -1};
 static long cmd_duty[3] = {-1, -1, -1};   /* what fans_run last wrote */
 static int eff_armed = 0;                 /* the armed window, as reported */
@@ -756,6 +773,12 @@ static struct {
       374.0f,                 &fire_q2_alert,   NULL, 0 },
     { "GFCOOL_FIRE_Q2_CRIT",    "cool_fire_q2_critical",
       1022.0f,                &fire_q2_critical, NULL, 0 },
+    { "GFCOOL_ACCEL_X_ALERT",   "cool_accel_x_alert",
+      132.0f,                 &accel_x_alert,   NULL, 0 },
+    { "GFCOOL_ACCEL_Y_ALERT",   "cool_accel_y_alert",
+      112.0f,                 &accel_y_alert,   NULL, 0 },
+    { "GFCOOL_ACCEL_ABORT",     "cool_accel_abort",
+      133.0f,                 &accel_abort,     NULL, 0 },
     { "GFCOOL_TACH_EXHAUST_MIN", "cool_tach_exhaust_min_rpm",
       TACH_EXHAUST_MIN_RPM,   &tach_exhaust_min_rpm, NULL, 0 },
     { "GFCOOL_TACH_INTAKE_MIN",  "cool_tach_intake_min_rpm",
@@ -795,6 +818,12 @@ static double engine_gate_value(const gate_setting_t *g, void *ctx)
         return fire_q2_alert;
     if (!strcmp(g->key, "cool_fire_q2_critical"))
         return fire_q2_critical;
+    if (!strcmp(g->key, "cool_accel_x_alert"))
+        return accel_x_alert;
+    if (!strcmp(g->key, "cool_accel_y_alert"))
+        return accel_y_alert;
+    if (!strcmp(g->key, "cool_accel_abort"))
+        return accel_abort;
     if (!strcmp(g->key, "cool_flow_check_s"))
         return flow_check_s;
     if (!strcmp(g->key, "cool_flow_rise"))
@@ -1194,6 +1223,8 @@ static void flood_apply(int on, double now)
         fire_alarm = 0;
         flame_alert = 0;
         flame_clear_ticks = 0;
+        crash_reset(&crash_w);
+        crash_poll_errs = 0;
         pgood_warned = 0;
         hv_lo = hv_hi = -1;
     } else if (cool_state == Cool_Run || cool_state == Cool_Warmup) {
@@ -1217,6 +1248,12 @@ static void flood_apply(int on, double now)
         airflow_alarm = 0;
         for (int i = 0; i < Fan_N; i++)
             airflow_reset(&fan_gate[i]);
+        /* The crash fault is the session's too: motion is stopped and
+         * the latch locked already, and the next job means the operator
+         * is back at the machine. */
+        if (crash_w.alarm)
+            info("head crash fault cleared with the run session");
+        crash_reset(&crash_w);
         /* The coolant critical fault likewise: the ceiling's pause tier
          * keeps holding while the loop is hot, and the next session
          * judges the critical line afresh. */
@@ -1505,6 +1542,92 @@ static void engine_tick(void)
                       fire_q2_alert > 0 || fire_q2_critical > 0) ? "armed"
                    : "watch";
     pthread_mutex_unlock(&mu);
+
+    /* The head-accelerometer crash watch: the factory mechanism, the
+     * LIS2HH12's own interrupt generators armed over i2c-dev while
+     * st_accel stays bound (accel.h carries the register story). Armed
+     * only inside the laser's armed window: liveness and gfhome read
+     * the accel through st_accel in unarmed sessions, and the watch
+     * owns the ODR and full scale only while armed. IG1 (per-axis
+     * alert) is the pause tier, released after quiet polls; IG2
+     * (shared abort) is the fail tier: motion stopped, latch locked,
+     * a fault for the rest of the run session. A head that stops
+     * answering stands the watch down for the session, said once. */
+    {
+        int want = armed && (accel_x_alert > 0 || accel_y_alert > 0 ||
+                             accel_abort > 0);
+        if (want && !crash_hw_armed && crash_hw_state >= 0 &&
+            crash_poll_errs < 3) {
+            if (crash_hw_state == 0) {
+                crash_hw_state = crash_hw_open() == 0 ? 1 : -1;
+                if (crash_hw_state < 0)
+                    warn("head accelerometer not answering - crash watch off");
+            }
+            if (crash_hw_state > 0) {
+                if (crash_hw_arm((int)accel_x_alert, (int)accel_y_alert,
+                                 (int)accel_abort) == 0) {
+                    crash_hw_armed = 1;
+                    char msg[96];
+                    snprintf(msg, sizeof(msg),
+                             "crash watch armed (alert x=%d y=%d abort=%d)",
+                             (int)accel_x_alert, (int)accel_y_alert,
+                             (int)accel_abort);
+                    info(msg);
+                } else {
+                    crash_hw_state = -1;
+                    warn("head accelerometer arm failed - crash watch off");
+                }
+            }
+        } else if (!want && crash_hw_armed) {
+            crash_hw_disarm();
+            crash_hw_armed = 0;
+            crash_poll_errs = 0;
+        }
+        if (crash_hw_armed) {
+            unsigned s1, s2;
+            if (crash_hw_poll(&s1, &s2) == 0) {
+                crash_poll_errs = 0;
+                char msg[96];
+                switch (crash_tick(&crash_w, s1, s2)) {
+                case CrashEv_Alarm:
+                    snprintf(msg, sizeof(msg),
+                             "HEAD CRASH SIGNAL (axes %s) - motion stopped, "
+                             "laser locked", crash_axes_name(crash_w.axes));
+                    warn(msg);
+                    wr_attr("cnc/stop", "1");
+                    wr_attr("cnc/laser_latch", "1");
+                    break;
+                case CrashEv_Alert:
+                    snprintf(msg, sizeof(msg),
+                             "head bump alert (axes %s) - job held, fire "
+                             "blocked until the signal clears",
+                             crash_axes_name(crash_w.axes));
+                    warn(msg);
+                    break;
+                case CrashEv_Released:
+                    info("head bump alert cleared - released");
+                    pthread_mutex_lock(&mu);
+                    pub_reason[0] = '\0';
+                    pthread_mutex_unlock(&mu);
+                    break;
+                default:
+                    break;
+                }
+            } else if (++crash_poll_errs >= 3) {
+                crash_hw_disarm();
+                crash_hw_armed = 0;
+                warn("head accelerometer stopped answering - crash watch "
+                     "down for this session");
+            }
+        }
+        pthread_mutex_lock(&mu);
+        pub_accel_watch = crash_w.alarm ? "ALARM"
+                        : crash_w.alert ? "alert"
+                        : crash_hw_state < 0 || crash_poll_errs >= 3 ? "off"
+                        : crash_hw_armed ? "armed"
+                        : "watch";
+        pthread_mutex_unlock(&mu);
+    }
 
     /* The airflow gates: a fan is judged while the run profile is
      * applied and the laser is armed, or the fan is commanded at the run
@@ -2002,7 +2125,9 @@ static void engine_tick(void)
      * window the engine cannot see must not fire. */
     int warming = cool_state == Cool_Warmup;
     const char *verdict = fire_alarm ? "FIRE"
+                        : crash_w.alarm ? "CRASH"
                         : flame_alert ? "FLAME"
+                        : crash_w.alert ? "BUMP"
                         : airflow_alarm ? "AIRFLOW"
                         : critical_alarm ? "CRITICAL"
                         : over_temp_gate ? "OVERTEMP"
@@ -2010,10 +2135,12 @@ static void engine_tick(void)
                         : warming ? "WARMUP"
                         : flow_verdict == Flow_Fault ? "FAULT"
                         : flow_verdict == Flow_Suspect ? "SUSPECT" : "OK";
-    int hold = fire_alarm || flame_alert || airflow_alarm || critical_alarm
+    int hold = fire_alarm || crash_w.alarm || flame_alert || crash_w.alert
+             || airflow_alarm || critical_alarm
              || over_temp_gate || cold_gate || warming
              || (armed && flow_verdict != Flow_Normal);
-    int fire_ok = fresh && !fire_alarm && !flame_alert && !airflow_alarm
+    int fire_ok = fresh && !fire_alarm && !crash_w.alarm && !flame_alert
+                && !crash_w.alert && !airflow_alarm
                 && !critical_alarm && !over_temp_gate && !cold_gate && !warming
                 && flow_verdict != Flow_Fault;
 
@@ -2089,6 +2216,13 @@ void cool_shutdown(void)
     /* The heater is this engine's own flow-check heat source; off is
      * always the right parting state, job or no job. */
     heater_set_pct(0);
+    /* The crash watch borrowed the accel's ODR and full scale; hand
+     * them back so st_accel's next one-shot reads at its own scale. */
+    if (crash_hw_armed) {
+        crash_hw_disarm();
+        crash_hw_armed = 0;
+    }
+    crash_hw_close();
     /* A busy machine keeps its orphaned controller running (see
      * super_shutdown), so idling the fans here would drop exhaust under
      * a live cut, and unlinking the verdict would feed-hold it the
@@ -2151,7 +2285,8 @@ int cool_status_json(char *buf, size_t len)
     double age = rep_at < 0 ? -1 : wall_s() - rep_at;
     coolfmt_status_t st = {
         .phase = pub_phase, .verdict = pub_verdict, .reason = pub_reason,
-        .fire_watch = pub_fire_watch, .fire_ok = pub_fire_ok, .hold = pub_hold,
+        .fire_watch = pub_fire_watch, .accel_watch = pub_accel_watch,
+        .fire_ok = pub_fire_ok, .hold = pub_hold,
         .armed = coolfmt_armed(rep_armed, age, REPORT_TIMEOUT_S),
         .down_c = pub_down, .up_c = pub_up,
         .report_age_s = age,

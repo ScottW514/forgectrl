@@ -59,6 +59,15 @@
  *   Pro sets is unknown (no Pro capture), so these defaults are chosen:
  *   around the observed Pro loop point, above the warm-up gate, above
  *   the dew point of an ordinary room.
+ * cool_accel_x_alert .. cool_accel_abort: the head-accelerometer
+ *   crash watch, the factory's shape on the LIS2HH12's own interrupt
+ *   generators. Values are IG threshold register units at the +/-4 g
+ *   run full scale (LSB = full scale/256, ~15.6 mg): the per-axis
+ *   alerts are the pause tier (IG1), the shared abort the fail tier
+ *   (IG2). The defaults are the factory's own cut and travel header
+ *   values (x 132 ~2.06 g, y 112 ~1.75 g, abort 133 ~2.08 g); normal
+ *   commanded motion reads under 0.2 g and a rail strike 1.8 g and
+ *   up. Z is never armed: gravity rides it. Zero is that tier off.
  * cool_flow_check_s: the flow interrogation window. Zero is no
  *   interrogation at all, the one off-by-value the engine has always
  *   had; the band is the window the characterization found useful.
@@ -89,6 +98,9 @@ static const gate_setting_t table[] = {
     { "cool_fire_q1_critical",      "flame_q1_critical", 688.0, 0.0, 1023.0, 500.0, 1023.0, -1 },
     { "cool_fire_q2_alert",         "flame_q2_alert",    374.0, 0.0, 1023.0, 300.0,  500.0, -1 },
     { "cool_fire_q2_critical",      "flame_q2_critical", 1022.0, 0.0, 1023.0, 500.0, 1023.0, -1 },
+    { "cool_accel_x_alert",         "crash_x_alert", 132.0, 0.0, 255.0, 100.0, 170.0, -1 },
+    { "cool_accel_y_alert",         "crash_y_alert", 112.0, 0.0, 255.0,  85.0, 145.0, -1 },
+    { "cool_accel_abort",           "crash_abort",   133.0, 0.0, 255.0, 100.0, 170.0, -1 },
     { "cool_flow_check_s",          "flow",        50.0,  0.0,   300.0, 30.0, 120.0, -1 },
     { "cool_flow_rise",             NULL,          14.4,  1.0,    40.0,  8.0,  16.0,  0 },
     { "cool_tach_exhaust_min_rpm",  "exhaust",   6400.0,  0.0, 20000.0, 5800.0, 7000.0, -1 },

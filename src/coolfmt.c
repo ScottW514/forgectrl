@@ -64,10 +64,12 @@ int coolfmt_status(char *buf, size_t len, const coolfmt_status_t *s)
                      "{\"phase\":\"%s\",\"verdict\":\"%s\",\"fire_ok\":%s,"
                      "\"hold\":%s,\"reason\":\"%s\",\"down_c\":%.2f,\"up_c\":%.2f,"
                      "\"report_age_s\":%.1f,\"armed\":%s,\"fire_watch\":\"%s\","
+                     "\"accel_watch\":\"%s\","
                      "\"gates_off\":%s,\"limits\":%s,\"fan_gates\":%s}",
                      s->phase, s->verdict, s->fire_ok ? "true" : "false",
                      s->hold ? "true" : "false", s->reason, s->down_c, s->up_c,
                      s->report_age_s, s->armed ? "true" : "false", s->fire_watch,
+                     s->accel_watch ? s->accel_watch : "watch",
                      s->gates_off, s->limits, s->fan_gates);
     return n < 0 || (size_t)n >= len ? -1 : 0;
 }

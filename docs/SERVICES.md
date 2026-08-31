@@ -238,6 +238,9 @@ that table.
 | `cool_fire_q1_critical` | `flame_q1_critical` (fail tier; kept above the alert) | 688 | 0 to 1023 | 500 to 1023 | 0 |
 | `cool_fire_q2_alert` | `flame_q2_alert` (second-lowest sorted reading; pause tier) | 374 | 0 to 1023 | 300 to 500 | 0 |
 | `cool_fire_q2_critical` | `flame_q2_critical` (fail tier; kept above the alert) | 1022 | 0 to 1023 | 500 to 1023 | 0 |
+| `cool_accel_x_alert` | `crash_x_alert` (head-accel X high event; pause tier) | 132 | 0 to 255 | 100 to 170 | 0 |
+| `cool_accel_y_alert` | `crash_y_alert` (head-accel Y high event; pause tier) | 112 | 0 to 255 | 85 to 145 | 0 |
+| `cool_accel_abort` | `crash_abort` (head-accel shared abort; fail tier) | 133 | 0 to 255 | 100 to 170 | 0 |
 | `cool_flow_check_s` | `flow` (flow verification) | 50 s | 0 to 300 s | 30 to 120 s | 0 |
 | `cool_flow_rise` | (tunes `flow`; set from flow calibrate) | 14.4 C | 1 to 40 C | 8 to 16 C | never |
 | `cool_tach_exhaust_min_rpm` | `exhaust` | 6400 rpm | 0 to 20000 | 5800 to 7000 | 0 |
@@ -334,6 +337,27 @@ The engine also runs the **physical-evidence witnesses** at its 1 Hz tick:
   stay declared-ignored by the cloud client; the knobs are local.
   `/cool/status` carries the watch state as
   `fire_watch: watch | armed | alert | ALARM`.
+- **Head-accelerometer crash watch** (`src/accel.c`): the factory's own
+  mechanism, the head LIS2HH12's two on-chip interrupt generators, armed
+  over i2c-dev (I2C_SLAVE_FORCE) while `st_accel` stays bound and polled at
+  the 1 Hz tick (the sources latch, so a poll misses nothing). IG1 takes
+  the per-axis X/Y alert thresholds (the pause tier: verdict `BUMP`, hold,
+  fire blocked; released after five quiet polls); IG2 takes the shared
+  abort threshold (the fail tier: motion stopped, latch locked, verdict
+  `CRASH` with `hold` for the rest of the run session). Thresholds are IG
+  register units at the +/-4 g run full scale (LSB = full scale/256,
+  ~15.6 mg, so 1 g ~= 64); the defaults are the factory's own header
+  values (~2 g), far above normal commanded motion (under 0.2 g). Z is
+  never armed: gravity rides it, and the factory ships Z zero too. The
+  watch arms only inside the laser's armed window - the liveness probe
+  and cloud homing read the accel through `st_accel` in unarmed sessions,
+  and the armed watch owns the part's ODR and full scale (st_accel leaves
+  it powered down between one-shots; the watch sets 800 Hz and +/-4 g,
+  re-asserts them every poll, and restores what it found on disarm). A
+  head that stops answering stands the watch down for the session, said
+  once. `/cool/status` carries the watch state as
+  `accel_watch: off | watch | armed | alert | ALARM` (`off` = the part
+  absent or not answering; `watch` = thresholds set, window not armed).
 - **Airflow gates** (`src/airflow.c`): while the run profile is applied,
   the exhaust, both intakes and the air assist are held to a floor by
   tachometer and the purge-air fan by its current, each floor the effective
@@ -479,8 +503,11 @@ rename) at ~1 Hz and on every verdict change:
   `hold`, or `resume_ok` key takes the fail-safe value (`false`, `true`,
   `false`). The publisher never writes a document longer than its buffer.
 - `verdict`: `OK | SUSPECT | FAULT | OVERTEMP | COLD | WARMUP | CRITICAL |
-  AIRFLOW | FLAME | FIRE`. `FLAME` is the fire watch's pause tier (held
-  while the signal stands, released when it clears); `FIRE` its fail tier. `hold=true` asks the active controller for a feed hold;
+  AIRFLOW | FLAME | FIRE | BUMP | CRASH`. `FLAME` is the fire watch's pause tier (held
+  while the signal stands, released when it clears); `FIRE` its fail tier.
+  `BUMP` is the crash watch's pause tier (released once the head sits
+  quiet); `CRASH` its fail tier, held for the rest of the run session.
+  `hold=true` asks the active controller for a feed hold;
   `resume_ok=true` signals recovery (auto-resume is the controller's call).
   `OVERTEMP` is the pause tier (the coolant over `cool_temp_max`, back in
   service under the resume gate); `COLD` (the coolant under `cool_temp_min`,
@@ -488,9 +515,9 @@ rename) at ~1 Hz and on every verdict change:
   `cool_temp_start`, held with the loop heater on and the fans idle until
   the gate is reached, then run with the flow check requested) are pause
   tiers too. `/cool/status` shows the warm-up as phase `warm-up`. `CRITICAL` (the coolant at or
-  over `cool_temp_critical_c` in a run session), `AIRFLOW` and `FIRE` are
+  over `cool_temp_critical_c` in a run session), `AIRFLOW`, `CRASH` and `FIRE` are
   the fail tier: they hold for the rest of the run session and never offer
-  a resume in it; `CRITICAL` and `AIRFLOW` end with the session (the
+  a resume in it; `CRITICAL`, `AIRFLOW` and `CRASH` end with the session (the
   ceiling's pause tier keeps holding while the loop is hot), `FIRE` holds
   until the next one starts. Controllers key on the flags, not the name; an
   unknown name with `hold=true` holds.

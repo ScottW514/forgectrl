@@ -158,7 +158,8 @@ int main(void)
     snprintf(gates_off, sizeof(gates_off), "[\"%0*d\"]", (int)sizeof(gates_off) - 5, 0);
     coolfmt_status_t st = {
         .phase = "cooldown", .verdict = "OVERTEMP", .reason = reason,
-        .fire_watch = "armed", .fire_ok = 0, .hold = 0, .armed = 0,
+        .fire_watch = "armed", .accel_watch = "armed",
+        .fire_ok = 0, .hold = 0, .armed = 0,
         .down_c = -273.15, .up_c = -273.15, .report_age_s = 99999999.9,
         .gates_off = gates_off, .limits = lim, .fan_gates = fg,
     };

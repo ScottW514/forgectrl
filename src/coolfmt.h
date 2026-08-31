@@ -54,7 +54,7 @@ int coolfmt_fan_gates(char *buf, size_t len, const coolfmt_fan_t *fans, size_t n
 
 /* The whole document. The three fragment strings are JSON already. */
 typedef struct {
-    const char *phase, *verdict, *reason, *fire_watch;
+    const char *phase, *verdict, *reason, *fire_watch, *accel_watch;
     int fire_ok, hold, armed;
     double down_c, up_c, report_age_s;
     const char *gates_off, *limits, *fan_gates;

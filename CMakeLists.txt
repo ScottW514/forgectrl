@@ -25,6 +25,7 @@ add_custom_command(
 
 add_executable(forgectrl
   src/main.c
+  src/accel.c
   src/airflow.c
   src/auth.c
   src/cam.c
@@ -122,7 +123,7 @@ target_link_libraries(cool_gate_test m)
 # tube's share subtracted from the rise and bounded, and a stopped pump
 # still read as stopped under a lit tube. Includes the engine source
 # against a fake sysfs tree and a fake clock; CI runs it after the build.
-add_executable(cool_flow_test tests/cool_flow_test.c src/gates.c src/airflow.c src/coolfmt.c)
+add_executable(cool_flow_test tests/cool_flow_test.c src/gates.c src/airflow.c src/accel.c src/coolfmt.c)
 target_compile_options(cool_flow_test PRIVATE -Wall -Wextra)
 target_link_libraries(cool_flow_test m pthread)
 
@@ -132,6 +133,12 @@ target_link_libraries(cool_flow_test m pthread)
 add_executable(airflow_test tests/airflow_test.c src/airflow.c)
 target_compile_options(airflow_test PRIVATE -Wall -Wextra)
 target_link_libraries(airflow_test m)
+
+# Host unit test for the crash-watch tier logic: the alert raised once
+# and released by the quiet count, the abort latched for the session,
+# the session reset, the axis names. CI runs it after the build.
+add_executable(accel_test tests/accel_test.c src/accel.c)
+target_compile_options(accel_test PRIVATE -Wall -Wextra)
 
 # Host unit test for the /cool/status document: the widest legal
 # rendering of every fragment fits the buffer the engine uses, the

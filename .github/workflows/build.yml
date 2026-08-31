@@ -40,6 +40,8 @@ jobs:
         run: ./build/cool_flow_test
       - name: Airflow gate
         run: ./build/airflow_test
+      - name: Crash-watch tiers
+        run: ./build/accel_test
       - name: Cooling status document
         run: ./build/coolfmt_test
       - name: Loopback peer check
