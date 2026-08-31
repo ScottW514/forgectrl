@@ -353,16 +353,24 @@ live controller). Position stays out by design: it changes per segment
 and is served from the homing-anchored kernel counters.
 
 The dose-curve recorder (`curverec.c`) measures the tube's own dose
-curve with no new emission path: `GET /curve/ladder.gcode` hands the
-operator a ladder file to run from their sender, `POST /curve/record`
-saves and clears `laser_floor_density` and `laser_dose_curve` (so the
-ladder measures the raw response; both are restored on every end path)
-and samples `pic/hv_current` and `head/beam_detect_analog` at 25 Hz,
-segmenting on the dark gaps when the ladder has played. `GET
-/curve/status` reports state (idle | waiting | recording | done |
-failed), the fitted density:light points, and the ready
-`laser_dose_curve` value; `POST /curve/stop` ends or aborts. The panel's
-Apply writes the fit through the ordinary settings path.
+curve from one panel press, with no new emission path: `POST
+/curve/record` refuses while the published state file shows a sender
+connected (the recorder becomes the machine's one Grbl connection for
+the run), saves and clears `laser_floor_density` and `laser_dose_curve`
+(so the ladder measures the raw response; both are restored on every
+end path), streams the ladder job itself over the local Grbl socket
+with ok-per-line flow control - absolute from X0 Y0, one 100 mm line
+per rung, the operator's button press starting the fire with every arm
+gate standing - and samples `pic/hv_current` and
+`head/beam_detect_analog` at 25 Hz, segmenting on the dark gaps when
+the ladder has played. `GET /curve/status` reports state (idle |
+waiting | recording | done | failed), the fitted density:light points,
+and the ready `laser_dose_curve` value; `POST /curve/stop` ends or
+aborts; `GET /curve/ladder.gcode` serves the exact job the recorder
+streams, for inspection. The panel's Apply writes the fit through the
+ordinary settings path. This is the one sanctioned Grbl-socket use in
+the daemon: gated on the state file's sender flag, local only, one
+line in flight.
 
 `POST /cool/state`, query or form parameters:
 

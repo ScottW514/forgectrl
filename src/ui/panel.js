@@ -724,6 +724,7 @@ function fill(force) {
   setF('laser_disarm_s', S.laser_disarm_s);
   setF('laser_floor_density', S.laser_floor_density);
   setF('laser_dose_curve', S.laser_dose_curve);
+  setF('laser_corner_gamma', S.laser_corner_gamma);
   setF('laser_pulse_ticks', S.laser_pulse_ticks);
   setF('laser_pulse_min_ticks', S.laser_pulse_min_ticks);
   setF('lid_policy', S.lid_policy || 'cancel');

@@ -359,7 +359,7 @@ class Mock:
             'cool_tach_air_assist_min_rpm': '', 'cool_purge_min_current': '',
             'cool_fan_grace_s': '', 'laser_button_timeout_s': '',
             'laser_disarm_s': '', 'laser_floor_density': '',
-            'laser_dose_curve': '',
+            'laser_dose_curve': '', 'laser_corner_gamma': '',
             'laser_pulse_ticks': '', 'laser_pulse_min_ticks': '',
             'rail_settle_s': '', 'lid_lamp_idle': '',
             'cloud_pause_backtrack_ticks': '', 'cloud_resume_lead_ticks': '', 'lid_policy': '',

@@ -162,14 +162,14 @@ var HELP = {
     p: [
       'Every pulse fires at full power, and the commanded power sets how many ticks of each period fire - the way the factory drives this tube. Every power level marks, low levels included, because no pulse is ever too weak to strike.',
       'The floor is the bottom of the power range as a percent of full: the lowest pulse density that still marks (10 on the bench machine). The controller loads it into $35 at every start and every job, so $35 is not a setting to type.',
-      'The pulse period and shortest pulse shape the dither: one tick is 35.5 us at the 28160 Hz stream rate, the default period of 20 ticks is the factory\'s 1.43 kHz, and a pulse shorter than 3 ticks does not strike this supply. Changes apply at the next job.'
+      'The pulse period and shortest pulse shape the dither: one tick is 35.5 us at the 28160 Hz stream rate, the default period of 20 ticks is the factory\'s 1.43 kHz, and a pulse shorter than 3 ticks does not strike this supply. Corner rolloff shapes how power falls where the head slows: 1 keeps the dose per millimeter constant into corners, higher values starve the slow spots where heat builds up (default 2). Changes apply at the next job.'
     ]
   },
   curve_rec: {
     t: 'Dose-curve recorder',
     d: 'panel/grbl#dose-curve-recorder',
     p: [
-      'Measures this tube\'s own dose curve, with no new way to fire: download the ladder G-code, press Record here, run the file from your sender and press the button as for any job. The machine cuts one line per power rung on scrap (100 mm of free X travel) while the panel records the tube current and the head\'s light sensor.',
+      'Measures this tube\'s own dose curve in one press: Record runs the ladder job itself - starting at X0 Y0, one 100 mm line per power rung, 7 rungs a millimeter apart - and you press the physical button to start the fire, as for any job. Put scrap under that area first. Close your sender before recording: the recorder takes the machine\'s one Grbl connection for the run.',
       'Record temporarily clears the power floor and the curve so the ladder measures the raw response, and puts them back when it ends. When the fit is shown, Apply writes it into the Dose curve field - Save makes it this machine\'s curve. Re-recording over time shows the tube aging.'
     ]
   },

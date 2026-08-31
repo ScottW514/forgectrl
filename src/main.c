@@ -595,6 +595,7 @@ static int valid_floor_pct(const char *v)  { return valid_range(v, 0, 100); }
 /* The measured dose curve: "off" or density:light percent pairs
  * ("10:0.5,...,100:100"); the controller validates the shape and falls
  * back loudly, this only bounds the alphabet and the length. */
+static int valid_corner_gamma(const char *v) { return valid_range(v, 0.25, 4); }
 static int valid_dose_curve(const char *v)
 {
     size_t n = strlen(v);
@@ -674,6 +675,7 @@ static const struct {
     { "laser_disarm_s",         valid_disarm_s,    0 },
     { "laser_floor_density",    valid_floor_pct,   0 },
     { "laser_dose_curve",       valid_dose_curve,  0 },
+    { "laser_corner_gamma",     valid_corner_gamma, 0 },
     { "laser_pulse_ticks",      valid_pulse_ticks, 0 },
     { "laser_pulse_min_ticks",  valid_pulse_ticks, 0 },
     { "rail_settle_s",          valid_settle_s,    0 },

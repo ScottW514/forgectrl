@@ -8,10 +8,13 @@
 
 #include <stddef.h>
 
-/* Start a recording: saves and clears the laser floor and curve keys so
- * the ladder measures the raw dose response, then samples the tube
- * current and the head thermopile until the ladder has played and gone
- * dark. 0 on start, -1 when one is already running. */
+/* Start a recording: refuses while a sender is connected (the recorder
+ * is the sender for this job), saves and clears the laser floor and
+ * curve keys so the ladder measures the raw dose response, streams the
+ * ladder over the local Grbl socket (absolute from X0 Y0; the operator's
+ * button press starts the fire, every gate standing), and samples the
+ * tube current and the head thermopile until the ladder has played and
+ * gone dark. 0 on start, -1 with the reason otherwise. */
 int curverec_start(char *err, size_t elen);
 
 /* Stop and fit now (the auto-stop needs 20 s of dark after the last

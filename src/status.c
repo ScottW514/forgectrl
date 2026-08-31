@@ -513,8 +513,11 @@ static void append_grbl(char *buf, size_t len, size_t *off)
         clock_gettime(CLOCK_MONOTONIC, &now);
         age = ((double)now.tv_sec + now.tv_nsec / 1e9) - strtod(ts + 10, NULL);
     }
-    if (age >= 0 && age < 3600)
-        append(buf, len, off, "\"grbl\":{\"age_s\":%.1f,\"report\":%s},", age, body);
+    /* A writer stamping %.3f can round a hair past the reader's clock:
+     * a sub-second negative age is simultaneity, not the future. */
+    if (age >= -1.0 && age < 3600)
+        append(buf, len, off, "\"grbl\":{\"age_s\":%.1f,\"report\":%s},",
+               age < 0 ? 0.0 : age, body);
 }
 
 int machine_status_json(char *buf, size_t len, const char *extra)
