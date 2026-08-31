@@ -564,6 +564,8 @@ static int valid_check_s(const char *v)    { return valid_gate("cool_flow_check_
 static int valid_temp_max(const char *v)   { return valid_gate("cool_temp_max", v); }
 static int valid_temp_resume(const char *v){ return valid_gate("cool_temp_resume", v); }
 static int valid_temp_critical(const char *v){ return valid_gate("cool_temp_critical_c", v); }
+static int valid_temp_min(const char *v)   { return valid_gate("cool_temp_min", v); }
+static int valid_temp_start(const char *v) { return valid_gate("cool_temp_start", v); }
 static int valid_exhaust_rpm(const char *v) { return valid_gate("cool_tach_exhaust_min_rpm", v); }
 static int valid_intake_rpm(const char *v)  { return valid_gate("cool_tach_intake_min_rpm", v); }
 static int valid_air_rpm(const char *v)     { return valid_gate("cool_tach_air_assist_min_rpm", v); }
@@ -664,6 +666,8 @@ static const struct {
     { "cool_temp_max",          valid_temp_max,    0 },
     { "cool_temp_resume",       valid_temp_resume, 0 },
     { "cool_temp_critical_c",   valid_temp_critical, 0 },
+    { "cool_temp_min",          valid_temp_min,    0 },
+    { "cool_temp_start",        valid_temp_start,  0 },
     { "cool_cooldown_s",        valid_cool_s,      0 },
     { "cool_cooldown_max_s",    valid_cool_s,      0 },
     { "cool_tach_exhaust_min_rpm",    valid_exhaust_rpm, 0 },
@@ -1109,6 +1113,25 @@ static int cb_settings_post(const struct _u_request *req,
     if (!ceiling_off && tcrit <= tmax)
         return reply_error(res, 400,
             "cool_temp_critical_c must be above cool_temp_max");
+    /* The low side: floor under start under ceiling, each relation held
+     * only between gates that are on (zero is a floor or a start gate
+     * off, its own off end). */
+    double tmin, tstart;
+    effective_temp(req, "cool_temp_min", 5.0, &tmin);
+    effective_temp(req, "cool_temp_start", 16.0, &tstart);
+    const gate_setting_t *flo = gate_setting_find("cool_temp_min");
+    const gate_setting_t *sta = gate_setting_find("cool_temp_start");
+    int floor_off = flo && tmin <= flo->lo;
+    int start_off = sta && tstart <= sta->lo;
+    if (!floor_off && !start_off && tmin >= tstart)
+        return reply_error(res, 400,
+            "cool_temp_min must be below cool_temp_start");
+    if (!start_off && !ceiling_off && tstart >= tmax)
+        return reply_error(res, 400,
+            "cool_temp_start must be below cool_temp_max");
+    if (!floor_off && !ceiling_off && tmin >= tmax)
+        return reply_error(res, 400,
+            "cool_temp_min must be below cool_temp_max");
 
     /* One atomic write for the whole request: no reader (grblHAL at $H,
      * gfhome at session start) can observe it half-applied, and a

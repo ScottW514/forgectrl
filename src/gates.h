@@ -61,6 +61,11 @@ const char *gate_state_name(gate_state_t s);     /* "ok" "warn" "off" */
  * whether the header's value is the one in force. */
 double gate_effective(double local, double header, int is_floor, int *from_header);
 
+/* The coolant floor's hysteresis: tripped under the floor, it stays
+ * tripped until the reading is hyst_c above the floor. Returns the new
+ * tripped state. */
+int gate_floor_trip(int tripped, double up_c, double floor_c, double hyst_c);
+
 /* Value source for the JSON helpers: the engine passes its resolved
  * tunables, the settings reply passes the file's values. */
 typedef double (*gate_value_fn)(const gate_setting_t *g, void *ctx);

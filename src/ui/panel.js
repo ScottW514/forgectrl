@@ -66,6 +66,8 @@ var CK = [
   'cool_temp_max',
   'cool_temp_resume',
   'cool_temp_critical_c',
+  'cool_temp_min',
+  'cool_temp_start',
   'cool_cooldown_s',
   'cool_cooldown_max_s',
   'cool_tach_exhaust_min_rpm',
@@ -117,13 +119,17 @@ var FT = {
   cool_flow_rise: 'td',
   cool_temp_max: 'ta',
   cool_temp_resume: 'ta',
-  cool_temp_critical_c: 'ta'
+  cool_temp_critical_c: 'ta',
+  cool_temp_min: 'ta',
+  cool_temp_start: 'ta'
 };
 var PH = {
   cool_flow_rise: [14.4, 'td'],
   cool_temp_max: [33, 'ta'],
   cool_temp_resume: [31, 'ta'],
-  cool_temp_critical_c: [38, 'ta']
+  cool_temp_critical_c: [38, 'ta'],
+  cool_temp_min: [5, 'ta'],
+  cool_temp_start: [16, 'ta']
 };
 var orig = {};
 /* The gate settings (S.gates, from /settings): each carries its legal
@@ -134,6 +140,8 @@ var GN = {
   cool_temp_max: 'Coolant ceiling',
   cool_temp_resume: 'Resume gate',
   cool_temp_critical_c: 'Coolant critical',
+  cool_temp_min: 'Coolant floor',
+  cool_temp_start: 'Warm-up gate',
   cool_flow_check_s: 'Flow check window',
   cool_flow_rise: 'Flow fault rise',
   cool_tach_exhaust_min_rpm: 'Exhaust floor',
@@ -144,6 +152,8 @@ var GN = {
 };
 var GG = {
   coolant_max: 'the coolant ceiling',
+  coolant_min: 'the coolant floor',
+  warm_up: 'the warm-up hold',
   flow: 'coolant flow verification',
   exhaust: 'the exhaust fan',
   intake: 'the intake fans',

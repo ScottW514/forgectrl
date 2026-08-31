@@ -49,6 +49,15 @@
  *   cooling). A session that never had the armed window open (a
  *   homing motion, a hunt, a dark job) has no smoke to clear: its
  *   smoke phase is zero length, the thermal gate still applies.
+ * - COLD / WARM-UP: the coolant floor (cool_temp_min) is a fire gate
+ *   under the ceiling with a degree of hysteresis; the warm-up gate
+ *   (cool_temp_start) holds a session that opens under it with the
+ *   loop heater on and the fans idle, releases at the gate, then
+ *   brings the run fans up and requests the flow check on a history
+ *   the heater has not touched. Either at its off end (0) is no gate.
+ *   A warm-up that stops making progress (the heater's plateau in a
+ *   cold room) is named once and keeps holding: no release under the
+ *   gate.
  * - OVER-TEMP: if the upstream temp exceeds the run ceiling the
  *   verdict goes OVERTEMP with hold=true and cooling airflow forced;
  *   it recovers (resume_ok) once the temp is back under the resume
@@ -147,6 +156,11 @@
 #define TEMP_MAX_C_DEFAULT     33.0f
 #define TEMP_RESUME_C_DEFAULT  31.0f
 #define TEMP_CRITICAL_C_DEFAULT 38.0f
+#define TEMP_MIN_C_DEFAULT      5.0f    /* the coolant floor, a fire gate */
+#define TEMP_START_C_DEFAULT   16.0f    /* the warm-up gate */
+#define TEMP_MIN_HYST_C         1.0f    /* the floor clears this far above itself */
+#define WARMUP_STALL_S        300       /* no progress this long: named once */
+#define WARMUP_STALL_C          0.2f    /* what counts as progress */
 /* Airflow floors (gates.c carries the rationale and the ranges). */
 #define TACH_EXHAUST_MIN_RPM     6400.0f
 #define TACH_INTAKE_MIN_RPM      2290.0f
@@ -300,6 +314,7 @@ typedef enum {
     Cool_Run,
     Cool_Smoke,      /* post-job smoke clear at run duty */
     Cool_Thermal,    /* reduced-duty airflow until temp recovers */
+    Cool_Warmup,     /* session held under the warm-up gate, heater on */
 } cool_state_t;
 
 /* One over-limit reading opens a suspicion; the next completed check
@@ -339,6 +354,8 @@ static uint32_t cooldown_max_s = COOLDOWN_MAX_S;
 static float temp_max_c = TEMP_MAX_C_DEFAULT;
 static float temp_resume_c = TEMP_RESUME_C_DEFAULT;
 static float temp_critical_c = TEMP_CRITICAL_C_DEFAULT;
+static float temp_min_c = TEMP_MIN_C_DEFAULT;
+static float temp_start_c = TEMP_START_C_DEFAULT;
 static float tach_exhaust_min_rpm = TACH_EXHAUST_MIN_RPM;
 static float tach_intake_min_rpm = TACH_INTAKE_MIN_RPM;
 static float tach_air_assist_min_rpm = TACH_AIR_ASSIST_MIN_RPM;
@@ -378,6 +395,11 @@ static float aa_offset_counts = 0.0f;   /* cool_aa_offset_counts, at duty 1023 *
 static long aa_cmd = 204;               /* the air-assist duty last commanded */
 static double phase_until;          /* smoke end / thermal timeout */
 static int over_temp_gate = 0;      /* hysteresis: >max sets, <=resume clears */
+static int cold_gate = 0;           /* hysteresis: <floor sets, >=floor+hyst clears */
+static float warmup_gate_c = 0;     /* the start gate the session holds against */
+static float warmup_last_up = 0;    /* progress tracking for the stall warning */
+static double warmup_progress_at = 0;
+static int warmup_stall_warned = 0;
 static int critical_alarm = 0;      /* latched coolant fault, this run session */
 /* The board temperatures, watched over the run session and named once
  * at its end; no gate behind them until the data says where one goes. */
@@ -418,6 +440,8 @@ static unsigned long verdict_seq = 0;
  * that would have tripped the shipped default is logged once. */
 static int gate_coolant_off = 0;
 static int gate_critical_off = 0;
+static int gate_floor_off = 0;
+static int gate_warmup_off = 0;
 static int gate_flow_off = 0;
 static int off_would_warned = 0;
 static char pub_gates_off[COOL_GATES_OFF_JSON_MAX] = "[]";
@@ -430,6 +454,8 @@ static char pub_gates_off[COOL_GATES_OFF_JSON_MAX] = "[]";
  * configured gap. Logged whenever the effective set changes. */
 static float eff_temp_max_c = TEMP_MAX_C_DEFAULT;
 static float eff_temp_resume_c = TEMP_RESUME_C_DEFAULT;
+static float eff_temp_min_c = TEMP_MIN_C_DEFAULT;
+static int eff_floor_from_header = 0;
 static int eff_from_header = 0;          /* the ceiling is the header's */
 static cool_limits_t eff_lim = {-1, -1, -1, -1, -1};
 static cool_limits_t last_logged_lim = {-2, -2, -2, -2, -2};
@@ -663,6 +689,10 @@ static struct {
       TEMP_RESUME_C_DEFAULT,  &temp_resume_c,   NULL, 0 },
     { "GFCOOL_TEMP_CRITICAL",   "cool_temp_critical_c",
       TEMP_CRITICAL_C_DEFAULT, &temp_critical_c, NULL, 0 },
+    { "GFCOOL_TEMP_MIN",        "cool_temp_min",
+      TEMP_MIN_C_DEFAULT,     &temp_min_c,      NULL, 0 },
+    { "GFCOOL_TEMP_START",      "cool_temp_start",
+      TEMP_START_C_DEFAULT,   &temp_start_c,    NULL, 0 },
     { "GFCOOL_FLOW_RISE",       "cool_flow_rise",
       FLOW_FAULT_RISE_C,      &flow_fault_rise, NULL, 0 },
     { "GFCOOL_CONFIRM_MAX_S",   "cool_confirm_max_s",
@@ -698,6 +728,10 @@ static double engine_gate_value(const gate_setting_t *g, void *ctx)
         return temp_resume_c;
     if (!strcmp(g->key, "cool_temp_critical_c"))
         return temp_critical_c;
+    if (!strcmp(g->key, "cool_temp_min"))
+        return temp_min_c;
+    if (!strcmp(g->key, "cool_temp_start"))
+        return temp_start_c;
     if (!strcmp(g->key, "cool_flow_check_s"))
         return flow_check_s;
     if (!strcmp(g->key, "cool_flow_rise"))
@@ -730,6 +764,10 @@ static void gates_apply(void)
             gate_coolant_off = st == Gate_Off;
         if (t[i].gate && !strcmp(t[i].gate, "coolant_critical"))
             gate_critical_off = st == Gate_Off;
+        if (t[i].gate && !strcmp(t[i].gate, "coolant_min"))
+            gate_floor_off = st == Gate_Off;
+        if (t[i].gate && !strcmp(t[i].gate, "warm_up"))
+            gate_warmup_off = st == Gate_Off;
         if (t[i].gate && !strcmp(t[i].gate, "flow"))
             gate_flow_off = st == Gate_Off;
         if (st == Gate_Off)
@@ -776,7 +814,11 @@ static void limits_apply(const cool_limits_t *hdr, int fresh)
     }
     cool_limits_t eff;
     eff.coolant_max_c = max_c;
-    eff.coolant_min_c = gate_effective(0.0, h->coolant_min_c, 1, NULL);
+    /* The floor: the job's header floor can only raise the local one;
+     * a local floor at its off end is no floor and no header raises it. */
+    int from_floor = 0;
+    eff.coolant_min_c = gate_floor_off ? 0.0
+        : gate_effective(temp_min_c, h->coolant_min_c, 1, &from_floor);
     /* A floor the operator set to zero is off and stays off; otherwise
      * a header floor can only raise it. */
     eff.exhaust_min_rpm = tach_exhaust_min_rpm <= 0.0f ? 0.0
@@ -788,21 +830,25 @@ static void limits_apply(const cool_limits_t *hdr, int fresh)
 
     int changed = max_c != last_logged_max ||
                   memcmp(&eff, &last_logged_lim, sizeof(eff)) != 0 ||
-                  eff_from_header != from;
+                  eff_from_header != from || eff_floor_from_header != from_floor;
     eff_temp_max_c = max_c;
     eff_temp_resume_c = resume_c;
     eff_from_header = from;
+    eff_temp_min_c = (float)eff.coolant_min_c;
+    eff_floor_from_header = from_floor;
     eff_lim = eff;
     if (changed) {
         last_logged_max = max_c;
         last_logged_lim = eff;
         fflog(LOG_INFO, "cool: effective limits: coolant ceiling %.1f C "
               "(local %.1f, header %s%.1f) resume %.1f C; floors coolant "
-              "%.1f C (no gate yet), exhaust %.0f rpm, intake %.0f rpm, air "
+              "%.1f C %s, exhaust %.0f rpm, intake %.0f rpm, air "
               "assist %.0f rpm",
               max_c, temp_max_c, h->coolant_max_c > 0 ? "" : "none ",
               h->coolant_max_c > 0 ? h->coolant_max_c : 0.0, resume_c,
-              eff.coolant_min_c, eff.exhaust_min_rpm, eff.intake_min_rpm,
+              eff.coolant_min_c,
+              gate_floor_off ? "(off)" : from_floor ? "(the job's)" : "(local)",
+              eff.exhaust_min_rpm, eff.intake_min_rpm,
               eff.air_assist_min_rpm);
         char lim[sizeof(pub_limits)];
         if (coolfmt_limits(lim, sizeof(lim), max_c, resume_c, temp_critical_c,
@@ -957,13 +1003,35 @@ static void flood_apply(int on, double now)
         if (gate_flow_off)
             fflog(LOG_WARNING, "cool: coolant flow is not verified this "
                   "job (cool_flow_check_s = 0)");
-        cool_state = Cool_Run;
-        fans_run();
+        /* A session that opens under the warm-up gate holds there: the
+         * loop heater on, the fans idle (their airflow cools the loop),
+         * fire blocked, until the upstream reading reaches the gate. */
+        float up_now = 0;
+        int have_up_now = read_temp("pic/water_temp_2", &up_now);
+        if (!gate_warmup_off && have_up_now && up_now < temp_start_c) {
+            cool_state = Cool_Warmup;
+            warmup_gate_c = temp_start_c;
+            warmup_last_up = up_now;
+            warmup_progress_at = now;
+            warmup_stall_warned = 0;
+            fans_idle();
+            heater_set_pct(flow_heater_pct);
+            char msg[96];
+            snprintf(msg, sizeof(msg),
+                     "WARM-UP: coolant %.1f C under the %.0f C start gate - "
+                     "heater on, hold", up_now, temp_start_c);
+            warn(msg);
+        } else {
+            cool_state = Cool_Run;
+            fans_run();
+        }
         if (flow_verdict == Flow_Suspect)
             flow_suspect_since = now;   /* budget is per run session */
         /* Request a check at run start; the loop starts it once the
-         * loop is settled, then repeats it on the re-check cadence. */
-        if (flow_check_s > 0 && !flow_check_active && !flow_check_pending) {
+         * loop is settled, then repeats it on the re-check cadence. A
+         * warm-up requests it at its release instead. */
+        if (cool_state == Cool_Run &&
+            flow_check_s > 0 && !flow_check_active && !flow_check_pending) {
             flow_check_pending = 1;
             flow_pending_since = now;
             flow_settle_warned = 0;
@@ -977,7 +1045,14 @@ static void flood_apply(int on, double now)
         fire_alarm = 0;
         pgood_warned = 0;
         hv_lo = hv_hi = -1;
-    } else if (cool_state == Cool_Run) {
+    } else if (cool_state == Cool_Run || cool_state == Cool_Warmup) {
+        if (cool_state == Cool_Warmup) {
+            heater_set_pct(0);
+            info("warm-up ended with the session");
+            pthread_mutex_lock(&mu);
+            pub_reason[0] = '\0';
+            pthread_mutex_unlock(&mu);
+        }
         cool_state = Cool_Smoke;
         phase_until = now + (session_armed ? (double)smoke_s : 0.0);
         /* A fan fault is the session's: it ends with it, because the next
@@ -1384,6 +1459,72 @@ static void engine_tick(void)
         }
     }
 
+    /* The floor: a fire gate under the ceiling with its own hysteresis
+     * (set under the floor, clear a degree above it). At its off end
+     * it is no gate. */
+    if (have_up && !gate_floor_off) {
+        int was = cold_gate;
+        cold_gate = gate_floor_trip(cold_gate, up, eff_temp_min_c, TEMP_MIN_HYST_C);
+        if (cold_gate && !was) {
+            char msg[96];
+            snprintf(msg, sizeof(msg),
+                     "COLD: coolant %.1f C under the %.1f C floor%s - fire "
+                     "blocked until %.1f C", up, eff_temp_min_c,
+                     eff_floor_from_header ? " (the job's)" : "",
+                     eff_temp_min_c + TEMP_MIN_HYST_C);
+            warn(msg);
+        } else if (!cold_gate && was) {
+            info("coolant temperature back over the floor");
+            pthread_mutex_lock(&mu);
+            pub_reason[0] = '\0';
+            pthread_mutex_unlock(&mu);
+        }
+    } else if (cold_gate) {
+        cold_gate = 0;
+        pthread_mutex_lock(&mu);
+        pub_reason[0] = '\0';
+        pthread_mutex_unlock(&mu);
+    }
+
+    /* The warm-up hold: released at the gate into a normal run session
+     * (run fans, the spin-up grace, the flow check requested on a fresh
+     * history). Under the gate a loop that stops warming is named once
+     * and keeps holding. */
+    if (cool_state == Cool_Warmup && have_up) {
+        if (up >= warmup_gate_c) {
+            heater_set_pct(0);
+            cool_state = Cool_Run;
+            fans_run();
+            fan_grace_until = now + (double)fan_grace_s;
+            down_hist_n = 0;
+            if (flow_check_s > 0 && !flow_check_active && !flow_check_pending) {
+                flow_check_pending = 1;
+                flow_pending_since = now;
+                flow_settle_warned = 0;
+            }
+            char msg[96];
+            snprintf(msg, sizeof(msg),
+                     "warm-up complete: coolant %.1f C at the %.0f C start "
+                     "gate - run", up, warmup_gate_c);
+            info(msg);
+            pthread_mutex_lock(&mu);
+            pub_reason[0] = '\0';
+            pthread_mutex_unlock(&mu);
+        } else if (up >= warmup_last_up + WARMUP_STALL_C) {
+            warmup_last_up = up;
+            warmup_progress_at = now;
+        } else if (!warmup_stall_warned &&
+                   now - warmup_progress_at > (double)WARMUP_STALL_S) {
+            warmup_stall_warned = 1;
+            char msg[96];
+            snprintf(msg, sizeof(msg),
+                     "warm-up stalled: coolant %.1f C flat for %d s, gate "
+                     "%.0f C - lower it or warm the room",
+                     up, WARMUP_STALL_S, warmup_gate_c);
+            warn(msg);
+        }
+    }
+
     /* The SoC's own thermal governor: it throttles the CPU at its
      * passive trip (85 C on this part) and powers the board off at its
      * critical one (90 C), with no help from here. A throttle is named
@@ -1639,19 +1780,25 @@ static void engine_tick(void)
      * hold, resume_ok (= !hold) signals recovery, fire_ok gates the
      * laser. fire_ok additionally requires a live report: an armed
      * window the engine cannot see must not fire. */
+    int warming = cool_state == Cool_Warmup;
     const char *verdict = fire_alarm ? "FIRE"
                         : airflow_alarm ? "AIRFLOW"
                         : critical_alarm ? "CRITICAL"
                         : over_temp_gate ? "OVERTEMP"
+                        : cold_gate ? "COLD"
+                        : warming ? "WARMUP"
                         : flow_verdict == Flow_Fault ? "FAULT"
                         : flow_verdict == Flow_Suspect ? "SUSPECT" : "OK";
     int hold = fire_alarm || airflow_alarm || critical_alarm || over_temp_gate
+             || cold_gate || warming
              || (armed && flow_verdict != Flow_Normal);
     int fire_ok = fresh && !fire_alarm && !airflow_alarm && !critical_alarm
-                && !over_temp_gate && flow_verdict != Flow_Fault;
+                && !over_temp_gate && !cold_gate && !warming
+                && flow_verdict != Flow_Fault;
 
     pthread_mutex_lock(&mu);
     pub_phase = cool_state == Cool_Run ? "run"
+              : cool_state == Cool_Warmup ? "warm-up"
               : cool_state == Cool_Smoke ? "smoke"
               : cool_state == Cool_Thermal ? "thermal" : "idle";
     pthread_mutex_unlock(&mu);

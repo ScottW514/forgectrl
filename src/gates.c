@@ -32,6 +32,16 @@
  *   gate (a ceiling at its off end leaves the line standing alone);
  *   70 C is past anything the loop reaches, so a line there is the
  *   gate off.
+ * cool_temp_min: the coolant floor under the ceiling, a fire gate with
+ *   a degree of hysteresis (cool.c). Cold coolant shocks a tube and a
+ *   TEC pulling under the dew point condenses on it; the factory's own
+ *   floor rides in the pulse header (CMrn) and can only raise this one.
+ *   Zero is the gate off.
+ * cool_temp_start: the warm-up gate. A run session that opens with the
+ *   coolant under it holds with the loop heater on and the fans idle
+ *   until the reading reaches the gate, then runs and verifies flow.
+ *   Zero is the gate off. Kept between the floor and the ceiling by the
+ *   settings cross-check.
  * cool_flow_check_s: the flow interrogation window. Zero is no
  *   interrogation at all, the one off-by-value the engine has always
  *   had; the band is the window the characterization found useful.
@@ -54,6 +64,8 @@ static const gate_setting_t table[] = {
     { "cool_temp_max",              "coolant_max", 33.0,  5.0,    60.0, 25.0,  38.0, +1 },
     { "cool_temp_resume",           NULL,          31.0,  5.0,    59.0, 20.0,  36.0,  0 },
     { "cool_temp_critical_c",       "coolant_critical", 38.0, 6.0, 70.0, 36.0, 45.0, +1 },
+    { "cool_temp_min",              "coolant_min",  5.0,  0.0,    40.0,  3.0,   8.0, -1 },
+    { "cool_temp_start",            "warm_up",     16.0,  0.0,    40.0, 12.0,  20.0, -1 },
     { "cool_flow_check_s",          "flow",        50.0,  0.0,   300.0, 30.0, 120.0, -1 },
     { "cool_flow_rise",             NULL,          14.4,  1.0,    40.0,  8.0,  16.0,  0 },
     { "cool_tach_exhaust_min_rpm",  "exhaust",   6400.0,  0.0, 20000.0, 5800.0, 7000.0, -1 },
@@ -122,6 +134,11 @@ double gate_effective(double local, double header, int is_floor, int *from_heade
     if (from_header)
         *from_header = use;
     return use ? header : local;
+}
+
+int gate_floor_trip(int tripped, double up_c, double floor_c, double hyst_c)
+{
+    return up_c < (tripped ? floor_c + hyst_c : floor_c);
 }
 
 /* %g keeps 33 as 33 and 14.4 as 14.4 without trailing zeros. */

@@ -45,7 +45,7 @@ int main(void)
     const gate_setting_t *t = gate_settings(&n);
 
     printf("table shape\n");
-    CHECK(n == 10, "ten gate settings");
+    CHECK(n == 12, "twelve gate settings");
     for (size_t i = 0; i < n; i++) {
         char msg[128];
         snprintf(msg, sizeof(msg), "%s: lo <= band_lo <= def <= band_hi <= hi", t[i].key);
@@ -87,6 +87,19 @@ int main(void)
     const gate_setting_t *crt = gate_setting_find("cool_temp_critical_c");
     CHECK(crt && crt->gate && !strcmp(crt->gate, "coolant_critical") && crt->off_end > 0 && crt->hi == 70.0,
           "the critical line is the coolant_critical gate, off at its top of 70 C");
+    const gate_setting_t *flo = gate_setting_find("cool_temp_min");
+    const gate_setting_t *sta = gate_setting_find("cool_temp_start");
+    CHECK(flo && flo->gate && !strcmp(flo->gate, "coolant_min") && flo->off_end < 0 && flo->lo == 0.0,
+          "the floor is the coolant_min gate, off at zero");
+    CHECK(sta && sta->gate && !strcmp(sta->gate, "warm_up") && sta->off_end < 0 && sta->lo == 0.0,
+          "the start gate is the warm_up gate, off at zero");
+    CHECK(flo->def < sta->def && sta->def < tmax->def, "floor under start under ceiling by default");
+
+    printf("floor hysteresis\n");
+    CHECK(!gate_floor_trip(0, 5.0, 5.0, 1.0), "at the floor, not under it: no trip");
+    CHECK(gate_floor_trip(0, 4.9, 5.0, 1.0), "under the floor trips");
+    CHECK(gate_floor_trip(1, 5.5, 5.0, 1.0), "tripped, it holds until the hysteresis clears");
+    CHECK(!gate_floor_trip(1, 6.0, 5.0, 1.0), "and clears a degree above the floor");
     CHECK(crt && crt->lo > tmax->lo && crt->hi > tmax->hi && crt->def > tmax->def,
           "the critical line sits above the ceiling at its floor, its top and its default");
     CHECK(crt && gate_state(crt, 70.0) == Gate_Off && gate_state(crt, 38.0) == Gate_Ok &&

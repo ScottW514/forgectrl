@@ -223,6 +223,8 @@ that table.
 | `cool_temp_max` | `coolant_max` (the run ceiling) | 33 C | 5 to 60 C | 25 to 38 C | 60 C |
 | `cool_temp_resume` | (follows the ceiling; kept below it) | 31 C | 5 to 59 C | 20 to 36 C | never |
 | `cool_temp_critical_c` | `coolant_critical` (the fail tier above the ceiling; kept above it while the ceiling gates) | 38 C | 6 to 70 C | 36 to 45 C | 70 C |
+| `cool_temp_min` | `coolant_min` (the floor, a fire gate; clears 1 C above itself; a header floor can only raise it) | 5 C | 0 to 40 C | 3 to 8 C | 0 |
+| `cool_temp_start` | `warm_up` (a session opening under it holds with the heater on until it is reached; kept between the floor and the ceiling) | 16 C | 0 to 40 C | 12 to 20 C | 0 |
 | `cool_flow_check_s` | `flow` (flow verification) | 50 s | 0 to 300 s | 30 to 120 s | 0 |
 | `cool_flow_rise` | (tunes `flow`; set from flow calibrate) | 14.4 C | 1 to 40 C | 8 to 16 C | never |
 | `cool_tach_exhaust_min_rpm` | `exhaust` | 6400 rpm | 0 to 20000 | 5800 to 7000 | 0 |
@@ -440,11 +442,15 @@ rename) at ~1 Hz and on every verdict change:
   its closing brace is a torn read, not a verdict; an absent `fire_ok`,
   `hold`, or `resume_ok` key takes the fail-safe value (`false`, `true`,
   `false`). The publisher never writes a document longer than its buffer.
-- `verdict`: `OK | SUSPECT | FAULT | OVERTEMP | CRITICAL | AIRFLOW | FIRE`.
-  `hold=true` asks the active controller for a feed hold; `resume_ok=true`
-  signals recovery below the resume gate (auto-resume is the controller's
-  call). `OVERTEMP` is the pause tier (the coolant over `cool_temp_max`,
-  back in service under the resume gate). `CRITICAL` (the coolant at or
+- `verdict`: `OK | SUSPECT | FAULT | OVERTEMP | COLD | WARMUP | CRITICAL |
+  AIRFLOW | FIRE`. `hold=true` asks the active controller for a feed hold;
+  `resume_ok=true` signals recovery (auto-resume is the controller's call).
+  `OVERTEMP` is the pause tier (the coolant over `cool_temp_max`, back in
+  service under the resume gate); `COLD` (the coolant under `cool_temp_min`,
+  back a degree above it) and `WARMUP` (a session opened under
+  `cool_temp_start`, held with the loop heater on and the fans idle until
+  the gate is reached, then run with the flow check requested) are pause
+  tiers too. `/cool/status` shows the warm-up as phase `warm-up`. `CRITICAL` (the coolant at or
   over `cool_temp_critical_c` in a run session), `AIRFLOW` and `FIRE` are
   the fail tier: they hold for the rest of the run session and never offer
   a resume in it; `CRITICAL` and `AIRFLOW` end with the session (the
@@ -527,7 +533,7 @@ remain only as manual emergency stops.
   power-off to recover); if the ladder fails, controllers stay down and
   `/mode` reports `motion-fault` (retry via `POST /mode`).
 
-## Pulse-device ownership [implemented: broker; rail policy: contract]
+## Pulse-device ownership [implemented]
 
 `/dev/glowforge` semantics (kernel details in `UAPI.md`): the device is
 **exclusive-open** (a second open fails EBUSY), the `flock` on it arms the
