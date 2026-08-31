@@ -288,8 +288,8 @@ have done; with a fan floor off, the first reading under the shipped default
 likewise; with `flow` off there is no heater interrogation at all and the
 run start says so. A header limit never overrules an off gate. What an off gate is not: a way to reach anything that is
 not a thermal gate. The hardware chain, the laser latch, the emission witness,
-the lid IR fire watch, the controller-silence dead-man and the motion-liveness
-gate are not numbers on the Machine tab.
+the controller-silence dead-man and the motion-liveness gate are not numbers
+on the Machine tab (the fire watch's thresholds are; its actions are not).
 
 Where it shows: at every run start the engine logs one line per gate setting
 (`cool: gate coolant_max OFF: cool_temp_max = 60 ...`, `cool: cool_temp_max =
