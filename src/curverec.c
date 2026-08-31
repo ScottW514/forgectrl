@@ -474,6 +474,10 @@ static void ladder_build(void)
     snprintf(ladder_lines[ladder_n++], 40, "M3");
     for (int i = 0; i < LADDER_N; i++) {
         snprintf(ladder_lines[ladder_n++], 40, "G0 X0 Y%d", i);
+        /* The rapid between rungs is only ~0.5 s and the fitter merges
+         * dark gaps up to a second (a low rung's own pulsing must not
+         * split it), so each rung is separated by a real dark dwell. */
+        snprintf(ladder_lines[ladder_n++], 40, "G4 P2");
         snprintf(ladder_lines[ladder_n++], 40, "S%d", (int)(LADDER_D[i] * 10.0));
         snprintf(ladder_lines[ladder_n++], 40, "G1 X100 F600");
     }
