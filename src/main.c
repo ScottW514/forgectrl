@@ -1737,6 +1737,12 @@ int main(int argc, char **argv)
      * 379 fds). Without ulfius' logger option MHD errors go to stderr,
      * which the service's log captures. */
     struct MHD_OptionItem mhd_ops[] = {
+        /* ulfius' own connection plumbing, required by its dispatcher
+         * and externalized for exactly this call: the per-request state
+         * is created by its URI logger and freed by its completion
+         * callback. */
+        { MHD_OPTION_NOTIFY_COMPLETED, (intptr_t)mhd_request_completed, NULL },
+        { MHD_OPTION_URI_LOG_CALLBACK, (intptr_t)ulfius_uri_logger, NULL },
         { MHD_OPTION_CONNECTION_LIMIT, 64, NULL },
         { MHD_OPTION_PER_IP_CONNECTION_LIMIT, 16, NULL },
         { MHD_OPTION_END, 0, NULL },
