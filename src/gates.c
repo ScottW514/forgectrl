@@ -53,7 +53,8 @@
  * cool_tec_on_c / cool_tec_off_c: the TEC's hysteresis pair on the
  *   upstream reading (on above, off below), used only when
  *   cool_tec_present is set. Not gates of their own (nothing trips);
- *   the settings cross-check keeps off under on and above the floor.
+ *   the settings cross-check keeps off under on, and the engine's
+ *   runtime clamp holds the TEC off within a degree of the floor.
  *   The factory turns a Pro's TEC on above its own threshold; what a
  *   Pro sets is unknown (no Pro capture), so these defaults are chosen:
  *   around the observed Pro loop point, above the warm-up gate, above

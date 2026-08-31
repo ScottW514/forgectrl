@@ -1148,17 +1148,16 @@ static int cb_settings_post(const struct _u_request *req,
      * bench drill drops the ceiling to the loop's own reading (the
      * gate-off trip leg, the critical-tier drill), and a start gate
      * above such a ceiling holds twice over - odd, and safe. */
-    /* The TEC's hysteresis pair: off under on, and the pair above the
-     * floor, so the TEC cannot chill the loop into the COLD hold. */
+    /* The TEC's hysteresis pair: off under on. The pair is not pinned
+     * above the floor here - a bench drill raises the floor over the
+     * live reading - because the engine's runtime clamp already forces
+     * the TEC off within a degree of the floor. */
     double teon, teoff;
     effective_temp(req, "cool_tec_on_c", 20.0, &teon);
     effective_temp(req, "cool_tec_off_c", 18.0, &teoff);
     if (teoff >= teon)
         return reply_error(res, 400,
             "cool_tec_off_c must be below cool_tec_on_c");
-    if (!floor_off && teoff <= tmin)
-        return reply_error(res, 400,
-            "cool_tec_off_c must be above cool_temp_min");
     /* The fire watch: within each quartile the alert must sit under the
      * critical while both tiers are on (zero is a tier off). */
     double fa, fc;

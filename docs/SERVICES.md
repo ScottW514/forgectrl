@@ -233,7 +233,7 @@ that table.
 | `cool_temp_min` | `coolant_min` (the floor, a fire gate; clears 1 C above itself; a header floor can only raise it) | 5 C | 0 to 40 C | 3 to 8 C | 0 |
 | `cool_temp_start` | `warm_up` (a session opening under it holds with the heater on until it is reached; kept above the floor) | 16 C | 0 to 40 C | 12 to 20 C | 0 |
 | `cool_tec_on_c` | (the TEC's on threshold; kept above `cool_tec_off_c`) | 20 C | 6 to 32 C | 18 to 24 C | never |
-| `cool_tec_off_c` | (the TEC's off threshold; kept above the floor) | 18 C | 5 to 31 C | 16 to 22 C | never |
+| `cool_tec_off_c` | (the TEC's off threshold; the runtime clamp holds the TEC off within a degree of the floor) | 18 C | 5 to 31 C | 16 to 22 C | never |
 | `cool_fire_q1_alert` | `flame_q1_alert` (lowest sorted lid-IR reading; pause tier) | 275 | 0 to 1023 | 250 to 450 | 0 |
 | `cool_fire_q1_critical` | `flame_q1_critical` (fail tier; kept above the alert) | 688 | 0 to 1023 | 500 to 1023 | 0 |
 | `cool_fire_q2_alert` | `flame_q2_alert` (second-lowest sorted reading; pause tier) | 374 | 0 to 1023 | 300 to 500 | 0 |
