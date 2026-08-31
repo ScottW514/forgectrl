@@ -44,6 +44,7 @@ add_executable(forgectrl
   src/sanitize.c
   src/settings.c
   src/status.c
+  src/curverec.c
   src/super.c
   src/update.c
   src/vpu_h264.c
@@ -70,6 +71,10 @@ target_link_libraries(status_idle_test m pthread)
 # memory utilization at once and CPU utilization once primed by a prior
 # read, and the document stays inside the handler's buffer. CI runs it
 # after the build.
+add_executable(curverec_fit_test tests/curverec_fit_test.c src/curverec.c src/settings.c src/fflog.c)
+target_compile_options(curverec_fit_test PRIVATE -Wall -Wextra)
+target_link_libraries(curverec_fit_test m pthread)
+
 add_executable(status_grbl_test tests/status_grbl_test.c src/status.c)
 target_compile_options(status_grbl_test PRIVATE -Wall -Wextra)
 target_link_libraries(status_grbl_test m pthread)

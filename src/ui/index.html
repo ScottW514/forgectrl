@@ -310,6 +310,18 @@
               ><input class="form-control form-control-sm" id="laser_pulse_min_ticks" inputmode="numeric" placeholder="3" />
             </div>
           </div>
+          <div class="frow">
+            <label for="laser_dose_curve">Dose curve</label
+            ><input class="form-control form-control-sm" id="laser_dose_curve" placeholder="(bench default)" />
+          </div>
+          <h3>Dose-curve recorder<button class="hlp" data-help="curve_rec" data-nolock="1" type="button">?</button></h3>
+          <div class="btnrow">
+            <a class="btn btn-outline-secondary btn-sm" href="/curve/ladder.gcode" download="dose-ladder.gcode">Ladder G-code</a>
+            <button class="btn btn-outline-primary btn-sm" id="curverec-start" type="button">Record</button>
+            <button class="btn btn-outline-secondary btn-sm" id="curverec-stop" type="button" hidden>Stop</button>
+            <button class="btn btn-outline-success btn-sm" id="curverec-apply" type="button" hidden>Apply to Dose curve</button>
+          </div>
+          <div id="curverec-status" class="mono"></div>
           <h3>Lid and interlock<button class="hlp" data-help="lid_policy" data-nolock="1" type="button">?</button></h3>
           <div class="frow">
             <label for="lid_policy">Opened during a job</label

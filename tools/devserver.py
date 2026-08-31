@@ -359,6 +359,7 @@ class Mock:
             'cool_tach_air_assist_min_rpm': '', 'cool_purge_min_current': '',
             'cool_fan_grace_s': '', 'laser_button_timeout_s': '',
             'laser_disarm_s': '', 'laser_floor_density': '',
+            'laser_dose_curve': '',
             'laser_pulse_ticks': '', 'laser_pulse_min_ticks': '',
             'rail_settle_s': '', 'lid_lamp_idle': '',
             'cloud_pause_backtrack_ticks': '', 'cloud_resume_lead_ticks': '', 'lid_policy': '',
@@ -568,6 +569,11 @@ class Mock:
                                                         'stream')):
                 svg = MOCK_SVG % time.strftime('%H:%M:%S')
                 return 200, {'Content-Type': 'image/svg+xml'}, svg.encode()
+            if path == '/curve/status':
+                return J(200, {'state': 'idle', 'reason': '', 'elapsed_s': 0,
+                               'samples': 0, 'curve': '', 'points': []})
+            if path == '/curve/ladder.gcode':
+                return 200, {'Content-Type': 'text/plain'}, b'; mock ladder\nM3\nS1000\nM5\n'
             if path == '/diag/status':
                 d = dict(self.diag)
                 if d['running']:

@@ -352,6 +352,18 @@ serves `grbl.settings` verbatim at `GET /grbl/settings` (404 with no
 live controller). Position stays out by design: it changes per segment
 and is served from the homing-anchored kernel counters.
 
+The dose-curve recorder (`curverec.c`) measures the tube's own dose
+curve with no new emission path: `GET /curve/ladder.gcode` hands the
+operator a ladder file to run from their sender, `POST /curve/record`
+saves and clears `laser_floor_density` and `laser_dose_curve` (so the
+ladder measures the raw response; both are restored on every end path)
+and samples `pic/hv_current` and `head/beam_detect_analog` at 25 Hz,
+segmenting on the dark gaps when the ladder has played. `GET
+/curve/status` reports state (idle | waiting | recording | done |
+failed), the fitted density:light points, and the ready
+`laser_dose_curve` value; `POST /curve/stop` ends or aborts. The panel's
+Apply writes the fit through the ordinary settings path.
+
 `POST /cool/state`, query or form parameters:
 
 ```

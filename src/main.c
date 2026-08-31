@@ -51,6 +51,7 @@
 #include "cam.h"
 #include "mp4mux.h"
 #include "cool.h"
+#include "curverec.h"
 #include "diag.h"
 #include "fflog.h"
 #include "gates.h"
@@ -591,6 +592,21 @@ static int valid_disarm_s(const char *v)   { return valid_range(v, 1, 3600); }
  * period at 1024). Density is the only dose model; the analog rendering
  * exists solely as the controller's host-test reference. */
 static int valid_floor_pct(const char *v)  { return valid_range(v, 0, 100); }
+/* The measured dose curve: "off" or density:light percent pairs
+ * ("10:0.5,...,100:100"); the controller validates the shape and falls
+ * back loudly, this only bounds the alphabet and the length. */
+static int valid_dose_curve(const char *v)
+{
+    size_t n = strlen(v);
+    if (n == 0 || n > 180)
+        return 0;
+    if (!strcmp(v, "off"))
+        return 1;
+    for (size_t i = 0; i < n; i++)
+        if (!((v[i] >= '0' && v[i] <= '9') || v[i] == ':' || v[i] == ',' || v[i] == '.'))
+            return 0;
+    return 1;
+}
 static int valid_pulse_ticks(const char *v){ return valid_range(v, 1, 1024); }
 static int valid_settle_s(const char *v)   { return valid_range(v, 0, 30); }
 
@@ -657,6 +673,7 @@ static const struct {
     { "laser_button_timeout_s", valid_button_s,    0 },
     { "laser_disarm_s",         valid_disarm_s,    0 },
     { "laser_floor_density",    valid_floor_pct,   0 },
+    { "laser_dose_curve",       valid_dose_curve,  0 },
     { "laser_pulse_ticks",      valid_pulse_ticks, 0 },
     { "laser_pulse_min_ticks",  valid_pulse_ticks, 0 },
     { "rail_settle_s",          valid_settle_s,    0 },
@@ -931,6 +948,65 @@ static int cb_machine_status(const struct _u_request *req,
     machine_status_json(body, sizeof(body), extra);
     ulfius_set_string_body_response(res, 200, body);
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
+static int cb_curve_record(const struct _u_request *req,
+                           struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    char err[96] = "";
+    if (curverec_start(err, sizeof(err)) != 0)
+        return reply_error(res, 409, err);
+    char body[1024];
+    curverec_status_json(body, sizeof(body));
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
+static int cb_curve_stop(const struct _u_request *req,
+                         struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    curverec_stop();
+    char body[1024];
+    curverec_status_json(body, sizeof(body));
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
+static int cb_curve_status(const struct _u_request *req,
+                           struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    char body[1024];
+    curverec_status_json(body, sizeof(body));
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
+static int cb_curve_ladder(const struct _u_request *req,
+                           struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    char body[2048];
+    if (curverec_ladder_gcode(body, sizeof(body)) != 0)
+        return reply_error(res, 500, "ladder does not fit");
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "text/plain");
+    ulfius_add_header_to_response(res, "Content-Disposition",
+                                  "attachment; filename=\"dose-ladder.gcode\"");
     return U_CALLBACK_CONTINUE;
 }
 
@@ -1526,6 +1602,14 @@ int main(int argc, char **argv)
                                &cb_settings_get, NULL);
     ulfius_add_endpoint_by_val(&inst, "GET", "/grbl/settings", NULL, 0,
                                &cb_grbl_settings, NULL);
+    ulfius_add_endpoint_by_val(&inst, "POST", "/curve/record", NULL, 0,
+                               &cb_curve_record, NULL);
+    ulfius_add_endpoint_by_val(&inst, "POST", "/curve/stop", NULL, 0,
+                               &cb_curve_stop, NULL);
+    ulfius_add_endpoint_by_val(&inst, "GET", "/curve/status", NULL, 0,
+                               &cb_curve_status, NULL);
+    ulfius_add_endpoint_by_val(&inst, "GET", "/curve/ladder.gcode", NULL, 0,
+                               &cb_curve_ladder, NULL);
     ulfius_add_endpoint_by_val(&inst, "POST", "/settings", NULL, 0,
                                &cb_settings_post, NULL);
     ulfius_add_endpoint_by_val(&inst, "GET", "/status", NULL, 0,

@@ -165,6 +165,14 @@ var HELP = {
       'The pulse period and shortest pulse shape the dither: one tick is 35.5 us at the 28160 Hz stream rate, the default period of 20 ticks is the factory\'s 1.43 kHz, and a pulse shorter than 3 ticks does not strike this supply. Changes apply at the next job.'
     ]
   },
+  curve_rec: {
+    t: 'Dose-curve recorder',
+    d: 'panel/grbl#dose-curve-recorder',
+    p: [
+      'Measures this tube\'s own dose curve, with no new way to fire: download the ladder G-code, press Record here, run the file from your sender and press the button as for any job. The machine cuts one line per power rung on scrap (100 mm of free X travel) while the panel records the tube current and the head\'s light sensor.',
+      'Record temporarily clears the power floor and the curve so the ladder measures the raw response, and puts them back when it ends. When the fit is shown, Apply writes it into the Dose curve field - Save makes it this machine\'s curve. Re-recording over time shows the tube aging.'
+    ]
+  },
   lid_policy: {
     t: 'Lid and interlock',
     d: 'panel/grbl#lid-and-interlock',

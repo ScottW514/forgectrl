@@ -32,6 +32,7 @@ var FIELDS_BASE = [
   'laser_button_timeout_s',
   'laser_disarm_s',
   'laser_floor_density',
+  'laser_dose_curve',
   'laser_pulse_ticks',
   'laser_pulse_min_ticks',
   'lid_policy',

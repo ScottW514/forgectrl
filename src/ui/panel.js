@@ -671,6 +671,33 @@ function renderGrbl() {
     g += txt('Controller', 'no report');
   $('grblinfo').innerHTML = g;
 }
+var CRPoll = null;
+function curverecRender(st) {
+  var el = $('curverec-status');
+  var live = st.state === 'waiting' || st.state === 'recording';
+  $('curverec-start').hidden = live;
+  $('curverec-stop').hidden = !live;
+  $('curverec-apply').hidden = !(st.state === 'done' && st.curve);
+  var t = st.state;
+  if (st.state === 'waiting') t = 'waiting for the ladder to fire (' + st.elapsed_s + ' s)';
+  if (st.state === 'recording') t = 'recording (' + st.elapsed_s + ' s, ' + st.samples + ' samples)';
+  if (st.state === 'failed') t = 'failed: ' + (st.reason || '');
+  if (st.state === 'done') {
+    t = 'fit: ' + st.curve;
+    var pts = st.points || [];
+    if (pts.length) {
+      t += ' | ';
+      for (var i = 0; i < pts.length; i++)
+        t += (i ? ', ' : '') + pts[i].density + '%\u2192' + pts[i].light.toFixed(1) + '%';
+    }
+  }
+  el.textContent = t;
+  if (live && !CRPoll) CRPoll = setInterval(curverecPoll, 2000);
+  if (!live && CRPoll) { clearInterval(CRPoll); CRPoll = null; }
+}
+function curverecPoll() {
+  fetch('/curve/status').then(function (r) { return r.json(); }).then(curverecRender).catch(function () {});
+}
 function fmtDur(s) {
   s = Math.max(0, Math.round(s || 0));
   if (s < 90) return s + ' s';
@@ -696,6 +723,7 @@ function fill(force) {
   setF('laser_button_timeout_s', S.laser_button_timeout_s);
   setF('laser_disarm_s', S.laser_disarm_s);
   setF('laser_floor_density', S.laser_floor_density);
+  setF('laser_dose_curve', S.laser_dose_curve);
   setF('laser_pulse_ticks', S.laser_pulse_ticks);
   setF('laser_pulse_min_ticks', S.laser_pulse_min_ticks);
   setF('lid_policy', S.lid_policy || 'cancel');
@@ -1494,5 +1522,20 @@ setInterval(loadDiag, 2500);
 loadSlots();
 jobPoll();
 renderGrbl();
+$('curverec-start').onclick = function () {
+  fx('/curve/record', { method: 'POST' }).then(function (r) { return r.json(); }).then(curverecRender).catch(function () {});
+};
+$('curverec-stop').onclick = function () {
+  fx('/curve/stop', { method: 'POST' }).then(function (r) { return r.json(); }).then(curverecRender).catch(function () {});
+};
+$('curverec-apply').onclick = function () {
+  fetch('/curve/status').then(function (r) { return r.json(); }).then(function (st) {
+    if (st.curve) {
+      $('laser_dose_curve').value = st.curve;
+      markDirty();
+    }
+  }).catch(function () {});
+};
+curverecPoll();
 tab();
 refreshSnap();
