@@ -1430,13 +1430,15 @@ static void engine_tick(void)
     } else if (em == 0)
         emission_warned = 0;
 
-    /* Power-good witness: warn once per session when the majority of
-     * the sampled window read not-good while the window was armed. */
+    /* Supply power-good witness: the supply drives the line good the whole
+     * time it is healthy (it follows neither HV_ENABLE nor emission), so
+     * a window in which most samples read not-good means the supply's
+     * supervisor reported a fault. Warn once per session. */
     if (fresh && armed && !pgood_warned) {
         long pg = rd_long("cnc/laser_pgood_sampled");
         if (pg >= 0 && pg < 128) {
             pgood_warned = 1;
-            warn("laser power-good degraded during the armed window");
+            warn("laser supply power-good dropped during the armed window");
         }
     }
 
