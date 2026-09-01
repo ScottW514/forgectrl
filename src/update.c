@@ -54,7 +54,7 @@
 #define KEY_RELEASE "/etc/forgefirm/keys/forgefirm-release.pub"
 #define KEY_GF_DIR  "/etc/forgefirm/keys/gf"
 #define LATEST_URL \
-    "https://github.com/ScottW514/forgefirm/releases/latest/download/forgefirm.fw"
+    "https://github.com/openglow-org/forgefirm/releases/latest/download/forgefirm.fw"
 /* An upload larger than any plausible archive is cut off (slot is
  * 200 MiB; a .fw compresses well below that). */
 #define UPLOAD_MAX  (256UL * 1024 * 1024)

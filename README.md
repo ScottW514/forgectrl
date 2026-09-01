@@ -1,11 +1,11 @@
 # forgectrl
 
-System control daemon for [ForgeFIRM](https://github.com/ScottW514/forgefirm)-powered
+System control daemon for [ForgeFIRM](https://github.com/openglow-org/forgefirm)-powered
 Glowforge lasers.
 
 forgectrl runs on the factory i.MX6 control board as the machine-services
 daemon (HTTP on port 8080). Motion is executed by exactly one of two
-controllers — [grblHAL-glowforge](https://github.com/ScottW514/grblHAL-glowforge)
+controllers — [grblHAL-glowforge](https://github.com/openglow-org/grblHAL-glowforge)
 (GRBL mode) or the gfcloud web-service client (factory cloud mode) — and
 forgectrl owns everything around them:
 
