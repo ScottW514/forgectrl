@@ -6,7 +6,8 @@
  * Slot inventory (ffboot -l), boot-target selection, ForgeFIRM release
  * check / download / apply, dev-archive upload, and factory restore
  * from the /data archive. The A/B slot scheme and its invariants are
- * documented in the forgefirm repo (docs/UPDATE-SYSTEM.md).
+ * documented at
+ * https://docs.forgefirm.org/technical/forgefirm/install-and-update/.
  *
  * Long operations run on a single detached worker (diag.c's model):
  * one job at a time, status polled from the UI. Every flash write

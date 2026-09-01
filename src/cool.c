@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: MIT
  *
  * Single owner of the thermal hardware (fans, pump, TEC, loop heater)
- * for every controller mode, per docs/SERVICES.md. Job state arrives
+ * for every controller mode, per the cooling-engine contract
+ * (https://docs.forgefirm.org/technical/forgefirm/cooling-engine/). Job state arrives
  * as level-triggered reports (POST /cool/state, ~1 Hz); the engine
  * publishes its verdict to /run/forgefirm/cooling.state (atomic
  * replace, ~1 Hz). Enforcement - the laser fire gate and feed-hold

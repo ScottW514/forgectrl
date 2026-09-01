@@ -39,7 +39,7 @@ forgectrl owns everything around them:
 
 The shared contract — switch maps, sensor conversions, hardware
 ownership, the cooling channels, mode supervision, pulse-device
-ownership, and logging — is [docs/SERVICES.md](docs/SERVICES.md).
+ownership, and logging — is [forgectrl on the documentation site](https://docs.forgefirm.org/technical/forgefirm/forgectrl/).
 
 ## The control panel (`GET /`)
 
