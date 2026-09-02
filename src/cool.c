@@ -871,6 +871,11 @@ static void gates_apply(void)
 {
     size_t n;
     const gate_setting_t *t = gate_settings(&n);
+    /* The values in force go out as one line, not one datagram per key:
+     * a burst of twenty overran the log socket's queue at every arm and
+     * took the lines around it with it. */
+    char inforce[768];
+    int off = 0;
     for (size_t i = 0; i < n; i++) {
         double v = engine_gate_value(&t[i], NULL);
         gate_state_t st = gate_state(&t[i], v);
@@ -894,14 +899,17 @@ static void gates_apply(void)
             fflog(LOG_WARNING, "cool: %s = %g is outside the recommended "
                   "%g to %g (default %g)", t[i].key, v,
                   t[i].band_lo, t[i].band_hi, t[i].def);
-        else
-            fflog(LOG_INFO, "cool: %s = %g", t[i].key, v);
+        else if (off >= 0 && off < (int)sizeof(inforce))
+            off += snprintf(inforce + off, sizeof(inforce) - (size_t)off,
+                            "%s%s=%g", off ? " " : "", t[i].key, v);
     }
-    char off[sizeof(pub_gates_off)];
-    if (gates_off_json(off, sizeof(off), engine_gate_value, NULL) < 0)
-        snprintf(off, sizeof(off), "[]");
+    if (off > 0)
+        fflog(LOG_INFO, "cool: settings in force: %s", inforce);
+    char off_json[sizeof(pub_gates_off)];
+    if (gates_off_json(off_json, sizeof(off_json), engine_gate_value, NULL) < 0)
+        snprintf(off_json, sizeof(off_json), "[]");
     pthread_mutex_lock(&mu);
-    snprintf(pub_gates_off, sizeof(pub_gates_off), "%s", off);
+    snprintf(pub_gates_off, sizeof(pub_gates_off), "%s", off_json);
     pthread_mutex_unlock(&mu);
 }
 
@@ -1380,12 +1388,14 @@ static void engine_tick(void)
          * freshly (re)started engine must not shoot down a healthy
          * orphaned controller that has not reported to it yet. */
         if (at >= 0 && ((armed && !silent_safed) || cnc_is_running())) {
+            /* The writes first, the words after: a log line waits for
+             * nothing, but nothing waits for a log line. */
+            safing_write("cnc/stop", "1");
+            safing_write("cnc/laser_latch", "1");
             if (!silent_safed)
                 warn("controller silent while armed/running - "
                      "stopping motion, locking laser");
             silent_safed = 1;
-            safing_write("cnc/stop", "1");
-            safing_write("cnc/laser_latch", "1");
         }
         mode = 0;
         armed = 0;
@@ -1451,12 +1461,12 @@ static void engine_tick(void)
         last_armed_at = now;
     long em = rd_long("cnc/laser_on_sampled");
     if (em > 0 && (last_armed_at < 0 || now - last_armed_at > 3.0)) {
+        safing_write("cnc/stop", "1");
+        safing_write("cnc/laser_latch", "1");
         if (!emission_warned)
             warn("LASER EMISSION SENSED with no armed window - "
                  "stopping motion, locking laser");
         emission_warned = 1;
-        safing_write("cnc/stop", "1");
-        safing_write("cnc/laser_latch", "1");
     } else if (em == 0)
         emission_warned = 0;
 
@@ -1525,10 +1535,10 @@ static void engine_tick(void)
             snprintf(msg, sizeof(msg),
                      "LID IR FIRE SIGNAL (quartiles %ld %ld) - motion "
                      "stopped, laser locked, smoke airflow held", q[0], q[1]);
-            warn(msg);
             safing_write("cnc/stop", "1");
             safing_write("cnc/laser_latch", "1");
             fans_run();     /* full smoke-clear airflow */
+            warn(msg);
         } else if (!crit && ir_over_ticks >= FIRE_IR_TICKS && !flame_alert
                    && !fire_alarm) {
             flame_alert = 1;
@@ -1626,9 +1636,9 @@ static void engine_tick(void)
                     snprintf(msg, sizeof(msg),
                              "HEAD CRASH SIGNAL (axes %s) - motion stopped, "
                              "laser locked", crash_axes_name(crash_w.axes));
-                    warn(msg);
                     safing_write("cnc/stop", "1");
                     safing_write("cnc/laser_latch", "1");
+                    warn(msg);
                     break;
                 case CrashEv_Alert:
                     snprintf(msg, sizeof(msg),
