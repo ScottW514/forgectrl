@@ -2269,12 +2269,22 @@ void cool_init(void)
 
     /* Idle posture. Purge air belongs to the armed/run story the same
      * way air assist does, but the factory holds it on continuously;
-     * keep that. */
+     * keep that. A daemon that starts next to an orphaned controller
+     * mid-job (a respawn over a crash) must not drop the exhaust under
+     * a live cut: a busy machine gets the cooldown duties instead, and
+     * the first fresh report opens the session that sets the run
+     * profile (the same rule cool_shutdown follows). */
     wr_attr("thermal/water_pump_on", "1");
     wr_attr("thermal/tec_on", "0");
     wr_attr("head/purge_air", "1");
     heater_set_pct(0);
-    fans_idle();
+    if (machine_is_idle())
+        fans_idle();
+    else {
+        fflog(LOG_WARNING, "cool: the machine is busy at engine start; "
+              "cooldown airflow until its controller reports");
+        fans_cool();
+    }
 
     engine_run = 1;
     if (pthread_create(&engine_th, NULL, engine_main, NULL) != 0) {

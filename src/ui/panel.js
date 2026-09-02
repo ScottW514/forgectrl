@@ -618,9 +618,52 @@ function rpm(v) {
 function degc(v) {
   return v > -100 ? dTa(v).toFixed(1) + ' ' + uT() : '\u2014';
 }
+var CL = null;          /* GET /cool/status: the engine's verdict */
+var MD = null;          /* GET /mode: the supervisor's state */
+function loadCool() {
+  fetch('/cool/status')
+    .then(function (r) {
+      return r.json();
+    })
+    .then(function (c) {
+      CL = c;
+      renderCooling();
+    })
+    .catch(function () {});
+}
+function loadMode() {
+  fetch('/mode')
+    .then(function (r) {
+      return r.json();
+    })
+    .then(function (m) {
+      MD = m;
+      renderMode();
+    })
+    .catch(function () {});
+}
+function renderMode() {
+  var el = $('ctl-state');
+  if (!el || !MD) return;
+  var st = MD.controller || '';
+  var fault = st === 'motion-fault';
+  el.textContent = st ? 'controller ' + st + (MD.pid ? ' (pid ' + MD.pid + ')' : '') : '';
+  el.className = 'msg ' + (fault ? 'b-bad' : st === 'running' ? 'b-ok' : 'b-warn');
+  $('ctl-retry').style.display = fault ? '' : 'none';
+}
+function retryMode() {
+  setMode(MD && MD.mode ? MD.mode : 'grbl');
+}
 function renderCooling() {
   if (!M.coolant) return;
   var g = '';
+  if (CL && CL.verdict) {
+    var ok = CL.verdict === 'OK';
+    g += txt('Verdict', CL.verdict + (CL.hold ? ', hold' : '') + (CL.fire_ok === false ? ', fire blocked' : ''),
+             ok ? 'b-ok' : 'b-bad');
+    if (CL.reason) g += txt('Reason', CL.reason, 'b-warn');
+    if (CL.phase) g += txt('Phase', CL.phase, 'b-dim');
+  }
   g += txt('Coolant out', degc(M.coolant.down_c));
   g += txt('Coolant in', degc(M.coolant.up_c));
   g += txt('Pump', M.coolant.pump ? 'on' : 'off', M.coolant.pump ? 'b-ok' : 'b-warn');
@@ -1565,6 +1608,10 @@ fetch('/settings')
 initHelp();
 loadMach();
 setInterval(loadMach, 2500);
+loadCool();
+setInterval(loadCool, 2500);
+loadMode();
+setInterval(loadMode, 2500);
 loadCam();
 setInterval(loadCam, 5000);
 loadDiag();

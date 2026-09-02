@@ -23,11 +23,11 @@ function esc(t) {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
-var DOC_BASE = 'https://docs.openglow.org/forgefirm/';
+var DOC_BASE = 'https://docs.forgefirm.org/';
 var HELP = {
   mode: {
     t: 'Controller mode',
-    d: 'panel/status#controller-mode',
+    d: 'usage/control-panel/#status',
     p: [
       'GRBL serves standard Grbl senders on port 23. Factory cloud runs the machine against the Glowforge web service like stock firmware.',
       'The two are mutually exclusive: switching stops one controller and starts the other (the machine must be idle) and persists across reboots.'
@@ -35,7 +35,7 @@ var HELP = {
   },
   motion: {
     t: 'Motion',
-    d: 'panel/status#motion',
+    d: 'usage/control-panel/#status',
     p: [
       'The controller state and the head position from the homing-anchored step counters. Position counters are not proof of physical motion; the head accelerometer is what the motion-liveness gate watches.',
       'The laser latch is the commanded state of the kernel lock; the emission line is what the beam sensor actually sees.'
@@ -43,7 +43,7 @@ var HELP = {
   },
   switches: {
     t: 'Switches',
-    d: 'panel/status#switches',
+    d: 'usage/control-panel/#status',
     p: [
       'The safety-chain readbacks. HV enable is the readback of the chain\'s HV_ENABLE output: on only while a run feeds the charge-pump watchdog with the lid closed.',
       'An open lid or an open remote interlock cuts the beam in hardware, whatever the software is doing.'
@@ -51,7 +51,7 @@ var HELP = {
   },
   camera: {
     t: 'Lid camera',
-    d: 'panel/status#lid-camera',
+    d: 'usage/control-panel/#status',
     p: [
       'A scaled snapshot, refreshed on demand; Live switches to the stream (H.264 when the browser supports it, MJPEG otherwise) and Stop returns to the snapshot.',
       'The cameras are off while the lid is open; that is the privacy gate, not a fault. One viewer at a time holds the stream.'
@@ -59,19 +59,19 @@ var HELP = {
   },
   units: {
     t: 'Display units',
-    d: 'panel/machine#units',
+    d: 'usage/settings/',
     p: ['Display only: values are stored and exchanged in metric, and conversion happens at the edge of the panel.']
   },
   homing: {
     t: 'Homing',
-    d: 'panel/machine#homing',
+    d: 'usage/homing/',
     p: [
       'How the machine finds its origin. Glowforge web-service homing uses the cameras and the service, like stock firmware; limit-switch homing needs the switch brackets fitted.'
     ]
   },
   home_pos: {
     t: 'Home position',
-    d: 'panel/machine#home-position',
+    d: 'usage/homing/',
     p: [
       'Machine coordinates the head is at after a completed homing cycle. For Glowforge web-service homing that is the factory home corner (back left) with the lens at the hall reference; leave blank until a measurement says otherwise.',
       'To calibrate: home, jog to a known reference, and enter the measured offsets.'
@@ -79,7 +79,7 @@ var HELP = {
   },
   cooling: {
     t: 'Cooling protection',
-    d: 'panel/machine#cooling-protection',
+    d: 'usage/cooling-and-fans/',
     p: [
       'Blank fields use the built-in values (the placeholders), measured on a factory machine; changes apply from the next job. The bands are per-machine: after a pump or coolant change, run Diagnostics, Cooling system, to verify or re-measure them.',
       'Every gate accepts a wide range on purpose: each has a recommended band, a value outside it is flagged under the fields, and the far end of the range (a ceiling at its maximum, a check window or a floor of 0) turns that gate off. A machine with a gate off says so on the Status tab and in its log at every job start.'
@@ -87,7 +87,7 @@ var HELP = {
   },
   coolant: {
     t: 'Coolant loop',
-    d: 'panel/machine#coolant-loop',
+    d: 'usage/cooling-and-fans/',
     p: [
       'The coolant ceiling pauses a job until the loop is back under the resume gate. The critical line above it is a fault that holds the job with no resume, like a stopped fan.',
       'The coolant floor blocks fire under it and clears a degree above it. A job that starts under the warm-up gate holds with the loop heater on and the fans idle until the coolant reaches the gate, then runs and verifies flow; a loop that stops warming keeps holding and says so. A floor or a warm-up gate of 0 is off.',
@@ -99,7 +99,7 @@ var HELP = {
   },
   flow: {
     t: 'Flow verification',
-    d: 'panel/machine#flow-verification',
+    d: 'usage/cooling-and-fans/',
     p: [
       'Each running job periodically verifies coolant flow by running the loop heater at the check duty for the check window and reading how far the downstream sensor climbs: past the fault rise means stagnant coolant.',
       'A suspicious reading is re-checked every re-check interval until the suspicion budget runs out, at which point the job is held.'
@@ -107,7 +107,7 @@ var HELP = {
   },
   gates: {
     t: 'Airflow gates',
-    d: 'panel/machine#airflow-gates',
+    d: 'usage/cooling-and-fans/',
     p: [
       'While a job runs, each fan is held to its floor (the exhaust, the intakes and the air assist by tachometer, the purge fan by its current) once the spin-up grace has passed; three seconds under a floor is a fault that holds the job with no resume.',
       'The floors were measured at the cut fan profile, so a fan is judged while the laser is armed or whenever it is commanded at that profile; a cloud hunt, which runs with its extraction fans off, is measured but not judged.'
@@ -115,7 +115,7 @@ var HELP = {
   },
   identity: {
     t: 'Machine identity',
-    d: 'panel/cloud#machine-identity',
+    d: 'usage/cloud-mode/',
     p: [
       'Credentials the machine signs in to the Glowforge web service with. Blank fields use the identity burned into the factory fuses; override only to stand in for another machine (64 hex digit password; the service hostname derives from the serial).',
       'Keep credentials secret; they cannot be changed once leaked. A blank password field keeps the current override.'
@@ -123,14 +123,14 @@ var HELP = {
   },
   session: {
     t: 'Homing session',
-    d: 'panel/cloud#homing-session',
+    d: 'usage/cloud-mode/',
     p: [
       'Overall budget for one web-service homing run (sign-in, camera uploads, hunt and corner moves). The controller aborts and alarms past this; 30 to 3600 seconds.'
     ]
   },
   pause: {
     t: 'Print pause',
-    d: 'panel/cloud#print-pause',
+    d: 'usage/cloud-mode/',
     p: [
       'Pressing the button during a cloud print pauses it: the head stops and retraces this many pulse ticks with the laser off; the next press resumes, moving forward with the laser off for the resume lead before it re-enables.',
       'The factory values are 2000 and 1950 (about 0.2 s at 10 kHz); 0 to 30000.',
@@ -139,7 +139,7 @@ var HELP = {
   },
   jobsize: {
     t: 'Job size',
-    d: 'panel/cloud#job-size',
+    d: 'usage/cloud-mode/',
     p: [
       'A cloud print arrives as one compressed file, held in memory and fed to the machine as it plays, so these bound memory rather than how long a job may be.',
       'The service compresses tens to one, which puts an hours-long print at a few megabytes: the defaults warn at 32 MiB and refuse past 128 MiB. 0 lifts either; 0 to 1073741824.'
@@ -147,7 +147,7 @@ var HELP = {
   },
   grbl: {
     t: 'Controller',
-    d: 'panel/grbl#controller',
+    d: 'usage/grbl-mode/',
     p: [
       'The motion controller speaks standard Grbl 1.1 (grblHAL): point your sender at the connection shown and use its device settings ($$) for the numbered GRBL parameters.',
       'The machine-level tunables on this tab are read by the controller from the shared machine settings.'
@@ -155,7 +155,7 @@ var HELP = {
   },
   arming: {
     t: 'Laser arming',
-    d: 'panel/grbl#laser-arming',
+    d: 'usage/grbl-mode/',
     p: [
       'A job that fires the laser waits for the physical button (the light comes on) before its first fire; if nobody presses within the button wait the job is refused.',
       'Once armed, the window closes after the disarm grace with the laser off, and the next job asks again. While a job runs the button pauses it, and pressing again resumes.'
@@ -163,7 +163,7 @@ var HELP = {
   },
   power_model: {
     t: 'Laser dose',
-    d: 'panel/grbl#laser-dose',
+    d: 'usage/grbl-mode/',
     p: [
       'Every pulse fires at full power, and the commanded power sets how many ticks of each period fire - the way the factory drives this tube. Every power level marks, low levels included, because no pulse is ever too weak to strike.',
       'The floor is the bottom of the power range as a percent of full: the lowest pulse density that still marks (10 on the bench machine). The controller loads it into $35 at every start and every job, so $35 is not a setting to type.',
@@ -172,7 +172,7 @@ var HELP = {
   },
   curve_rec: {
     t: 'Dose-curve recorder',
-    d: 'panel/grbl#dose-curve-recorder',
+    d: 'usage/diagnostics/',
     p: [
       'Measures this tube\'s own dose curve in one press: Record runs the ladder job itself - starting at X0 Y0, one 100 mm line per power rung, 7 rungs a millimeter apart - and you press the physical button to start the fire, as for any job. Put scrap under that area first. Close your sender before recording: the recorder takes the machine\'s one Grbl connection for the run.',
       'Record temporarily clears the power floor and the curve so the ladder measures the raw response, and puts them back when it ends. When the fit is shown, Apply writes it into the Dose curve field - Save makes it this machine\'s curve. Re-recording over time shows the tube aging.'
@@ -180,7 +180,7 @@ var HELP = {
   },
   lid_policy: {
     t: 'Lid and interlock',
-    d: 'panel/grbl#lid-and-interlock',
+    d: 'usage/grbl-mode/',
     p: [
       'The beam is cut by the hardware the instant the lid or the interlock loop opens, whatever is chosen here; this decides what the job does.',
       'Cancel is what the factory firmware does: the head stops, the job ends for the sender, and the head goes back to where the job started, lid open or not; the next job asks for the button again. Hold keeps the stock Grbl door behavior; the button still has to be pressed before the beam can return.'
@@ -188,21 +188,21 @@ var HELP = {
   },
   rail: {
     t: 'Motor rail',
-    d: 'panel/grbl#motor-rail',
+    d: 'usage/settings/',
     p: [
       'Off period observed before the 40 V motor rail is re-enabled on a controller takeover, so the stepper drivers always power up from a settled supply. 0 disables.'
     ]
   },
   lamp: {
     t: 'Lid lamp',
-    d: 'panel/grbl#lid-lamp',
+    d: 'usage/settings/',
     p: [
       'Brightness of the lid lamp while the machine is idle; applied immediately, at every start, and after a mode switch. Cloud mode drives the lamp itself while it runs. 0 is dark.'
     ]
   },
   diag: {
     t: 'Cooling system diagnostics',
-    d: 'panel/diagnostics#cooling-system',
+    d: 'usage/diagnostics/',
     p: [
       'Verify (about 10 minutes): one flow check with the pump running and one with it stopped, judged against the configured fault rise. It proves the threshold separates the two on this machine and coolant.',
       'Calibrate (about 30 minutes): three trials per case; measures both bands and recommends a threshold at the midpoint. Run it after replacing the coolant (a different blend carries heat differently), swapping the pump, or a failed verify.'
@@ -210,7 +210,7 @@ var HELP = {
   },
   log_levels: {
     t: 'Log levels',
-    d: 'panel/logs#log-levels',
+    d: 'usage/logging/',
     p: [
       'Every ForgeFIRM logger keeps its own directory under /data/log/forgefirm (size-capped, rotated). Levels are cumulative: warning keeps warnings and errors, debug keeps everything, off writes nothing; the two columns are independent.',
       'kernel is the glowforge driver and the rest of the kernel (its levels only filter what the kernel emits); system is everything else (SSH, WiFi, time sync). Changes apply at the next reboot.'
@@ -218,7 +218,7 @@ var HELP = {
   },
   syslog: {
     t: 'Remote syslog server',
-    d: 'panel/logs#remote-syslog',
+    d: 'usage/logging/',
     p: [
       'Forwards each logger at its remote level as RFC 5424 syslog. Nothing is sent unless a server is set and at least one logger\'s remote level is on.',
       'An unreachable server never holds up the machine: undeliverable messages are dropped. Applied at the next reboot.'
@@ -226,12 +226,12 @@ var HELP = {
   },
   log_viewer: {
     t: 'Log viewer',
-    d: 'panel/logs#log-viewer',
+    d: 'usage/logging/',
     p: ['The tail of one logger. Follow keeps it moving; Refresh fetches once. The viewer keeps the last few hundred kilobytes.']
   },
   log_export: {
     t: 'Export',
-    d: 'panel/logs#export',
+    d: 'usage/logging/',
     p: [
       'A .tar.gz of every logger\'s files plus a system snapshot (firmware version, kernel ring buffer, uptime, memory, disk, processes, effective log levels, settings with secrets masked).',
       'The sanitized bundle is meant for attaching to a public issue report; placeholders keep the same number for the same value, so hosts can still be told apart. The sanitizer removes what it knows and what it can recognize: skim the bundle before posting it. Untick to keep everything for your own use.'
@@ -239,7 +239,7 @@ var HELP = {
   },
   slots: {
     t: 'Firmware slots',
-    d: 'panel/system#firmware-slots',
+    d: 'install/updating/',
     p: [
       'The eMMC carries two firmware slots (the factory A/B scheme); the SD card is the development boot medium. Targets are probed first and unbootable ones are refused.',
       'Returning to ForgeFIRM from factory firmware: sh /data/ffboot -e<slot> at the factory console.'
@@ -247,14 +247,14 @@ var HELP = {
   },
   update: {
     t: 'ForgeFIRM update',
-    d: 'panel/system#update',
+    d: 'install/updating/',
     p: [
       'Downloads are verified against the ForgeFIRM release signing key before anything can be written. Installing writes the selected slot; the running system is untouched until you set next boot and reboot.'
     ]
   },
   install: {
     t: 'Install or restore firmware',
-    d: 'panel/system#install',
+    d: 'install/updating/',
     p: [
       'Development images upload straight from the browser (dev-key signed, release.sh --dev); unsigned images need an extra confirmation.',
       'After writing, use Set next boot above and reboot to switch.'
@@ -262,12 +262,12 @@ var HELP = {
   },
   restore: {
     t: 'Restore factory firmware',
-    d: 'panel/system#restore',
+    d: 'install/factory-restore/',
     p: ['Restores an archived factory image (md5-verified against the archive manifest first). The Glowforge cloud is never required.']
   },
   wifi: {
     t: 'Wireless',
-    d: 'panel/system#wireless',
+    d: 'usage/control-panel/#system',
     p: [
       'Region rules set the WiFi radio\'s allowed channels and transmit power. Automatic follows the country the access point advertises (802.11d), falling back to the most-restrictive world rules; selecting a country pins it regardless of the AP (2.4 GHz channels 12 and 13 and the 5 GHz bands vary by region).',
       'Applied immediately and at every boot. WiFi power save stays off: on a mains-powered machine it only adds latency.'
