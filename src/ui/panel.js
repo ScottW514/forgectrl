@@ -764,6 +764,7 @@ function fill(force) {
   setF('gfcloud_home_timeout_s', S.gfcloud_home_timeout_s);
   setF('cloud_pause_backtrack_ticks', S.cloud_pause_backtrack_ticks);
   setF('cloud_resume_lead_ticks', S.cloud_resume_lead_ticks);
+  setF('cloud_hold_max_s', S.cloud_hold_max_s);
   setF('pulse_warn_threshold_bytes', S.pulse_warn_threshold_bytes);
   setF('pulse_reject_threshold_bytes', S.pulse_reject_threshold_bytes);
   for (var ci = 0; ci < CK.length; ci++) setF(CK[ci], S[CK[ci]]);

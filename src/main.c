@@ -632,6 +632,9 @@ static int valid_lamp(const char *v)       { return valid_range(v, 0, 255); }
  * (unset = the factory's 2000 / 1950). The kernel reserves 32 KiB of
  * ring for the backtrack; both stay well inside it. */
 static int valid_ticks(const char *v)      { return valid_range(v, 0, 30000); }
+/* How long a cloud print may be held on the cooling verdict before it is
+ * canceled: the engine's fail tiers never offer a resume. */
+static int valid_hold_s(const char *v)     { return valid_range(v, 60, 7200); }
 
 /* Cloud-mode download guards: bytes of pulse body the client will hold in
  * memory (unset = 32 MiB warn, 128 MiB refuse; 0 lifts either). The body is
@@ -707,6 +710,7 @@ static const struct {
     { "lid_lamp_idle",          valid_lamp,        0 },
     { "cloud_pause_backtrack_ticks", valid_ticks,  0 },
     { "cloud_resume_lead_ticks",     valid_ticks,  0 },
+    { "cloud_hold_max_s",            valid_hold_s, 0 },
     { "pulse_warn_threshold_bytes",   valid_pulse_bytes, 0 },
     { "pulse_reject_threshold_bytes", valid_pulse_bytes, 0 },
     { "lid_policy",             valid_lid_policy,  0 },

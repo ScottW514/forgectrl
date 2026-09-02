@@ -133,7 +133,8 @@ var HELP = {
     d: 'panel/cloud#print-pause',
     p: [
       'Pressing the button during a cloud print pauses it: the head stops and retraces this many pulse ticks with the laser off; the next press resumes, moving forward with the laser off for the resume lead before it re-enables.',
-      'The factory values are 2000 and 1950 (about 0.2 s at 10 kHz); 0 to 30000.'
+      'The factory values are 2000 and 1950 (about 0.2 s at 10 kHz); 0 to 30000.',
+      'The cooling engine pauses a print the same way (a warm-up, coolant over the ceiling, a suspected flow fault) and resumes it when the verdict clears. The cooling hold limit is how long such a hold may stand before the print is canceled instead: 60 to 7200 s, 1800 by default.'
     ]
   },
   jobsize: {

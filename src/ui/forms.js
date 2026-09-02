@@ -27,6 +27,7 @@ var FIELDS_BASE = [
   'gfcloud_home_timeout_s',
   'cloud_pause_backtrack_ticks',
   'cloud_resume_lead_ticks',
+  'cloud_hold_max_s',
   'pulse_warn_threshold_bytes',
   'pulse_reject_threshold_bytes',
   'laser_button_timeout_s',
