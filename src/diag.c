@@ -106,7 +106,7 @@ static long rd_long(const char *attr)
 {
     char path[128], buf[24];
     snprintf(path, sizeof(path), GF_SYSFS "%s", attr);
-    int fd = open(path, O_RDONLY);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return -1;
     ssize_t n = read(fd, buf, sizeof(buf) - 1);
@@ -310,7 +310,16 @@ static void *runner(void *arg)
 
     for (int t = 0; t < trials; t++) {
         for (int flow = 1; flow >= 0; flow--) {
-            double down, up;
+            /* The settle window starts from the last readings, never
+             * from uninitialized values a glitched first sample would
+             * leave in place. */
+            double down = 20.0, up = 20.0;
+            pthread_mutex_lock(&mu);
+            if (st_down > 5.0 && st_down < 60.0)
+                down = st_down;
+            if (st_up > 5.0 && st_up < 60.0)
+                up = st_up;
+            pthread_mutex_unlock(&mu);
             set_phase("settling before trial %d/%d (%s)",
                       t + 1, trials, flow ? "pump on" : "pump off");
             int rc = settle(&down, &up);
@@ -670,11 +679,13 @@ int diag_status_json(char *buf, size_t len)
         st_running ? (long)(time(NULL) - st_started) : 0,
         st_down, st_up);
     int first = log_n > LOG_LINES ? log_n - LOG_LINES : 0;
-    for (int i = first; i < log_n && off < len - 8; i++) {
+    for (int i = first; i < log_n && off + LOG_LEN + 32 < len; i++) {
+        /* Stop while the closing fragment still fits: a document that
+         * loses its closing brace is no document. */
         off += (size_t)snprintf(buf + off, len - off, "%s\"%s\"",
                                 i > first ? "," : "",
                                 logbuf[i % LOG_LINES]);
-        if (off >= len)             /* a long line overshot: stop appending */
+        if (off >= len)
             off = len - 1;
     }
     snprintf(buf + off, len - off, "],\"result\":%s}",

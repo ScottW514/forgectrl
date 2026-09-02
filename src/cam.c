@@ -48,7 +48,8 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <jpeglib.h>    /* requires stdio.h first (FILE) */
+#include <jpeglib.h>
+#include <setjmp.h>    /* requires stdio.h first (FILE) */
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -353,7 +354,7 @@ static int xioctl(int fd, unsigned long req, void *arg)
 static pid_t child_spawn(const char *cmd, int *outfd)
 {
     int pfd[2] = {-1, -1};
-    if (outfd && pipe(pfd) < 0)
+    if (outfd && pipe2(pfd, O_CLOEXEC) < 0)
         return -1;
     pid_t pid = fork();
     if (pid < 0) {
@@ -698,7 +699,7 @@ static int ctrls_ov5648(const char *subdev, cam_id_t cam)
 
 /* The OV8856 driver exposes a different set: exposure counts whole lines
  * (it shifts into the 1/16-line register itself) and is capped by the frame
- * length - 2482 lines in the 3264x2448 mode - analogue gain is 128 = 1x,
+ * length - 2482 lines in the 3264x2448 mode - analog gain is 128 = 1x,
  * and there are no auto-exposure, auto-gain or white-balance controls to
  * switch off, so the sensor comes up manual. The flips are still forced off
  * for the same reason as the OV5648.
@@ -716,7 +717,7 @@ static int ctrls_ov8856(const char *subdev, cam_id_t cam)
     };
 
     if (run("v4l2-ctl -d %s -c exposure=%d -c analogue_gain=%d"
-            " -c digital_gain=1024 -c horizontal_flip=0 -c vertical_flip=0",
+            " -c digital_gain=1024",
             subdev, d[cam].exposure, d[cam].gain))
         return -1;
     return 0;
@@ -733,15 +734,38 @@ static int configure_sensor(const char *sensor, const struct sensor_profile *p,
 
 /* ------------------------------------------------------- jpeg encoding */
 
+struct jpeg_err_jmp {
+    struct jpeg_error_mgr mgr;
+    jmp_buf env;
+};
+
+static void jpeg_error_longjmp(j_common_ptr ci)
+{
+    struct jpeg_err_jmp *e = (struct jpeg_err_jmp *)ci->err;
+    char msg[JMSG_LENGTH_MAX];
+    e->mgr.format_message(ci, msg);
+    fflog(LOG_ERR, "cam: jpeg: %s", msg);
+    longjmp(e->env, 1);
+}
+
 static int jpeg_encode_rgb(const uint8_t *rgb, int w, int h, int quality,
                            int fast, uint8_t **out, size_t *outlen)
 {
     struct jpeg_compress_struct ci;
-    struct jpeg_error_mgr jerr;
+    struct jpeg_err_jmp jerr;
     unsigned char *buf = NULL;
     unsigned long buflen = 0;
 
-    ci.err = jpeg_std_error(&jerr);
+    /* libjpeg's default error_exit calls exit(): a fatal error (an
+     * allocation that fails on a full-resolution frame) must end the
+     * encode, not the daemon. */
+    ci.err = jpeg_std_error(&jerr.mgr);
+    jerr.mgr.error_exit = jpeg_error_longjmp;
+    if (setjmp(jerr.env)) {
+        jpeg_destroy_compress(&ci);
+        free(buf);
+        return -1;
+    }
     jpeg_create_compress(&ci);
     jpeg_mem_dest(&ci, &buf, &buflen);
     ci.image_width = (JDIMENSION)w;
@@ -1996,6 +2020,10 @@ static int ensure_engine(cam_id_t cam, char *err, size_t errlen)
         pthread_mutex_lock(&eng.lock);
         eng.home_cam = cam;
         pthread_mutex_unlock(&eng.lock);
+        /* Every engine start probes the hardware paths again: one
+         * transient VPU, H.264 or GPU failure must not demote the stream
+         * to the CPU paths for the daemon's lifetime. */
+        vpu_disabled = h264_disabled = gpu_disabled = 0;
         if (start_capture(cam, err, errlen))
             return -1;
         pthread_mutex_lock(&eng.lock);
@@ -2019,6 +2047,15 @@ static int ensure_engine(cam_id_t cam, char *err, size_t errlen)
 
 void cam_engine_init(void)
 {
+    /* The waits are timeouts, and timeouts never ride the wall clock on
+     * this RTC-less board: the condvars wake on CLOCK_MONOTONIC. */
+    pthread_condattr_t ca;
+    pthread_condattr_init(&ca);
+    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+    pthread_cond_init(&eng.frame_cv, &ca);
+    pthread_cond_init(&eng.snap_cv, &ca);
+    pthread_cond_init(&eng.h264_cv, &ca);
+    pthread_condattr_destroy(&ca);
     const char *v;
     if ((v = getenv("FORGECTRL_STREAM_Q")) != NULL) {
         int q = atoi(v);
@@ -2140,7 +2177,7 @@ int cam_snapshot(cam_id_t cam, int full, int quality, int lamp,
     now_ts(&eng.last_activity);
 
     struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
     deadline.tv_sec += SNAP_TIMEOUT_S;
     int rc = 0;
     while (eng.snap_pending == 1) {
@@ -2217,7 +2254,7 @@ long cam_client_next(cam_client_t *c, const uint8_t **jpeg)
     int timeouts = 0;
     while (eng.running && c->gen == eng.kick_gen && eng.seq <= c->last_seq) {
         struct timespec deadline;
-        clock_gettime(CLOCK_REALTIME, &deadline);
+        clock_gettime(CLOCK_MONOTONIC, &deadline);
         deadline.tv_sec += CLIENT_WAIT_S;
         if (pthread_cond_timedwait(&eng.frame_cv, &eng.lock, &deadline)
             == ETIMEDOUT && ++timeouts >= 2)
@@ -2306,7 +2343,7 @@ long cam_h264_next(cam_h264_client_t *c, const uint8_t **au,
         while (eng.running && !h264_disabled && c->gen == eng.kick_gen &&
                eng.h264_seq <= c->last_seq) {
             struct timespec deadline;
-            clock_gettime(CLOCK_REALTIME, &deadline);
+            clock_gettime(CLOCK_MONOTONIC, &deadline);
             deadline.tv_sec += CLIENT_WAIT_S;
             if (pthread_cond_timedwait(&eng.h264_cv, &eng.lock, &deadline)
                 == ETIMEDOUT && ++timeouts >= 2)

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * update.c - forgectrl: firmware update manager
  * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
  * SPDX-License-Identifier: MIT
@@ -74,6 +74,9 @@ static char   progress_file[64];    /* file whose growth is progress */
 
 static pthread_mutex_t up_mu = PTHREAD_MUTEX_INITIALIZER;
 static FILE  *up_fp;
+static const struct _u_request *up_owner;   /* the request streaming into up_fp */
+static time_t up_last;                      /* its last chunk */
+static char   up_refusal[80];               /* why the sink refused, for the handler */
 static uint64_t up_bytes;
 static int    up_error;
 
@@ -323,12 +326,21 @@ static void job_finish(const char *fmt, ...)
 }
 
 /* Start a job: 0 ok, -1 busy, -2 not idle, -3 diagnostic running. */
+static pthread_mutex_t up_mu;
+static FILE *up_fp;
+static time_t up_last;
+
 static int job_start(const char *kind, void *(*worker)(void *), void *arg)
 {
     if (diag_running())
         return -3;
     if (!machine_is_idle())
         return -2;
+    pthread_mutex_lock(&up_mu);
+    int uploading = up_fp != NULL && time(NULL) - up_last < 60;
+    pthread_mutex_unlock(&up_mu);
+    if (uploading)
+        return -4;
     pthread_mutex_lock(&mu);
     if (job_running) {
         pthread_mutex_unlock(&mu);
@@ -368,6 +380,8 @@ static int job_start_reply(struct _u_response *res, int rc)
         return reply_err(res, 409, "an update job is already running");
     case -2:
         return reply_err(res, 409, "machine is not idle");
+    case -4:
+        return reply_err(res, 409, "an upload is still streaming into the staging file");
     default:
         return reply_err(res, 409, "a diagnostic is running");
     }
@@ -448,6 +462,21 @@ int cb_slots(const struct _u_request *req, struct _u_response *res,
     if (!auth_read_ok(req, res))
         return U_CALLBACK_COMPLETE;
 
+    /* ffboot -l mounts every slot it probes; while an apply job writes
+     * one, the inventory is answered from the last probe instead. */
+    static char cached[8192];
+    static pthread_mutex_t cache_mu = PTHREAD_MUTEX_INITIALIZER;
+    if (update_job_running()) {
+        pthread_mutex_lock(&cache_mu);
+        if (cached[0]) {
+            int rc = reply_json(res, 200, cached);
+            pthread_mutex_unlock(&cache_mu);
+            return rc;
+        }
+        pthread_mutex_unlock(&cache_mu);
+        return reply_err(res, 409, "slot inventory unavailable during an update job");
+    }
+
     char raw[4096];
     FILE *p = popen(FFBOOT " -l 2>/dev/null", "r");
     if (!p)
@@ -472,11 +501,13 @@ int cb_slots(const struct _u_request *req, struct _u_response *res,
         jsan(val, sizeof(val), eq + 1);
         if (!strncmp(ln, "env.", 4)) {
             if (eo < sizeof(env_json)) {
-                eo += (size_t)snprintf(env_json + eo, sizeof(env_json) - eo,
-                                       "%s\"%s\":\"%s\"", eo ? "," : "",
-                                       ln + 4, val);
-                if (eo >= sizeof(env_json))
-                    eo = sizeof(env_json) - 1;   /* external output overshot */
+                int need = snprintf(NULL, 0, "%s\"%s\":\"%s\"", eo ? "," : "",
+                                    ln + 4, val);
+                if (need > 0 && eo + (size_t)need < sizeof(env_json))
+                    eo += (size_t)snprintf(env_json + eo, sizeof(env_json) - eo,
+                                           "%s\"%s\":\"%s\"", eo ? "," : "",
+                                           ln + 4, val);
+                /* else: a value that does not fit is left out whole */
             }
             continue;
         }
@@ -540,9 +571,9 @@ int cb_slots(const struct _u_request *req, struct _u_response *res,
     bput(body, sizeof(body), &off,
                             "},\"archives\":[");
 
-    /* Only factory-rootfs archives are user-restorable; recovery-boot
-     * blobs are a Phase-5 concern and would only confuse the restore
-     * list, so they are omitted here. The semantic version comes from
+    /* Only factory-rootfs archives are user-restorable; the recovery
+     * boot blobs are not something a restore writes, so they are left
+     * out of the list. The semantic version comes from
      * the manifest's ver= field (written by the installer); without it
      * (older archives) the display falls back to the build date parsed
      * from the filename. */
@@ -591,6 +622,9 @@ int cb_slots(const struct _u_request *req, struct _u_response *res,
             have ? (long)st.st_size : 0, ver);
     }
     snprintf(body + off, sizeof(body) - off, "}}");
+    pthread_mutex_lock(&cache_mu);
+    snprintf(cached, sizeof(cached), "%s", body);
+    pthread_mutex_unlock(&cache_mu);
     return reply_json(res, 200, body);
 }
 
@@ -921,14 +955,29 @@ int update_upload_sink(const struct _u_request *req, const char *key,
 
     pthread_mutex_lock(&up_mu);
     if (off == 0) {
+        /* One upload at a time: a second one while the first still
+         * streams is refused, not adopted. An upload whose sender went
+         * away mid-stream is abandoned after a minute of silence. */
+        if (up_fp && up_owner != req && time(NULL) - up_last < 60) {
+            pthread_mutex_unlock(&up_mu);
+            return U_OK;                /* the handler reports the refusal */
+        }
         if (up_fp) {
             fclose(up_fp);              /* bound any leak from a prior upload */
             up_fp = NULL;
         }
+        up_owner = req;
+        up_refusal[0] = '\0';
         /* Gate the flash-staging write: machine idle, and no diagnostic
          * or update job running (the apply worker reads the same file -
          * an ungated upload could truncate it mid-flash). */
-        if (diag_running() || !machine_is_idle() || update_job_running()) {
+        if (diag_running())
+            snprintf(up_refusal, sizeof(up_refusal), "a diagnostic owns the hardware");
+        else if (!machine_is_idle())
+            snprintf(up_refusal, sizeof(up_refusal), "the machine is not idle");
+        else if (update_job_running())
+            snprintf(up_refusal, sizeof(up_refusal), "an update job is running");
+        if (up_refusal[0]) {
             up_error = 1;
             up_bytes = 0;
         } else {
@@ -936,13 +985,18 @@ int update_upload_sink(const struct _u_request *req, const char *key,
             up_fp = fopen(UP_FW, "wb");
             up_bytes = 0;
             up_error = up_fp ? 0 : 1;
+            if (up_error)
+                snprintf(up_refusal, sizeof(up_refusal), "cannot open the staging file");
         }
     }
-    if (up_fp && !up_error) {
+    if (up_fp && up_owner == req && !up_error) {
+        up_last = time(NULL);
         if (up_bytes + size > UPLOAD_MAX) {
             up_error = 1;
+            snprintf(up_refusal, sizeof(up_refusal), "the archive exceeds the size limit");
         } else if (size && fwrite(data, 1, size, up_fp) != size) {
             up_error = 1;
+            snprintf(up_refusal, sizeof(up_refusal), "writing the staging file failed");
         } else {
             up_bytes += size;
         }
@@ -962,19 +1016,26 @@ int cb_update_upload(const struct _u_request *req, struct _u_response *res,
         return U_CALLBACK_COMPLETE;
 
     pthread_mutex_lock(&up_mu);
+    if (up_fp && up_owner != req) {
+        /* Another upload is streaming: this one was refused at its first
+         * chunk and staged nothing. */
+        pthread_mutex_unlock(&up_mu);
+        return reply_err(res, 409, "another upload is in progress");
+    }
     if (up_fp) {
         fclose(up_fp);
         up_fp = NULL;
     }
+    up_owner = NULL;
     int err = up_error;
     uint64_t bytes = up_bytes;
+    char why[80];
+    snprintf(why, sizeof(why), "%s", up_refusal[0] ? up_refusal : "no file data received");
     pthread_mutex_unlock(&up_mu);
 
     if (err || bytes == 0) {
         unlink(UP_FW);
-        return reply_err(res, 400,
-                         err ? "upload failed or exceeded the size limit"
-                             : "no file data received");
+        return reply_err(res, 400, why);
     }
 
     int cls = fw_classify(UP_FW);

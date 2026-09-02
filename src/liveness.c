@@ -54,7 +54,7 @@
 static int enclosure_open(void)
 {
     uint8_t sw[2] = { 0 };
-    int fd = open(SWITCH_DEV, O_RDONLY | O_NONBLOCK);
+    int fd = open(SWITCH_DEV, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0)
         return -1;
     int ok = ioctl(fd, EVIOCGSW(sizeof(sw)), sw) >= 0;
@@ -94,7 +94,7 @@ static int wr_attr(const char *attr, const char *val)
 {
     char path[96];
     snprintf(path, sizeof(path), "/sys/glowforge/%s", attr);
-    int fd = open(path, O_WRONLY);
+    int fd = open(path, O_WRONLY | O_CLOEXEC);
     if (fd < 0)
         return -1;
     int ret = write(fd, val, strlen(val)) < 0 ? -1 : 0;
@@ -106,7 +106,7 @@ static int rd_attr(const char *attr, char *buf, size_t len)
 {
     char path[96];
     snprintf(path, sizeof(path), "/sys/glowforge/%s", attr);
-    int fd = open(path, O_RDONLY);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return -1;
     ssize_t n = read(fd, buf, len - 1);
@@ -148,7 +148,7 @@ static int accel_read(const char *dir, const char *axis, long *out)
 {
     char path[160], buf[24];
     snprintf(path, sizeof(path), "%s/in_accel_%s_raw", dir, axis);
-    int fd = open(path, O_RDONLY);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return -1;
     ssize_t n = read(fd, buf, sizeof(buf) - 1);

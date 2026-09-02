@@ -83,6 +83,7 @@ typedef unsigned int   GLbitfield;
 #define EGL_SYNC_FENCE_KHR          0x30F9
 #define EGL_SYNC_FLUSH_COMMANDS_BIT_KHR 0x0001
 #define EGL_CONDITION_SATISFIED_KHR 0x30F6
+#define EGL_TIMEOUT_EXPIRED_KHR     0x30F5
 #define EGL_FOREVER_KHR             0xFFFFFFFFFFFFFFFFull
 typedef void *EGLSyncKHR;
 typedef uint64_t EGLTimeKHR;
@@ -639,7 +640,7 @@ void gpu_debayer_close(gpu_debayer_t *g)
                 if (g->fence[i]) {
                     g->egl.ClientWaitSyncKHR(g->dpy, g->fence[i],
                                              EGL_SYNC_FLUSH_COMMANDS_BIT_KHR,
-                                             EGL_FOREVER_KHR);
+                                             (EGLTimeKHR)5000000000LL);
                     g->egl.DestroySyncKHR(g->dpy, g->fence[i]);
                     g->fence[i] = NULL;
                 }
@@ -860,11 +861,16 @@ int gpu_debayer_wait(gpu_debayer_t *g, int slot)
     if (g->dead || slot < 0 || slot >= MAX_DST_SLOTS)
         return -1;
     if (g->fence[slot]) {
+        /* A render that has not signaled in five seconds is a hung GPU:
+         * the instance is dead and the caller falls back to the CPU
+         * path, as after any other GPU failure. */
         EGLint r = g->egl.ClientWaitSyncKHR(g->dpy, g->fence[slot],
                                             EGL_SYNC_FLUSH_COMMANDS_BIT_KHR,
-                                            EGL_FOREVER_KHR);
+                                            (EGLTimeKHR)5000000000LL);
         g->egl.DestroySyncKHR(g->dpy, g->fence[slot]);
         g->fence[slot] = NULL;
+        if (r == EGL_TIMEOUT_EXPIRED_KHR)
+            g->dead = 1;
         if (r != EGL_CONDITION_SATISFIED_KHR) {
             fflog(LOG_WARNING, "gpu: fence wait failed (0x%x)", r);
             g->dead = 1;

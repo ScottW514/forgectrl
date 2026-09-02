@@ -471,9 +471,9 @@ function startH264() {
             .then(function (r) {
               if (r.done) {
                 // Ended upstream: the lid opened or another viewer took
-                // the camera. Freeze on the last frame and say so.
-                if (liveOn && !signal.aborted)
-                  $('cammsg').textContent = 'stream ended';
+                // the camera. The same status check the MJPEG path runs
+                // says which, retries, or resets the toggle.
+                if (liveOn && !signal.aborted) $('cam').onerror();
                 return;
               }
               if (!liveOn) return;
@@ -525,7 +525,7 @@ $('cam').onerror = function () {
       // An open lid is the privacy gate, not a fault: say so and stop
       // retrying, because retrying cannot succeed until the lid closes.
       if (s.capture_allowed === false) {
-        $('cammsg').textContent = 'lid open \u2014 the cameras are off';
+        $('cammsg').textContent = 'lid open: the cameras are off';
         toggleLive();
         return;
       }
@@ -716,7 +716,7 @@ function renderStat() {
   );
   var sensor = CS.sensor && CS.sensor !== 'unknown' ? CS.sensor + ', ' : '';
   if (CS.capture_allowed === false)
-    g += txt('Camera engine', sensor + 'off — lid open (privacy)');
+    g += txt('Camera engine', sensor + 'off (lid open: privacy)');
   else if (CS.running)
     g += txt(
       'Camera engine',
@@ -1203,16 +1203,9 @@ function bootTo(t, f) {
     })
     .then(function (j) {
       if (j.ok) {
-        $('msg-slot').textContent = 'next boot set \u2014 reboot to switch';
+        $('msg-slot').textContent = 'next boot set; reboot to switch';
         loadSlots();
-      } else if (
-        !f &&
-        j.detail &&
-        j.detail.indexOf('-f') >= 0 &&
-        confirm('The probe refused this target:\n' + j.detail + '\nForce anyway?')
-      )
-        bootTo(t, 1);
-      else $('msg-slot').textContent = (j.error || '?') + (j.detail ? ': ' + j.detail : '');
+      } else $('msg-slot').textContent = (j.error || '?') + (j.detail ? ': ' + j.detail : '');
     });
 }
 function doReboot() {

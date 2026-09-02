@@ -130,7 +130,7 @@ static void scan_cb(void *ctx, const uint8_t *nal, size_t n)
     mp4mux_t *m = ((struct param_scan *)ctx)->m;
     switch (nal[0] & 0x1F) {
     case 7:
-        if (n <= SPS_MAX) {
+        if (n >= 4 && n <= SPS_MAX) {
             memcpy(m->sps, nal, n);
             m->sps_len = n;
             snprintf(m->codec, sizeof(m->codec), "avc1.%02x%02x%02x",

@@ -335,9 +335,9 @@
 
 /* Lid IR fire watch: ADC counts of rise above the run-start baseline
  * that read as a fire signal, sustained for FIRE_IR_TICKS consecutive
- * ticks. 0 = watch-only (log the dataset, never trip) - the shipped
- * default until the sensors are characterized on the bench and
- * the fire-watch tiers are armed. GFCOOL_FIRE_* override. */
+ * ticks. The shipped defaults arm both tiers (the factory's own
+ * quartile thresholds); a tier set to 0 is off and only logs.
+ * GFCOOL_FIRE_* override. */
 #define FIRE_IR_TICKS      2        /* sustained breach, alert or critical */
 #define FIRE_CLEAR_TICKS   5        /* a cleared alert releases after this */
 
@@ -554,7 +554,7 @@ static int wr_attr(const char *attr, const char *val)
 {
     char path[128];
     snprintf(path, sizeof(path), GF_SYSFS "%s", attr);
-    int fd = open(path, O_WRONLY);
+    int fd = open(path, O_WRONLY | O_CLOEXEC);
     if (fd < 0)
         return -1;
     int ret = write(fd, val, strlen(val)) < 0 ? -1 : 0;
@@ -583,7 +583,7 @@ static long rd_long(const char *attr)
 {
     char path[128], buf[24];
     snprintf(path, sizeof(path), GF_SYSFS "%s", attr);
-    int fd = open(path, O_RDONLY);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return -1;
     ssize_t n = read(fd, buf, sizeof(buf) - 1);
@@ -614,7 +614,7 @@ static int cnc_is_running(void)
 {
     char path[128], buf[16];
     snprintf(path, sizeof(path), GF_SYSFS "cnc/state");
-    int fd = open(path, O_RDONLY);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return 0;
     ssize_t n = read(fd, buf, sizeof(buf) - 1);
@@ -1022,15 +1022,24 @@ static void conf_reload(void)
  * HTTP layer additionally gates on an idle machine), so a takeover
  * never lands inside a run session or its cooldown. */
 static int diag_owned = 0;
+static int tick_busy = 0;           /* the engine thread is inside a tick (under mu) */
 
 int cool_diag_take(void)
 {
     pthread_mutex_lock(&mu);
-    if (diag_owned || cool_state != Cool_Idle) {
+    if (diag_owned || cool_state != Cool_Idle || strcmp(pub_phase, "idle")) {
         pthread_mutex_unlock(&mu);
         return -1;
     }
     diag_owned = 1;
+    /* A tick in flight may still write the fans it decided on before
+     * the take: wait it out (bounded) so nothing of it lands after the
+     * tool's own writes. */
+    for (int i = 0; i < 200 && tick_busy; i++) {
+        pthread_mutex_unlock(&mu);
+        usleep(10 * 1000);
+        pthread_mutex_lock(&mu);
+    }
     pthread_mutex_unlock(&mu);
     warn("diagnostics own the thermal hardware");
     return 0;
@@ -1132,7 +1141,7 @@ static void verdict_publish(int fire_ok, const char *verdict, int hold,
         return;
     }
 
-    int fd = open(VERDICT_TMP, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+    int fd = open(VERDICT_TMP, O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
     if (fd < 0)
         return;
     int ok = write(fd, body, (size_t)n) == n;
@@ -2234,18 +2243,45 @@ static void engine_tick(void)
     verdict_publish(fire_ok, verdict, hold, have_down, down, have_up, up);
 }
 
+/* The tick runs on an absolute one-second grid: the publish period is
+ * one second whatever a tick costs, so a reader that polls the verdict
+ * at half the staleness window never finds a gap. A tick that overruns
+ * its slot is named once. */
 static void *engine_main(void *arg)
 {
     (void)arg;
+    struct timespec next;
+    int slow_named = 0;
+    clock_gettime(CLOCK_MONOTONIC, &next);
     while (1) {
         pthread_mutex_lock(&mu);
         int run = engine_run;
+        tick_busy = 1;
         pthread_mutex_unlock(&mu);
         if (!run)
             break;
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
         engine_tick();
-        sleep(1);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        pthread_mutex_lock(&mu);
+        tick_busy = 0;
+        pthread_mutex_unlock(&mu);
+        double took = (double)(t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+        if (took > 0.5 && !slow_named) {
+            slow_named = 1;
+            fflog(LOG_WARNING, "cool: an engine tick took %.2f s (budget 1 s)", took);
+        }
+        next.tv_sec += 1;
+        if (t1.tv_sec > next.tv_sec ||
+            (t1.tv_sec == next.tv_sec && t1.tv_nsec > next.tv_nsec))
+            next = t1;                  /* overran the slot: no catch-up burst */
+        while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL) == EINTR)
+            ;
     }
+    pthread_mutex_lock(&mu);
+    tick_busy = 0;
+    pthread_mutex_unlock(&mu);
     return NULL;
 }
 

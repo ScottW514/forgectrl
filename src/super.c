@@ -184,7 +184,7 @@ static void wr_attr(const char *attr, const char *val)
 {
     char path[96];
     snprintf(path, sizeof(path), "/sys/glowforge/%s", attr);
-    int fd = open(path, O_WRONLY);
+    int fd = open(path, O_WRONLY | O_CLOEXEC);
     if (fd < 0) {
         fflog(LOG_CRIT, "super: cannot open %s to write %s: %s", attr, val,
               strerror(errno));
@@ -752,7 +752,7 @@ void super_controller_start(void)
 int super_grbl_running(void)
 {
     pthread_mutex_lock(&mu);
-    int up = child_pid > 0 && strcmp(ctl_name(want), "grbl") == 0;
+    int up = child_pid > 0 && strcmp(ctl_name(child_ctl), "grbl") == 0;
     pthread_mutex_unlock(&mu);
     return up;
 }

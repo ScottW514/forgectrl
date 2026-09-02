@@ -3,10 +3,13 @@
  * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
  * SPDX-License-Identifier: MIT
  *
- * The panel and its API are served in the clear on the LAN, so the
- * threat model is a hostile page in a same-LAN browser (CSRF), a
- * DNS-rebinding host, and any non-browser LAN client poking the port
- * directly. Three cheap layers close it:
+ * The panel and its API are served in the clear on the LAN, and the LAN
+ * is trusted: any host on it can read the panel (and the token in it)
+ * and so reach every route, and the read routes (status, settings,
+ * the cameras) need no token at all. What the layers below close is a
+ * hostile page in a same-LAN browser (CSRF) and a DNS-rebinding host;
+ * the one thing no LAN client can do is what needs the machine button
+ * held (an unsigned install, the fuse identity). Three cheap layers:
  *
  *  1. Host must be an address literal (or localhost). A rebinding
  *     attacker reaches the daemon under their own hostname, which is not

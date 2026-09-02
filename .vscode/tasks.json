@@ -32,9 +32,9 @@
     },
     {
       "label": "tests (host)",
-      "detail": "The CI unit tests: status_idle_test, sanitize_test",
+      "detail": "The CI unit tests",
       "type": "shell",
-      "command": "./build/status_idle_test && ./build/sanitize_test",
+      "command": "for t in status_idle_test status_grbl_test curverec_fit_test status_sys_test sanitize_test debayer_test lid_gate_test camhealth_test cool_gate_test cool_flow_test airflow_test accel_test coolfmt_test auth_peer_test mp4mux_test; do ./build/$t || exit 1; done",
       "dependsOn": ["build (host)"],
       "group": { "kind": "test", "isDefault": true },
       "problemMatcher": []

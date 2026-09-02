@@ -58,6 +58,10 @@ static const char *const level_names[] = {
 #define STAGE_DIR      "/data/forgefirm/tmp"
 #define BUNDLE_TOP     "forgefirm-logs"
 #define EXPORT_MAX_FILE (64L * 1024 * 1024)
+/* The staged bundle as a whole: files past this are left out, so the
+ * export never fills /data. */
+#define EXPORT_MAX_TOTAL (256L * 1024 * 1024)
+static long export_staged_bytes;
 
 /* ------------------------------------------------------- validators */
 
@@ -695,6 +699,7 @@ logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
         return NULL;
     }
     export_busy = 1;
+    export_staged_bytes = 0;
     pthread_mutex_unlock(&export_mu);
 
     logs_export_t *e = calloc(1, sizeof(*e));
@@ -741,8 +746,10 @@ logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
             snprintf(dst, sizeof(dst), "%s/%s", d, de->d_name);
             struct stat st;
             if (stat(src, &st) != 0 || !S_ISREG(st.st_mode) ||
-                st.st_size > EXPORT_MAX_FILE)
+                st.st_size > EXPORT_MAX_FILE ||
+                export_staged_bytes + st.st_size > EXPORT_MAX_TOTAL)
                 continue;
+            export_staged_bytes += st.st_size;
             if (has_suffix(de->d_name, ".gz"))
                 (void)stage_gz(san, src, dst);
             else
@@ -783,8 +790,10 @@ logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
             snprintf(src, sizeof(src), "%s/%s", PSTORE_DIR, de->d_name);
             struct stat st;
             if (stat(src, &st) != 0 || !S_ISREG(st.st_mode) ||
-                st.st_size > EXPORT_MAX_FILE)
+                st.st_size > EXPORT_MAX_FILE ||
+                export_staged_bytes + st.st_size > EXPORT_MAX_TOTAL)
                 continue;
+            export_staged_bytes += st.st_size;
             if (!made) {
                 snprintf(d, sizeof(d), "%s/system/pstore", top);
                 (void)mkdir(d, 0700);

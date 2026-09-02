@@ -54,7 +54,7 @@ var HELP = {
     d: 'usage/control-panel/#status',
     p: [
       'A scaled snapshot, refreshed on demand; Live switches to the stream (H.264 when the browser supports it, MJPEG otherwise) and Stop returns to the snapshot.',
-      'The cameras are off while the lid is open; that is the privacy gate, not a fault. One viewer at a time holds the stream.'
+      'The cameras are off while the lid is open; that is the privacy gate, not a fault. Several viewers can watch the same camera; a request for the other camera takes the stream over.'
     ]
   },
   units: {
@@ -66,7 +66,7 @@ var HELP = {
     t: 'Homing',
     d: 'usage/homing/',
     p: [
-      'How the machine finds its origin. Glowforge web-service homing uses the cameras and the service, like stock firmware; limit-switch homing needs the switch brackets fitted.'
+      'How the machine finds its origin. Glowforge web-service homing uses the cameras and the service, like stock firmware. Limit-switch homing is not available yet.'
     ]
   },
   home_pos: {
@@ -256,7 +256,7 @@ var HELP = {
     t: 'Install or restore firmware',
     d: 'install/updating/',
     p: [
-      'Development images upload straight from the browser (dev-key signed, release.sh --dev); unsigned images need an extra confirmation.',
+      'A release-signed archive installs without a prompt. Anything else (a development image from release.sh --dev, an unsigned archive) needs the machine button held while you confirm.',
       'After writing, use Set next boot above and reboot to switch.'
     ]
   },

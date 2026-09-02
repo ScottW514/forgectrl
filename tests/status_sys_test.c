@@ -83,7 +83,7 @@ int main(void)
     printf("machine status JSON sys block:\n");
 
     /* Same buffer size as the /status handler in main.c. */
-    char doc[1536];
+    char doc[3072];               /* the /status handler's body size */
 
     CHECK(machine_status_json(doc, sizeof(doc), "\"gates_off\":[]") == 0,
           "first status document renders");

@@ -50,9 +50,9 @@ int main(void)
 
     printf("not this host:\n");
     CHECK(!v4("10.0.0.1"), "10.0.0.1");
-    CHECK(!v4("172.16.1.5"), "172.16.1.5");
+    CHECK(!v4("192.0.2.5"), "192.0.2.5");
     CHECK(!v4("128.0.0.1"), "128.0.0.1 (the octet above 127)");
-    CHECK(!v6("::ffff:172.16.1.5"), "::ffff:172.16.1.5 (mapped LAN)");
+    CHECK(!v6("::ffff:192.0.2.5"), "::ffff:192.0.2.5 (mapped LAN)");
     CHECK(!v6("::ffff:128.0.0.1"), "::ffff:128.0.0.1");
     CHECK(!v6("2001:db8::1"), "2001:db8::1");
     CHECK(!v6("fe80::1"), "fe80::1");

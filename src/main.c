@@ -3,29 +3,13 @@
  * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
  * SPDX-License-Identifier: MIT
  *
- * HTTP service (ulfius) exposing the Glowforge cameras as MJPEG:
- *
- *   GET /                        the machine control panel (src/ui/)
- *   GET /?action=stream          mjpg-streamer-compatible stream (lid)
- *   GET /?action=snapshot        mjpg-streamer-compatible snapshot (lid)
- *   GET /cam/stream?cam=lid|head            multipart MJPEG, half sensor res
- *   GET /cam/h264?cam=lid|head              fragmented MP4 H.264 live stream
- *                                (MSE-consumable; far fewer bytes than MJPEG)
- *   GET /cam/snapshot?cam=&res=full|half&q=&lamp=  single JPEG (full res;
- *                                lamp overrides the scene lamp for the shot)
- *   GET /cam/status                         JSON engine status, including
- *                                the bound sensor, its frame geometry, and
- *                                whether the lid currently permits capture
- *
- * The cameras only capture with the lid closed (a privacy rule, enforced
- * in cam.c): stream and snapshot answer 409 while it is open.
- *   GET /status                             JSON machine operational status
- *   GET /settings                           JSON machine settings
- *   POST /settings?key=value                update machine settings
- *   GET /fuse-identity                      burned-in identity (on demand)
- *   GET /logs                               loggers, levels, sizes
- *   GET /logs/tail?name=&lines=&from=       a logger's live file (follow)
- *   POST /logs/export?sanitize=1|0          tar.gz bundle of all logs
+ * The machine-services daemon of ForgeFIRM: the HTTP service on port 8080
+ * that supervises the controller and brokers the pulse device, runs the
+ * cooling engine, the cameras, telemetry, settings, diagnostics, logging,
+ * the web control panel, and the A/B update system. The contract, every
+ * route included, is the forgectrl page of the documentation site
+ * (https://docs.forgefirm.org/technical/forgefirm/forgectrl/); the panel
+ * sources are in src/ui/.
  *
  * Invocation: forgectrl [--render-syslog]. --render-syslog writes the
  * rsyslog rules and log directories from the settings and exits; the
@@ -1062,13 +1046,14 @@ static const char *setting_param(const struct _u_request *req,
     return v ? v : u_map_get(req->map_url, key);
 }
 
-/* Effective value of a cooling temperature key for cross-field checks:
- * the request value if this POST sets it, else the persisted value, else
- * the compiled default. Returns 0 and leaves *out untouched on a key
- * that is neither in the request nor stored (its default stands). */
-static int effective_temp(const struct _u_request *req, const char *key,
-                          double dflt, double *out)
+/* Effective value of a cooling gate key for cross-field checks: the
+ * request value if this POST sets it, else the persisted value, else the
+ * gate table's compiled default. Always sets *out. */
+static void effective_temp(const struct _u_request *req, const char *key,
+                           double *out)
 {
+    const gate_setting_t *g = gate_setting_find(key);
+    double dflt = g ? g->def : 0.0;
     const char *v = setting_param(req, key);
     char stored[128];
     if (v && v[0])
@@ -1079,7 +1064,6 @@ static int effective_temp(const struct _u_request *req, const char *key,
         *out = strtod(stored, NULL);
     else
         *out = dflt;
-    return 0;
 }
 
 static int cb_settings_post(const struct _u_request *req,
@@ -1123,9 +1107,9 @@ static int cb_settings_post(const struct _u_request *req,
      * per-key validators already cap each to a bounded range; this pins
      * their relationship across a multi-key POST. */
     double tmax, tresume, tcrit;
-    effective_temp(req, "cool_temp_max", 33.0, &tmax);
-    effective_temp(req, "cool_temp_resume", 31.0, &tresume);
-    effective_temp(req, "cool_temp_critical_c", 38.0, &tcrit);
+    effective_temp(req, "cool_temp_max", &tmax);
+    effective_temp(req, "cool_temp_resume", &tresume);
+    effective_temp(req, "cool_temp_critical_c", &tcrit);
     if (tresume >= tmax)
         return reply_error(res, 400,
             "cool_temp_resume must be below cool_temp_max");
@@ -1142,8 +1126,8 @@ static int cb_settings_post(const struct _u_request *req,
      * only between gates that are on (zero is a floor or a start gate
      * off, its own off end). */
     double tmin, tstart;
-    effective_temp(req, "cool_temp_min", 5.0, &tmin);
-    effective_temp(req, "cool_temp_start", 16.0, &tstart);
+    effective_temp(req, "cool_temp_min", &tmin);
+    effective_temp(req, "cool_temp_start", &tstart);
     const gate_setting_t *flo = gate_setting_find("cool_temp_min");
     const gate_setting_t *sta = gate_setting_find("cool_temp_start");
     int floor_off = flo && tmin <= flo->lo;
@@ -1163,21 +1147,21 @@ static int cb_settings_post(const struct _u_request *req,
      * live reading - because the engine's runtime clamp already forces
      * the TEC off within a degree of the floor. */
     double teon, teoff;
-    effective_temp(req, "cool_tec_on_c", 20.0, &teon);
-    effective_temp(req, "cool_tec_off_c", 18.0, &teoff);
+    effective_temp(req, "cool_tec_on_c", &teon);
+    effective_temp(req, "cool_tec_off_c", &teoff);
     if (teoff >= teon)
         return reply_error(res, 400,
             "cool_tec_off_c must be below cool_tec_on_c");
     /* The fire watch: within each quartile the alert must sit under the
      * critical while both tiers are on (zero is a tier off). */
     double fa, fc;
-    effective_temp(req, "cool_fire_q1_alert", 275.0, &fa);
-    effective_temp(req, "cool_fire_q1_critical", 688.0, &fc);
+    effective_temp(req, "cool_fire_q1_alert", &fa);
+    effective_temp(req, "cool_fire_q1_critical", &fc);
     if (fa > 0 && fc > 0 && fa >= fc)
         return reply_error(res, 400,
             "cool_fire_q1_alert must be below cool_fire_q1_critical");
-    effective_temp(req, "cool_fire_q2_alert", 374.0, &fa);
-    effective_temp(req, "cool_fire_q2_critical", 1022.0, &fc);
+    effective_temp(req, "cool_fire_q2_alert", &fa);
+    effective_temp(req, "cool_fire_q2_critical", &fc);
     if (fa > 0 && fc > 0 && fa >= fc)
         return reply_error(res, 400,
             "cool_fire_q2_alert must be below cool_fire_q2_critical");
@@ -1236,6 +1220,8 @@ static int cb_controller_start(const struct _u_request *req,
     (void)user_data;
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
+    if (diag_running())
+        return reply_error(res, 409, "a diagnostic owns the hardware");
     super_controller_start();
     ulfius_set_string_body_response(res, 200, "{\"started\":true}");
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
@@ -1435,19 +1421,28 @@ static int cb_diag_status(const struct _u_request *req,
 static const char *panel_html(void)
 {
     static char *page;
+    static pthread_mutex_t page_mu = PTHREAD_MUTEX_INITIALIZER;
     static const char fallback[] =
         "<!doctype html><title>ForgeFIRM</title>"
         "forgectrl: the panel could not be unpacked";
-    if (page)
+    /* One inflate for the daemon's life, whichever request thread gets
+     * there first; the others wait for it rather than inflate again. */
+    pthread_mutex_lock(&page_mu);
+    if (page) {
+        pthread_mutex_unlock(&page_mu);
         return page;
+    }
 
     char *html = malloc((size_t)index_html_len + 1);
-    if (!html)
+    if (!html) {
+        pthread_mutex_unlock(&page_mu);
         return fallback;
+    }
     z_stream zs;
     memset(&zs, 0, sizeof(zs));
     if (inflateInit2(&zs, 15 + 16) != Z_OK) {   /* 16: gzip wrapper */
         free(html);
+        pthread_mutex_unlock(&page_mu);
         return fallback;
     }
     zs.next_in = (Bytef *)index_html_gz;
@@ -1459,6 +1454,7 @@ static const char *panel_html(void)
     inflateEnd(&zs);
     if (rc != Z_STREAM_END) {
         free(html);
+        pthread_mutex_unlock(&page_mu);
         return fallback;
     }
     html[n] = '\0';
@@ -1467,6 +1463,7 @@ static const char *panel_html(void)
     const char *tok = auth_token();
     if (!mark || !tok[0]) {
         page = html;                    /* no token: serve inert page */
+        pthread_mutex_unlock(&page_mu);
         return page;
     }
     size_t pre = (size_t)(mark - html);
@@ -1475,12 +1472,14 @@ static const char *panel_html(void)
     page = malloc(total);
     if (!page) {
         page = html;
+        pthread_mutex_unlock(&page_mu);
         return page;
     }
     memcpy(page, html, pre);
     memcpy(page + pre, tok, tlen);
     strcpy(page + pre + tlen, mark + strlen("__FFTOKEN__"));
     free(html);
+    pthread_mutex_unlock(&page_mu);
     return page;
 }
 
@@ -1556,6 +1555,10 @@ static int cb_logs_export(const struct _u_request *req,
     const char *sv = setting_param(req, "sanitize");
     int sanitize = !(sv && (!strcmp(sv, "0") || !strcmp(sv, "false") ||
                             !strcmp(sv, "no")));
+    /* A CPU-bound pass over every log on the single core: not during a
+     * cut, where the cooling engine shares the daemon's priority. */
+    if (!machine_is_idle())
+        return reply_error(res, 409, "the machine is busy; export logs when it is idle");
     char err[160];
     logs_export_t *e = logs_export_begin(sanitize, settings_snapshot, err,
                                         sizeof(err));
@@ -1648,12 +1651,18 @@ int main(int argc, char **argv)
         (void)setrlimit(RLIMIT_NOFILE, &rl);
     }
 
+    /* Installed before any thread or child exists: a termination that
+     * lands during a slow init must still run the shutdown path. */
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
+    signal(SIGPIPE, SIG_IGN);
+
     auth_init();
     cam_engine_init();
-    diag_init();
     curverec_init();
     cool_init();
     super_init();
+    diag_init();            /* its marker recovery drives the supervisor: after it */
     update_init();
     apply_wifi(0);
     cam_lamp_apply_idle();
@@ -1770,9 +1779,6 @@ int main(int argc, char **argv)
     }
     fflog(LOG_NOTICE, "listening on port %u", port);
 
-    signal(SIGINT, on_signal);
-    signal(SIGTERM, on_signal);
-    signal(SIGPIPE, SIG_IGN);
     while (!quit)
         pause();
 

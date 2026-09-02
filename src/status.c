@@ -100,7 +100,7 @@ static int rd_attr(const char *attr, char *buf, size_t len)
 {
     char path[128];
     snprintf(path, sizeof(path), "%s%s", gf_sysfs_root(), attr);
-    int fd = open(path, O_RDONLY);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return -1;
     ssize_t n = read(fd, buf, len - 1);
@@ -164,6 +164,8 @@ static long fan_rpm(long period_ns)
  * homed filled, or -1 when the counters themselves are unreadable. */
 static int read_position(double *x, double *y, double *z, int *homed)
 {
+    char pos_path[160];
+    snprintf(pos_path, sizeof(pos_path), "%scnc/position", gf_sysfs_root());
     double hx = 0, hy = 0, hz = 0;
     FILE *f = fopen(HOMED_ANCHOR, "r");
     *homed = 0;
@@ -175,7 +177,7 @@ static int read_position(double *x, double *y, double *z, int *homed)
     }
 
     uint8_t raw[32];
-    int fd = open(GF_SYSFS "cnc/position", O_RDONLY);
+    int fd = open(pos_path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return -1;
     ssize_t n = read(fd, raw, sizeof(raw));
@@ -482,6 +484,13 @@ static int read_state_file(const char *name, char *buf, size_t len)
     if (!f)
         return -1;
     size_t n = fread(buf, 1, len - 1, f);
+    /* A view that fills the buffer is cut mid-line: say so at the end
+     * rather than hand out a silent fragment. */
+    if (n == len - 1 && len > 24) {
+        static const char mark[] = "\n[truncated]\n";
+        memcpy(buf + len - sizeof(mark), mark, sizeof(mark));
+        n = len - 1;
+    }
     fclose(f);
     buf[n] = '\0';
     return n ? 0 : -1;
