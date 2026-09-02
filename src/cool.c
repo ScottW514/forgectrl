@@ -184,6 +184,11 @@
 #define WARMUP_STALL_S        300       /* no progress this long: named once */
 #define WARMUP_STALL_C          0.2f    /* what counts as progress */
 #define WARMUP_WIN            60        /* 1 Hz samples; the bulk, not a slug */
+/* A coolant sensor read that fails (a sysfs error, not a rail value)
+ * leaves every coolant gate blind. One failed tick is tolerated: the
+ * gates keep their state and the sample is skipped. This many in a row
+ * is the SENSOR verdict. */
+#define SENSOR_FAIL_TICKS      2
 #define TEC_ON_C_DEFAULT       20.0f    /* chosen, not the factory's (unknown on a Pro) */
 #define TEC_OFF_C_DEFAULT      18.0f
 #define TEC_DWELL_S            30       /* minimum off-to-on spacing */
@@ -438,6 +443,8 @@ static int warmup_stall_warned = 0;
 static float warmup_win[WARMUP_WIN];
 static uint32_t warmup_win_n = 0;
 static int critical_alarm = 0;      /* latched coolant fault, this run session */
+static uint32_t sensor_fail_ticks = 0;  /* consecutive ticks with a coolant read failed */
+static int sensor_alarm = 0;        /* SENSOR: blind on the coolant, fire blocked, hold */
 /* The board temperatures, watched over the run session and named once
  * at its end; no gate behind them until the data says where one goes. */
 static double job_chassis_lo, job_chassis_hi;
@@ -607,8 +614,11 @@ static int cnc_is_running(void)
     return strncmp(buf, "running", 7) == 0;
 }
 
+static uint32_t heater_pct = 0;     /* the duty last commanded */
+
 static void heater_set_pct(uint32_t pct)
 {
+    heater_pct = pct;
     wr_attr_long("thermal/heater_pwm", (long)pct * 65535 / 100);
 }
 
@@ -1714,6 +1724,60 @@ static void engine_tick(void)
     int have_down = read_temp("pic/water_temp_1", &down);
     int have_up = read_temp("pic/water_temp_2", &up);
 
+    /* The sensors themselves. Blind on either coolant sensor, the
+     * ceiling, the floor, the critical line, the warm-up and the flow
+     * check can none of them judge, so past SENSOR_FAIL_TICKS the engine
+     * says so (SENSOR: fire blocked, hold) and takes the heater off: a
+     * flow check in flight is abandoned and asked for again once the
+     * readings are back, a warm-up gets its heater back then. The gates
+     * keep their state throughout; the verdict is released the moment
+     * both sensors read again. */
+    if (have_down && have_up) {
+        sensor_fail_ticks = 0;
+        if (sensor_alarm) {
+            sensor_alarm = 0;
+            info("coolant sensors reading again");
+            if (over_temp_gate)
+                overtemp_warn(0);
+            else {
+                pthread_mutex_lock(&mu);
+                pub_reason[0] = '\0';
+                pthread_mutex_unlock(&mu);
+            }
+            if (cool_state == Cool_Warmup)
+                heater_set_pct(flow_heater_pct);
+            else if (cool_state == Cool_Run && flow_check_s > 0 &&
+                     !flow_check_active && !flow_check_pending) {
+                flow_check_pending = 1;
+                flow_pending_since = now;
+                flow_settle_warned = 0;
+            }
+        }
+    } else {
+        if (sensor_fail_ticks < UINT32_MAX)
+            sensor_fail_ticks++;
+        if (!sensor_alarm && sensor_fail_ticks >= SENSOR_FAIL_TICKS) {
+            sensor_alarm = 1;
+            char msg[112];
+            snprintf(msg, sizeof(msg),
+                     "SENSOR: coolant %s unreadable for %u s - fire blocked, "
+                     "hold, heater off",
+                     !have_down && !have_up ? "sensors"
+                     : !have_up ? "upstream sensor" : "downstream sensor",
+                     (unsigned)sensor_fail_ticks);
+            warn(msg);
+            if (flow_check_active) {
+                /* The heater ran into the blind period: the settled
+                 * window the next check baselines on starts afresh. */
+                flow_check_active = 0;
+                down_hist_n = 0;
+                info("flow check abandoned blind; asked for again once the "
+                     "sensors read");
+            }
+            heater_set_pct(0);
+        }
+    }
+
     if (have_up && gate_coolant_off) {
         /* The ceiling is at its off end: no gate, and no hold from it.
          * The reading is still watched against the shipped default so
@@ -1781,7 +1845,7 @@ static void engine_tick(void)
             pub_reason[0] = '\0';
             pthread_mutex_unlock(&mu);
         }
-    } else if (cold_gate) {
+    } else if (cold_gate && gate_floor_off) {
         cold_gate = 0;
         pthread_mutex_lock(&mu);
         pub_reason[0] = '\0';
@@ -2133,18 +2197,20 @@ static void engine_tick(void)
                         : crash_w.alert ? "BUMP"
                         : airflow_alarm ? "AIRFLOW"
                         : critical_alarm ? "CRITICAL"
+                        : sensor_alarm ? "SENSOR"
                         : over_temp_gate ? "OVERTEMP"
                         : cold_gate ? "COLD"
                         : warming ? "WARMUP"
                         : flow_verdict == Flow_Fault ? "FAULT"
                         : flow_verdict == Flow_Suspect ? "SUSPECT" : "OK";
     int hold = fire_alarm || crash_w.alarm || flame_alert || crash_w.alert
-             || airflow_alarm || critical_alarm
+             || airflow_alarm || critical_alarm || sensor_alarm
              || over_temp_gate || cold_gate || warming
              || (armed && flow_verdict != Flow_Normal);
     int fire_ok = fresh && !fire_alarm && !crash_w.alarm && !flame_alert
                 && !crash_w.alert && !airflow_alarm
-                && !critical_alarm && !over_temp_gate && !cold_gate && !warming
+                && !critical_alarm && !sensor_alarm
+                && !over_temp_gate && !cold_gate && !warming
                 && flow_verdict != Flow_Fault;
 
     pthread_mutex_lock(&mu);

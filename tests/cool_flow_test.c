@@ -19,6 +19,18 @@
  *   D. lit CW, no flow:     SUSPECT (the share never masks a stopped pump)
  *   E. absurd coefficient:  the share is bounded, no flow still SUSPECT
  *   F. density model:       the density coefficient applies (0.77 of CW)
+ *
+ * The same harness drives the verdict a coolant sensor read failure
+ * produces (a sysfs error, not a rail value): the engine is blind on
+ * every coolant gate, so it says so rather than fire on:
+ *
+ *   H. blind mid-run:       one failed read tolerated, two are SENSOR
+ *                           (fire blocked, hold, heater off), released
+ *                           the moment the reading is back
+ *   I. blind in a check:    the heater goes off, the check is abandoned
+ *                           and asked for again once the sensors read
+ *   J. blind under the floor: COLD keeps its state through SENSOR
+ *   K. blind in a warm-up:  the heater goes off and comes back
  */
 #define GF_SYSFS    "cool-flow-test/sys/"
 #define VERDICT_DIR "cool-flow-test/run"
@@ -153,6 +165,7 @@ static const double BASE_C = 22.3;
 typedef struct {
     int flow;                       /* pump running */
     int lit;                        /* tube at full current from the open */
+    int dead_down, dead_up;         /* a sensor whose read fails */
     double k_true;                  /* the tube's real C per raw-second */
     int session;                    /* ticks since the session opened */
     int heater_ticks;               /* ticks the heater has been on */
@@ -180,8 +193,14 @@ static void loop_tick(loop_t *L)
     double offset = L->session > 0 ? -1.0 + ((L->session & 1) ? 0.6 : 0.0) : 0.0;
     double down = BASE_C + offset + heater_c + L->tube_c;
     double up = BASE_C + offset + 0.07 * heater_c + L->tube_c;
-    put_long("pic/water_temp_1", raw_for(down));
-    put_long("pic/water_temp_2", raw_for(up));
+    if (L->dead_down)
+        unlink(GF_SYSFS "pic/water_temp_1");
+    else
+        put_long("pic/water_temp_1", raw_for(down));
+    if (L->dead_up)
+        unlink(GF_SYSFS "pic/water_temp_2");
+    else
+        put_long("pic/water_temp_2", raw_for(up));
     put_long("pic/hv_current", hv);
     if (L->session > 0)
         L->session++;
@@ -248,6 +267,32 @@ static flow_verdict_t run_check(loop_t *L, int lit, int max_ticks)
     printf("    (the check never completed in %d ticks; active=%d pending=%d)\n",
            max_ticks, flow_check_active, flow_check_pending);
     return Flow_Fault;
+}
+
+/* One tick of an open run session. */
+static void run_tick(loop_t *L)
+{
+    loop_tick(L);
+    fake_now += 1.0;
+    cool_state_report("run", 1, -1, -1, -1, NULL);
+    engine_tick();
+}
+
+/* Open a run session on a settled loop (the session's first tick runs). */
+static void open_session(loop_t *L)
+{
+    close_session(L);
+    L->lit = 0;
+    L->heater_ticks = 0;
+    L->tube_c = 0.0;
+    for (int i = 0; i < 20; i++) {
+        loop_tick(L);
+        fake_now += 1.0;
+        cool_state_report("idle", 0, -1, -1, -1, NULL);
+        engine_tick();
+    }
+    L->session = 1;
+    run_tick(L);
 }
 
 static int failures;
@@ -345,10 +390,111 @@ int main(void)
     kv[0] = NULL;
     conf_reload();
 
+    printf("H. a coolant sensor that stops reading mid-run\n");
+    cool_state_model(0);
+    L.flow = 1;
+    L.lit = 0;
+    L.k_true = LASER_HEAT_CW;
+    v = run_check(&L, 0, 200);
+    CHECK(v == Flow_Normal && pub_fire_ok && !strcmp(pub_verdict, "OK"),
+          "the loop verified: fire permitted");
+    L.dead_up = 1;
+    run_tick(&L);
+    CHECK(pub_fire_ok && !strcmp(pub_verdict, "OK"), "one failed read is tolerated");
+    run_tick(&L);
+    CHECK(!pub_fire_ok && pub_hold && !strcmp(pub_verdict, "SENSOR"),
+          "two failed reads: SENSOR, fire blocked, hold");
+    CHECK(strstr(last_log, "upstream") != NULL, "the line names the sensor");
+    CHECK(heater_pct == 0, "the heater is off");
+    for (int i = 0; i < 5; i++)
+        run_tick(&L);
+    CHECK(!pub_fire_ok && !strcmp(pub_verdict, "SENSOR"),
+          "and it stays so while the sensor is dead");
+    L.dead_up = 0;
+    run_tick(&L);
+    CHECK(pub_fire_ok && !strcmp(pub_verdict, "OK"), "the reading back: released at once");
+    L.dead_down = 1;
+    run_tick(&L);
+    run_tick(&L);
+    CHECK(!pub_fire_ok && !strcmp(pub_verdict, "SENSOR") && strstr(last_log, "downstream") != NULL,
+          "the downstream sensor alone is enough to blind the engine");
+    L.dead_down = 0;
+
+    printf("I. blind during a flow check: the heater goes off, the check is asked for again\n");
+    open_session(&L);
+    for (int i = 0; i < 200 && !flow_check_active; i++)
+        run_tick(&L);
+    CHECK(flow_check_active && heater_pct > 0,
+          "a check is under way with the heater on");
+    L.dead_down = 1;
+    run_tick(&L);
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "SENSOR") && !flow_check_active && heater_pct == 0,
+          "blind: SENSOR, the check abandoned, the heater off");
+    L.dead_down = 0;
+    run_tick(&L);
+    printf("    verdict=%s pending=%d active=%d heater=%u\n", pub_verdict,
+           flow_check_pending, flow_check_active, (unsigned)heater_pct);
+    CHECK(!strcmp(pub_verdict, "OK") && flow_check_pending,
+          "reading again: OK, and the check is asked for again");
+    {
+        int saw = 0;
+        flow_verdict_t vv = Flow_Fault;
+        for (int i = 0; i < 300; i++) {
+            run_tick(&L);
+            if (flow_check_active)
+                saw = 1;
+            else if (saw) {
+                vv = flow_verdict;
+                break;
+            }
+        }
+        CHECK(saw && vv == Flow_Normal, "the re-asked check runs and verifies flow");
+    }
+
+    printf("J. blind under the floor: COLD keeps its state\n");
+    kv[0] = "cool_temp_min"; kv[1] = "30"; kv[2] = NULL;   /* the loop at 22.3 C is under it */
+    open_session(&L);
+    run_tick(&L);
+    CHECK(cold_gate && !pub_fire_ok && !strcmp(pub_verdict, "COLD"),
+          "the loop under the floor: COLD, fire blocked");
+    L.dead_up = 1;
+    for (int i = 0; i < 3; i++)
+        run_tick(&L);
+    CHECK(cold_gate, "blind: the floor keeps its state");
+    CHECK(!pub_fire_ok && !strcmp(pub_verdict, "SENSOR"), "and the verdict says SENSOR");
+    L.dead_up = 0;
+    run_tick(&L);
+    CHECK(cold_gate && !pub_fire_ok && !strcmp(pub_verdict, "COLD"),
+          "reading again: still COLD, never a moment of fire");
+    kv[0] = NULL;
+    open_session(&L);           /* the floor back at its default */
+    run_tick(&L);
+    CHECK(!cold_gate && !strcmp(pub_verdict, "OK"), "the floor back at its default: the gate clears");
+    close_session(&L);
+
+    printf("K. blind in a warm-up: the heater goes off and comes back\n");
+    kv[0] = "cool_temp_start"; kv[1] = "30"; kv[2] = NULL;
+    open_session(&L);
+    CHECK(cool_state == Cool_Warmup && heater_pct > 0 && !strcmp(pub_verdict, "WARMUP"),
+          "the session opens under the start gate: warm-up, heater on");
+    L.dead_up = 1;
+    run_tick(&L);
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "SENSOR") && heater_pct == 0,
+          "blind: SENSOR, the heater off");
+    L.dead_up = 0;
+    run_tick(&L);
+    CHECK(cool_state == Cool_Warmup && !strcmp(pub_verdict, "WARMUP") && heater_pct > 0,
+          "reading again: the warm-up holds on with its heater back");
+    kv[0] = NULL;
+    close_session(&L);
+
     printf(failures ? "FAIL: %d check(s) failed\n"
                     : "PASS: the flow check reads means, takes the tube's share off, "
-                      "bounds it, still sees a stopped pump under a lit tube, and takes "
-                      "the air-assist offset off while the fan runs\n",
+                      "bounds it, still sees a stopped pump under a lit tube, takes "
+                      "the air-assist offset off while the fan runs, and says SENSOR "
+                      "rather than fire blind\n",
            failures);
     return failures ? 1 : 0;
 }
