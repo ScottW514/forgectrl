@@ -736,7 +736,7 @@ static const struct {
  * secrets shown only as set/unset. */
 static void settings_snapshot(FILE *out)
 {
-    char val[128];
+    char val[192];            /* the longest legal value: a 180-character dose curve */
     for (size_t i = 0; i < N_SETTINGS; i++) {
         int have = settings_get(setting_defs[i].key, val, sizeof(val)) == 0 &&
                    setting_defs[i].valid(val);
@@ -922,7 +922,7 @@ static double setting_gate_value(const gate_setting_t *g, void *ctx)
 
 static int reply_settings(struct _u_response *res)
 {
-    char body[8192], val[128], mid[16], fwver[48];
+    char body[8192], val[192], mid[16], fwver[48];
     size_t off = 0;
 
     read_fw_version(fwver, sizeof(fwver));
@@ -1651,6 +1651,7 @@ int main(int argc, char **argv)
     auth_init();
     cam_engine_init();
     diag_init();
+    curverec_init();
     cool_init();
     super_init();
     update_init();
@@ -1778,6 +1779,10 @@ int main(int argc, char **argv)
     fflog(LOG_NOTICE, "shutting down");
     ulfius_stop_framework(&inst);
     ulfius_clean_instance(&inst);
+    /* A recording in progress ends here and puts the floor and curve
+     * it overrode back; left running, the raw curve would be in force
+     * for every job after the restart. */
+    curverec_stop();
     super_shutdown();
     cool_shutdown();
     cam_engine_shutdown();

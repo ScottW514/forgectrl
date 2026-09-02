@@ -48,16 +48,19 @@
 #define SW_BIT_DOORS     3
 #define SW_BIT_INTERLOCK 5
 
+/* 1 = a lid or interlock is open, 0 = closed, -1 = unreadable. Fails
+ * closed: a switch device that cannot be read is no license to drive
+ * the gantry with an opening the operator could reach into. */
 static int enclosure_open(void)
 {
     uint8_t sw[2] = { 0 };
     int fd = open(SWITCH_DEV, O_RDONLY | O_NONBLOCK);
     if (fd < 0)
-        return 0;                       /* cannot read: do not block motion */
+        return -1;
     int ok = ioctl(fd, EVIOCGSW(sizeof(sw)), sw) >= 0;
     close(fd);
     if (!ok)
-        return 0;
+        return -1;
     return !(sw[0] & (1u << SW_BIT_DOORS)) || (sw[0] & (1u << SW_BIT_INTERLOCK));
 }
 
@@ -169,11 +172,15 @@ int liveness_probe(int pulse_fd, char *detail, size_t dlen)
         snprintf(detail, dlen, "kernel not idle (%s)", st);
         return -1;
     }
-    if (enclosure_open()) {
-        /* A lid or interlock is open: do not drive the gantry. Report
-         * "cannot probe" so the supervisor proceeds without marking a
-         * motion fault - the probe re-runs on the next spawn. */
-        snprintf(detail, dlen, "door/interlock open - motion probe skipped");
+    int enclosure = enclosure_open();
+    if (enclosure != 0) {
+        /* A lid or interlock is open, or the switches cannot be read: do
+         * not drive the gantry. Report "cannot probe" so the supervisor
+         * proceeds without marking a motion fault - the probe re-runs on
+         * the next spawn. */
+        snprintf(detail, dlen, enclosure > 0
+                 ? "door/interlock open - motion probe skipped"
+                 : "switch device unreadable - motion probe skipped");
         return -1;
     }
 

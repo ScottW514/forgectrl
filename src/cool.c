@@ -133,6 +133,7 @@
 #include "settings.h"
 #include "status.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <math.h>
 #include <pthread.h>
@@ -559,6 +560,16 @@ static int wr_attr(const char *attr, const char *val)
     int ret = write(fd, val, strlen(val)) < 0 ? -1 : 0;
     close(fd);
     return ret;
+}
+
+/* The engine's own safing (stop motion, lock the laser): a write that
+ * fails is named at the highest severity, and the callers repeat it
+ * while their alarm stands. */
+static void safing_write(const char *attr, const char *val)
+{
+    if (wr_attr(attr, val) != 0)
+        fflog(LOG_CRIT, "cool: safing write %s=%s failed: %s", attr, val,
+              strerror(errno));
 }
 
 static void wr_attr_long(const char *attr, long val)
@@ -1364,8 +1375,8 @@ static void engine_tick(void)
                 warn("controller silent while armed/running - "
                      "stopping motion, locking laser");
             silent_safed = 1;
-            wr_attr("cnc/stop", "1");
-            wr_attr("cnc/laser_latch", "1");
+            safing_write("cnc/stop", "1");
+            safing_write("cnc/laser_latch", "1");
         }
         mode = 0;
         armed = 0;
@@ -1435,8 +1446,8 @@ static void engine_tick(void)
             warn("LASER EMISSION SENSED with no armed window - "
                  "stopping motion, locking laser");
         emission_warned = 1;
-        wr_attr("cnc/stop", "1");
-        wr_attr("cnc/laser_latch", "1");
+        safing_write("cnc/stop", "1");
+        safing_write("cnc/laser_latch", "1");
     } else if (em == 0)
         emission_warned = 0;
 
@@ -1506,8 +1517,8 @@ static void engine_tick(void)
                      "LID IR FIRE SIGNAL (quartiles %ld %ld) - motion "
                      "stopped, laser locked, smoke airflow held", q[0], q[1]);
             warn(msg);
-            wr_attr("cnc/stop", "1");
-            wr_attr("cnc/laser_latch", "1");
+            safing_write("cnc/stop", "1");
+            safing_write("cnc/laser_latch", "1");
             fans_run();     /* full smoke-clear airflow */
         } else if (!crit && ir_over_ticks >= FIRE_IR_TICKS && !flame_alert
                    && !fire_alarm) {
@@ -1607,8 +1618,8 @@ static void engine_tick(void)
                              "HEAD CRASH SIGNAL (axes %s) - motion stopped, "
                              "laser locked", crash_axes_name(crash_w.axes));
                     warn(msg);
-                    wr_attr("cnc/stop", "1");
-                    wr_attr("cnc/laser_latch", "1");
+                    safing_write("cnc/stop", "1");
+                    safing_write("cnc/laser_latch", "1");
                     break;
                 case CrashEv_Alert:
                     snprintf(msg, sizeof(msg),

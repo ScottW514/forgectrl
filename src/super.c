@@ -177,15 +177,23 @@ static int probe_sequence(int fd)
     return 0;
 }
 
+/* The safing writes (cnc/stop, cnc/laser_latch) are the real safing
+ * mechanism under the device broker, so a write that fails is named at
+ * the highest severity rather than lost. */
 static void wr_attr(const char *attr, const char *val)
 {
     char path[96];
     snprintf(path, sizeof(path), "/sys/glowforge/%s", attr);
     int fd = open(path, O_WRONLY);
-    if (fd >= 0) {
-        (void)!write(fd, val, strlen(val));
-        close(fd);
+    if (fd < 0) {
+        fflog(LOG_CRIT, "super: cannot open %s to write %s: %s", attr, val,
+              strerror(errno));
+        return;
     }
+    if (write(fd, val, strlen(val)) < 0)
+        fflog(LOG_CRIT, "super: writing %s to %s failed: %s", val, attr,
+              strerror(errno));
+    close(fd);
 }
 
 static const char *ctl_name(ctl_t c)

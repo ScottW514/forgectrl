@@ -20,6 +20,7 @@ int curverec_start(char *err, size_t elen);
 /* Stop and fit now (the auto-stop needs 20 s of dark after the last
  * rung); also the abort path - the saved keys are restored either way. */
 void curverec_stop(void);
+void curverec_init(void);
 
 /* The recorder state as JSON: state (idle|waiting|recording|done|
  * failed), reason, elapsed_s, samples, and on done the fitted points

@@ -80,6 +80,47 @@ static pthread_t thread;
 static int thread_live;
 static volatile int stop_requested;
 static char saved_floor[32], saved_curve[192];
+
+/* The marker that carries the saved floor and curve across a daemon
+ * exit mid-recording: two lines, floor then curve, an empty line for a
+ * value that was unset. */
+#define SAVED_MARKER "/data/forgefirm/curverec.saved"
+
+static void saved_write(void)
+{
+    FILE *f = fopen(SAVED_MARKER, "w");
+    if (!f) {
+        fflog(LOG_ERR, "curverec: cannot write %s: %s", SAVED_MARKER, strerror(errno));
+        return;
+    }
+    fprintf(f, "%s\n%s\n", saved_floor, saved_curve);
+    fclose(f);
+}
+
+static void saved_restore(void)
+{
+    settings_set("laser_floor_density", saved_floor);
+    settings_set("laser_dose_curve", saved_curve);
+    unlink(SAVED_MARKER);
+}
+
+void curverec_init(void)
+{
+    FILE *f = fopen(SAVED_MARKER, "r");
+    if (!f)
+        return;
+    char floor[32] = "", curve[192] = "";
+    if (fgets(floor, sizeof(floor), f))
+        floor[strcspn(floor, "\r\n")] = '\0';
+    if (fgets(curve, sizeof(curve), f))
+        curve[strcspn(curve, "\r\n")] = '\0';
+    fclose(f);
+    snprintf(saved_floor, sizeof(saved_floor), "%s", floor);
+    snprintf(saved_curve, sizeof(saved_curve), "%s", curve);
+    saved_restore();
+    fflog(LOG_WARNING, "curverec: a recording was cut short by a daemon exit; "
+          "the floor and curve it overrode are restored");
+}
 static char ladder_lines[LADDER_MAX_LINES][40];
 static int ladder_n;
 static char result_curve[256];
@@ -212,8 +253,7 @@ static void ladder_build(void);
 
 static void restore_keys_locked(void)
 {
-    settings_set("laser_floor_density", saved_floor);
-    settings_set("laser_dose_curve", saved_curve);
+    saved_restore();
 }
 
 static void finish_locked(int state, const char *reason)
@@ -407,6 +447,10 @@ int curverec_start(char *err, size_t elen)
         saved_floor[0] = '\0';
     if (settings_get("laser_dose_curve", saved_curve, sizeof(saved_curve)) != 0)
         saved_curve[0] = '\0';
+    /* The overrides are persisted in the settings file for the run; the
+     * saved values go to a marker first, so a daemon that dies or is
+     * restarted mid-recording restores them at its next start. */
+    saved_write();
     settings_set("laser_floor_density", "0");
     settings_set("laser_dose_curve", "off");
     cr_state = CR_WAITING;

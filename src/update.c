@@ -406,6 +406,41 @@ struct slot_info {
     int booted, next;
 };
 
+/* Bounded append for a JSON body: off never passes the buffer, so a
+ * body that outgrows it is truncated rather than written past. */
+static void bput(char *buf, size_t size, size_t *off, const char *fmt, ...)
+{
+    if (*off >= size)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + *off, size - *off, fmt, ap);
+    va_end(ap);
+    if (n < 0)
+        return;
+    *off += (size_t)n;
+    if (*off >= size)
+        *off = size - 1;
+}
+
+/* Is this slot the one the saved environment boots next (ffboot -l)?
+ * A write into the next-boot slot has no revert behind it: a failed
+ * or interrupted write there leaves the next boot on a half-written
+ * root. Unreadable counts as next. */
+static int slot_is_next(const struct slot_target *t)
+{
+    char raw[4096];
+    FILE *p = popen(FFBOOT " -l 2>/dev/null", "r");
+    if (!p)
+        return 1;
+    size_t n = fread(raw, 1, sizeof(raw) - 1, p);
+    raw[n] = '\0';
+    pclose(p);
+    char key[48];
+    snprintf(key, sizeof(key), "slot.%s.next=", t->name);
+    return strstr(raw, key) != NULL;
+}
+
 int cb_slots(const struct _u_request *req, struct _u_response *res,
              void *user_data)
 {
@@ -476,7 +511,7 @@ int cb_slots(const struct _u_request *req, struct _u_response *res,
 
     char body[8192];
     size_t off = 0;
-    off += (size_t)snprintf(body + off, sizeof(body) - off,
+    bput(body, sizeof(body), &off,
                             "{\"booted\":\"%s\",\"env\":{%s},\"slots\":{",
                             booted_root(), env_json);
     /* Always show the two firmware slots (a/b). Only surface sd and the
@@ -491,7 +526,7 @@ int cb_slots(const struct _u_request *req, struct _u_response *res,
                      !strcmp(targets[t].name, "b");
         if (!always && !present)
             continue;
-        off += (size_t)snprintf(body + off, sizeof(body) - off,
+        bput(body, sizeof(body), &off,
             "%s\"%s\":{\"device\":\"%s\",\"present\":\"%s\","
             "\"state\":\"%s\",\"type\":\"%s\",\"version\":\"%s\","
             "\"kernel\":\"%s\",\"booted\":%s,\"next\":%s}",
@@ -502,7 +537,7 @@ int cb_slots(const struct _u_request *req, struct _u_response *res,
             si[t].next ? "true" : "false");
         emitted = 1;
     }
-    off += (size_t)snprintf(body + off, sizeof(body) - off,
+    bput(body, sizeof(body), &off,
                             "},\"archives\":[");
 
     /* Only factory-rootfs archives are user-restorable; recovery-boot
@@ -531,7 +566,7 @@ int cb_slots(const struct _u_request *req, struct _u_response *res,
             if (strlen(ds) >= 8)
                 snprintf(date, sizeof(date), "%.4s-%.2s-%.2s",
                          ds, ds + 4, ds + 6);
-            off += (size_t)snprintf(body + off, sizeof(body) - off,
+            bput(body, sizeof(body), &off,
                 "%s{\"file\":\"%s\",\"bytes\":%ld,\"version\":\"%s\","
                 "\"date\":\"%s\"}",
                 first ? "" : ",", name, (long)st.st_size, ver, date);
@@ -539,7 +574,7 @@ int cb_slots(const struct _u_request *req, struct _u_response *res,
         }
         closedir(d);
     }
-    off += (size_t)snprintf(body + off, sizeof(body) - off,
+    bput(body, sizeof(body), &off,
                             "],\"staged\":{");
     const struct { const char *key; const char *path; } staged[] = {
         { "download", DL_FW }, { "upload", UP_FW },
@@ -550,13 +585,11 @@ int cb_slots(const struct _u_request *req, struct _u_response *res,
         char ver[48] = "";
         if (have)
             fw_meta_version(staged[s].path, ver, sizeof(ver));
-        off += (size_t)snprintf(body + off, sizeof(body) - off,
+        bput(body, sizeof(body), &off,
             "%s\"%s\":{\"present\":%s,\"bytes\":%ld,\"version\":\"%s\"}",
             s ? "," : "", staged[s].key, have ? "true" : "false",
             have ? (long)st.st_size : 0, ver);
     }
-    if (off >= sizeof(body))            /* keep the closing append in range */
-        off = sizeof(body) - 1;
     snprintf(body + off, sizeof(body) - off, "}}");
     return reply_json(res, 200, body);
 }
@@ -826,6 +859,10 @@ int cb_update_apply(const struct _u_request *req, struct _u_response *res,
     if (is_booted_root(t->dev))
         return reply_err(res, 409,
                          "refusing to write the booted root slot");
+    if (slot_is_next(t))
+        return reply_err(res, 409,
+                         "refusing to write the slot selected for the next boot - "
+                         "point the next boot back at the running slot first");
     if (!slot_geometry_ok(t))
         return reply_err(res, 409,
                          "target slot is not the 200 MiB factory geometry");
@@ -1062,6 +1099,10 @@ int cb_restore_factory(const struct _u_request *req,
     if (is_booted_root(t->dev))
         return reply_err(res, 409,
                          "refusing to write the booted root slot");
+    if (slot_is_next(t))
+        return reply_err(res, 409,
+                         "refusing to write the slot selected for the next boot - "
+                         "point the next boot back at the running slot first");
     if (!slot_geometry_ok(t))
         return reply_err(res, 409,
                          "target slot is not the 200 MiB factory geometry");
