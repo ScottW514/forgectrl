@@ -380,6 +380,7 @@ static const char *pub_phase = "idle";
 
 /* Engine-thread internals (no locking needed). */
 static cool_state_t cool_state = Cool_Idle;
+static int start_cool;              /* the busy-start cooldown airflow still stands */
 static flow_verdict_t flow_verdict = Flow_Normal;
 static uint32_t smoke_s = COOLDOWN_SMOKE_S;
 static uint32_t cooldown_max_s = COOLDOWN_MAX_S;
@@ -659,6 +660,7 @@ static void fans_idle(void)
     aa_write(AIR_ASSIST_IDLE);
     wr_attr_long("thermal/exhaust_pwm", EXHAUST_IDLE);
     wr_attr_long("thermal/intake_pwm", INTAKE_IDLE);
+    start_cool = 0;
 }
 
 /* Run duties: the per-job report profile when given, factory values
@@ -2157,6 +2159,15 @@ static void engine_tick(void)
      * (cloud mode preloads whole jobs) after the report-driven phases
      * expire, and airflow must never fall below cooldown duty while
      * the machine can still be depositing energy. */
+    /* The cooldown airflow a busy engine start took (the kernel not idle
+     * at that moment: a takeover's safe state, a respawn mid-move) stands
+     * until the machine is idle with no session opened. The idle state
+     * never re-applies its own duties, so without this the exhaust ran at
+     * cooldown duty for good after a kernel drill's takeover. */
+    if (start_cool && cool_state == Cool_Idle && machine_is_idle()) {
+        fans_idle();
+        fflog(LOG_INFO, "cool: the machine is idle after the busy start; idle airflow");
+    }
     if (cool_state == Cool_Smoke && now >= phase_until) {
         if ((have_up && up > temp_resume_c) || cnc_is_running()) {
             cool_state = Cool_Thermal;
@@ -2328,7 +2339,8 @@ void cool_init(void)
         fans_idle();
     else {
         fflog(LOG_WARNING, "cool: the machine is busy at engine start; "
-              "cooldown airflow until its controller reports");
+              "cooldown airflow until it is idle or a session opens");
+        start_cool = 1;
         fans_cool();
     }
 
