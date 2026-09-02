@@ -424,58 +424,110 @@ out_norestart:
  * each sensor; the recommendation is the mean of the edges' magnitudes,
  * and the spread across them is reported so a noisy loop refuses rather
  * than recommends. */
-/* The single-sample noise on these sensors is about 5 counts, so an
- * edge read as the difference of two short means needs long ones: 3 s
- * at 8 Hz is 24 samples a side, about 1 count of noise on each mean.
- * (1.5 s at 4 Hz read 10 to 21 counts across six edges of a 16-count
- * step, and refused its own result.) */
+/* What the PIC returns for a thermistor depends on how soon the read
+ * follows the previous PIC read: the second of a pair issued within a
+ * tenth of a millisecond comes back 6 to 8 counts high with a wide
+ * spread (either sensor, either order), a pair 0.5 to 10 ms apart reads
+ * tight and a steady 3 counts above sparse reads, and other readers'
+ * traffic lands such pairs at random. Two sensors read back to back at
+ * 8 Hz and averaged gave edges that wandered by up to 12 counts
+ * (spreads of 11 to 23 over six edges of a 15-count step, refused).
+ * Each sensor is therefore read half an interval after the other, the
+ * same pattern before and after the edge so the pattern's own bias
+ * cancels in the difference, and each window is the interquartile mean
+ * of its 48 samples (3 s at 16 Hz, the lowest and highest quarter
+ * dropped): what other traffic still lands in a window falls out on
+ * both sides, and the quantization dithers to a fraction of a count. */
 #define AA_CYCLES     3
-#define AA_HZ         8
-#define AA_WIN_S      3.0
+#define AA_HZ         16
+#define AA_WIN_S      3
 #define AA_DWELL_S    10
 #define AA_IDLE       204
 #define AA_RUN        1023
 #define AA_EDGES      (AA_CYCLES * 2)
-#define AA_MAX_SPREAD 8.0
+/* The fan's current and the water's slow drift put about 2 counts on a
+ * window and up to 4 on an edge (spreads of 4 to 8 over six edges of a
+ * 16-count step on a quiet bench); a fan that did not follow its duty
+ * or a warm slug circulating past the sensors read 15 to 25. */
+#define AA_MAX_SPREAD 12.0
 #define AA_MIN_COUNTS 3.0
 
 /* One edge: settle the fan's new state and read the step on both
  * sensors. Returns 0, -1 on abort. */
+/* One window of both sensors at AA_HZ, reduced to the interquartile
+ * mean of each; the extremes and the count go to the log, so a window
+ * that swallowed excursions shows itself. */
+#define AA_N (AA_WIN_S * AA_HZ)
+
+struct aa_win {
+    long v1[AA_N], v2[AA_N];
+    int n;
+    double m1, m2;
+    long lo1, hi1, lo2, hi2;
+};
+
+static int cmp_long(const void *a, const void *b)
+{
+    long x = *(const long *)a, y = *(const long *)b;
+    return x < y ? -1 : x > y;
+}
+
+/* The mean of the middle half of n sorted samples (all of them below
+ * four, where a quarter is nothing to drop). */
+static double iq_mean(long *v, int n)
+{
+    qsort(v, (size_t)n, sizeof(*v), cmp_long);
+    int from = n / 4, to = n - n / 4;
+    double s = 0;
+    for (int i = from; i < to; i++)
+        s += (double)v[i];
+    return s / (double)(to - from);
+}
+
+static int aa_window(struct aa_win *w)
+{
+    memset(w, 0, sizeof(*w));
+    for (int i = 0; i < AA_N; i++) {
+        long r1 = rd_long("pic/water_temp_1");
+        usleep(1000000 / AA_HZ / 2);
+        long r2 = rd_long("pic/water_temp_2");
+        if (r1 > 0 && r2 > 0) {
+            w->v1[w->n] = r1;
+            w->v2[w->n] = r2;
+            w->n++;
+        }
+        usleep(1000000 / AA_HZ / 2);
+        if (aborted())
+            return -1;
+    }
+    if (!w->n)
+        return -1;
+    w->m1 = iq_mean(w->v1, w->n);
+    w->m2 = iq_mean(w->v2, w->n);
+    w->lo1 = w->v1[0];
+    w->hi1 = w->v1[w->n - 1];
+    w->lo2 = w->v2[0];
+    w->hi2 = w->v2[w->n - 1];
+    return 0;
+}
+
 static int aa_edge(long duty, double *step_down, double *step_up)
 {
-    enum { N = (int)(AA_WIN_S * AA_HZ) };
-    double b1 = 0, b2 = 0, a1 = 0, a2 = 0;
-    int nb = 0, na = 0;
-    for (int i = 0; i < N; i++) {
-        long r1 = rd_long("pic/water_temp_1"), r2 = rd_long("pic/water_temp_2");
-        if (r1 > 0 && r2 > 0) {
-            b1 += (double)r1;
-            b2 += (double)r2;
-            nb++;
-        }
-        usleep(1000000 / AA_HZ);
-        if (aborted())
-            return -1;
-    }
+    struct aa_win b, a;
+    if (aa_window(&b))
+        return -1;
     cool_diag_aa(duty);
     usleep(500000);                     /* the fan's current settles */
-    for (int i = 0; i < N; i++) {
-        long r1 = rd_long("pic/water_temp_1"), r2 = rd_long("pic/water_temp_2");
-        if (r1 > 0 && r2 > 0) {
-            a1 += (double)r1;
-            a2 += (double)r2;
-            na++;
-        }
-        usleep(1000000 / AA_HZ);
-        if (aborted())
-            return -1;
-    }
-    if (!nb || !na)
+    if (aa_window(&a))
         return -1;
-    *step_down = a1 / na - b1 / nb;
-    *step_up = a2 / na - b2 / nb;
+    *step_down = a.m1 - b.m1;
+    *step_up = a.m2 - b.m2;
+    fflog(LOG_INFO, "diag aa %ld: down before n=%d [%ld..%ld] %.1f after n=%d [%ld..%ld] %.1f; "
+          "up before n=%d [%ld..%ld] %.1f after n=%d [%ld..%ld] %.1f",
+          duty, b.n, b.lo1, b.hi1, b.m1, a.n, a.lo1, a.hi1, a.m1,
+          b.n, b.lo2, b.hi2, b.m2, a.n, a.lo2, a.hi2, a.m2);
     /* The rest of the dwell, so the loop is steady before the next edge. */
-    for (int i = 0; i < AA_DWELL_S - (int)AA_WIN_S - 1; i++) {
+    for (int i = 0; i < AA_DWELL_S - AA_WIN_S - 1; i++) {
         double d, u;
         sample(&d, &u);
         sleep(1);
