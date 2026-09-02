@@ -877,6 +877,10 @@ int update_upload_sink(const struct _u_request *req, const char *key,
     (void)user_data;
     if (!req->http_url || strncmp(req->http_url, "/update/upload", 14))
         return U_OK;                    /* not ours: ignore */
+    /* Unauthorized bytes touch nothing: not the staged archive, not an
+     * authorized upload in flight. The handler answers them. */
+    if (!auth_write_permitted(req))
+        return U_OK;
 
     pthread_mutex_lock(&up_mu);
     if (off == 0) {
@@ -884,11 +888,10 @@ int update_upload_sink(const struct _u_request *req, const char *key,
             fclose(up_fp);              /* bound any leak from a prior upload */
             up_fp = NULL;
         }
-        /* Gate the flash-staging write: authorized, machine idle, and no
-         * diagnostic or update job running (the apply worker reads the
-         * same file - an ungated upload could truncate it mid-flash). */
-        if (!auth_write_permitted(req) || diag_running() ||
-            !machine_is_idle() || update_job_running()) {
+        /* Gate the flash-staging write: machine idle, and no diagnostic
+         * or update job running (the apply worker reads the same file -
+         * an ungated upload could truncate it mid-flash). */
+        if (diag_running() || !machine_is_idle() || update_job_running()) {
             up_error = 1;
             up_bytes = 0;
         } else {
@@ -915,14 +918,11 @@ int cb_update_upload(const struct _u_request *req, struct _u_response *res,
                      void *user_data)
 {
     (void)user_data;
-    if (!auth_write_ok(req, res)) {
-        pthread_mutex_lock(&up_mu);     /* discard whatever the sink staged */
-        if (up_fp) { fclose(up_fp); up_fp = NULL; }
-        up_error = 1;
-        pthread_mutex_unlock(&up_mu);
-        unlink(UP_FW);
+    /* The sink staged nothing for an unauthorized request; the staged
+     * archive and any authorized upload in flight are not this
+     * request's to discard. */
+    if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
-    }
 
     pthread_mutex_lock(&up_mu);
     if (up_fp) {

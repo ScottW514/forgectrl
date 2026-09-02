@@ -32,7 +32,8 @@ int cb_update_status(const struct _u_request *req, struct _u_response *res,
                      void *user_data);
 
 /* Streaming body sink for /update/upload (ulfius upload-file callback:
- * chunks land on disk, never in RAM). */
+ * chunks land on disk; the framework's own copy of the body is capped
+ * at max_post_body_size, set in main.c). */
 int update_upload_sink(const struct _u_request *req, const char *key,
                        const char *filename, const char *content_type,
                        const char *transfer_encoding, const char *data,

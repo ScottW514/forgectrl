@@ -305,6 +305,8 @@ static int spawn_output_relay(const char *tag)
 }
 
 /* Called with mu held. */
+static int lamp_pending;            /* the idle lamp is owed after a spawn (under mu) */
+
 static void spawn_locked(ctl_t ctl)
 {
     broker_open_locked();
@@ -379,8 +381,11 @@ static void spawn_locked(ctl_t ctl)
     fflog(LOG_NOTICE, "super: started %s controller (pid %d)",
           ctl_name(ctl), (int)pid);
     /* The idle lid lamp is asserted around every spawn: a cloud client
-     * drives its own level while it runs and leaves it behind. */
-    cam_lamp_apply_idle();
+     * drives its own level while it runs and leaves it behind. Applied
+     * by the loop once mu is dropped: the lamp write takes the camera
+     * control lock, which a snapshot or a pipeline setup can hold for
+     * seconds, and nothing that safes the machine may wait behind it. */
+    lamp_pending = 1;
 }
 
 /* Reap and, if the death was unexpected, safe the machine and arm the
@@ -530,7 +535,11 @@ static void *super_main(void *arg)
             } else
                 spawn_locked(want);
         }
+        int lamp = lamp_pending;
+        lamp_pending = 0;
         pthread_mutex_unlock(&mu);
+        if (lamp)
+            cam_lamp_apply_idle();
         usleep(200 * 1000);
         pthread_mutex_lock(&mu);
     }
