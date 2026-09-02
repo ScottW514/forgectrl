@@ -45,7 +45,7 @@ int main(void)
     const gate_setting_t *t = gate_settings(&n);
 
     printf("table shape\n");
-    CHECK(n == 21, "twenty-one gate settings");
+    CHECK(n == 22, "twenty-two gate settings");
     for (size_t i = 0; i < n; i++) {
         char msg[128];
         snprintf(msg, sizeof(msg), "%s: lo <= band_lo <= def <= band_hi <= hi", t[i].key);
@@ -59,7 +59,7 @@ int main(void)
     const gate_setting_t *fcs = gate_setting_find("cool_flow_check_s");
     const gate_setting_t *rise = gate_setting_find("cool_flow_rise");
     CHECK(tmax && tres && fcs && rise, "every key resolves");
-    CHECK(!gate_setting_find("cool_recheck_s"), "a non-gate key does not resolve");
+    CHECK(!gate_setting_find("cool_confirm_max_s"), "a non-gate key does not resolve");
     CHECK(!gate_setting_find(NULL), "NULL does not resolve");
     CHECK(tmax->gate && !strcmp(tmax->gate, "coolant_max") && tmax->off_end > 0,
           "the coolant ceiling is the coolant_max gate, off at its top");

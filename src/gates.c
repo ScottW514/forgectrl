@@ -84,6 +84,9 @@
  * cool_purge_min_current: the purge-air fan has no tachometer; its
  *   current reads about 1 off and about 630 on, and the floor sits
  *   between. Zero is the gate off.
+ * cool_recheck_s: how often the flow check repeats during a job. Zero
+ *   is the gate off: a pump that stops mid-job is then undetected until
+ *   the next job start.
  * cool_fan_grace_s: the spin-up window after the run profile is
  *   written, during which no floor counts. Not a gate, so no off end. */
 static const gate_setting_t table[] = {
@@ -102,6 +105,7 @@ static const gate_setting_t table[] = {
     { "cool_accel_y_alert",         "crash_y_alert", 112.0, 0.0, 255.0,  85.0, 145.0, -1 },
     { "cool_accel_abort",           "crash_abort",   133.0, 0.0, 255.0, 100.0, 170.0, -1 },
     { "cool_flow_check_s",          "flow",        50.0,  0.0,   300.0, 30.0, 120.0, -1 },
+    { "cool_recheck_s",             "recheck",    150.0,  0.0,  3600.0, 60.0, 600.0, -1 },
     { "cool_flow_rise",             NULL,          14.4,  1.0,    40.0,  8.0,  16.0,  0 },
     { "cool_tach_exhaust_min_rpm",  "exhaust",   6400.0,  0.0, 20000.0, 5800.0, 7000.0, -1 },
     { "cool_tach_intake_min_rpm",   "intake",    2290.0,  0.0, 20000.0, 2100.0, 2500.0, -1 },
