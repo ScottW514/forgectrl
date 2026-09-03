@@ -425,15 +425,14 @@ out_norestart:
  * and the spread across them is reported so a noisy loop refuses rather
  * than recommends. */
 /* What the PIC returns for a thermistor depends on how soon the read
- * follows the previous PIC read: the second of a pair issued within a
- * tenth of a millisecond comes back 6 to 8 counts high with a wide
- * spread (either sensor, either order), a pair 0.5 to 10 ms apart reads
- * tight and a steady 3 counts above sparse reads, and other readers'
- * traffic lands such pairs at random. Two sensors read back to back at
- * 8 Hz and averaged gave edges that wandered by up to 12 counts
- * (spreads of 11 to 23 over six edges of a 15-count step, refused).
- * Each sensor is therefore read half an interval after the other, the
- * same pattern before and after the edge so the pattern's own bias
+ * follows the previous PIC transaction: the second of a pair issued
+ * within a tenth of a millisecond comes back 6 to 8 counts high with a
+ * wide spread (either sensor, either order), a pair 0.5 to 10 ms apart
+ * reads tight and a steady 3 counts above sparse reads. The module paces
+ * every PIC transaction a millisecond apart (pic_gap_us), so no reader
+ * lands a disturbed pair; the read pattern here still carries the
+ * steady bias, so each sensor is read half an interval after the other,
+ * the same pattern before and after the edge so the pattern's own bias
  * cancels in the difference, and each window is the interquartile mean
  * of its 48 samples (3 s at 16 Hz, the lowest and highest quarter
  * dropped): what other traffic still lands in a window falls out on
