@@ -1118,14 +1118,38 @@ void cool_diag_aa(long duty)
 
 /* ------------------------------------------------------ verdict file */
 
+/* The document must always fit its buffer. An oversized one is not
+ * published at all, and no verdict reads to every controller as a
+ * fault: fire blocked and the job held. Budget: the keys, quotes and
+ * separators; the four booleans; the numbers (seq, ts_mono and the two
+ * temperatures); and the two bounded strings. */
+#define VERDICT_PUNCTUATION 104
+#define VERDICT_BOOLEANS     20
+#define VERDICT_NUMBERS      64
+#define VERDICT_BODY_MAX    384
+_Static_assert(VERDICT_PUNCTUATION + VERDICT_BOOLEANS + VERDICT_NUMBERS +
+               COOL_VERDICT_MAX + COOL_REASON_MAX <= VERDICT_BODY_MAX,
+               "the cooling verdict must always fit its buffer: an "
+               "unpublished verdict blocks fire and holds the job");
+
 /* Atomic publish: write-temp + rename, ~1 Hz and on every change (the
  * loop runs at 1 Hz, so every iteration publishes). Readers treat a
- * missing file or ts_mono older than ~2 s as fire_ok=false, hold=true. */
+ * missing file or ts_mono older than ~2 s as fire_ok=false, hold=true.
+ *
+ * "armed" is this engine's own view of the armed window, and it is what
+ * makes a verdict answer the session it is read against. The controller
+ * opens its armed window before this engine has seen the report, so
+ * without it the permissive idle verdict - fire_ok=true, nothing wrong
+ * at idle - stays fresh across the arm and authorizes the first fire
+ * before the run airflow is applied. Published from eff_armed, which
+ * the tick sets before flood_apply and before this call, so a verdict
+ * carrying armed=true was computed with the run session open. */
 static void verdict_publish(int fire_ok, const char *verdict, int hold,
                             int have_down, float down,
                             int have_up, float up)
 {
-    char body[320];
+    char body[VERDICT_BODY_MAX];
+    int armed_ack = eff_armed;
     pthread_mutex_lock(&mu);
     snprintf(pub_verdict, sizeof(pub_verdict), "%s", verdict);
     pub_fire_ok = fire_ok;
@@ -1134,10 +1158,11 @@ static void verdict_publish(int fire_ok, const char *verdict, int hold,
     pub_up = have_up ? up : -273.15;
     int n = snprintf(body, sizeof(body),
         "{\"seq\":%lu,\"ts_mono\":%.3f,\"fire_ok\":%s,"
-        "\"verdict\":\"%s\",\"hold\":%s,\"resume_ok\":%s,"
+        "\"verdict\":\"%s\",\"hold\":%s,\"resume_ok\":%s,\"armed\":%s,"
         "\"reason\":\"%s\",\"down_c\":%.2f,\"up_c\":%.2f}\n",
         ++verdict_seq, wall_s(), fire_ok ? "true" : "false",
         verdict, hold ? "true" : "false", hold ? "false" : "true",
+        armed_ack ? "true" : "false",
         pub_reason, pub_down, pub_up);
     pthread_mutex_unlock(&mu);
     /* snprintf reports the untruncated length; never publish more than
