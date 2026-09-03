@@ -1674,6 +1674,23 @@ int main(int argc, char **argv)
         fflog(LOG_ERR, "ulfius init failed");
         return 1;
     }
+    /* Cap the body the framework keeps in memory. ulfius accumulates
+     * every POST body into its own buffer before any endpoint callback
+     * runs, so before the token check; its default is 0, which means no
+     * limit, and an unauthenticated client on the network could stream
+     * until the board ran out of memory and took this process, and any
+     * job with it. The ceiling bounds that to this much per connection,
+     * against the 64-connection and 16-per-IP limits set below.
+     *
+     * Safe for the firmware upload, which is much larger than this: the
+     * cap truncates only the framework's own copy, and its post
+     * processor still receives every chunk in full, so the multipart
+     * file parts reach update_upload_sink and stream to disk as before.
+     * Nothing here reads that raw copy - the form routes read the
+     * parsed body map, which the post processor fills either way.
+     * The largest legitimate form body is a settings POST, whose
+     * longest single value is a 180-character dose curve. */
+    inst.max_post_body_size = 64 * 1024;
     ulfius_add_endpoint_by_val(&inst, "GET", "/", NULL, 0, &cb_root, NULL);
     ulfius_add_endpoint_by_val(&inst, "GET", "/cam/stream", NULL, 0,
                                &cb_stream, NULL);
