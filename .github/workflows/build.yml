@@ -48,3 +48,5 @@ jobs:
         run: ./build/auth_peer_test
       - name: Fragmented-MP4 muxer
         run: ./build/mp4mux_test
+      - name: Panel dev-server mock mirrors the daemon
+        run: python3 -B -m unittest -v tests/test_devserver_mock.py

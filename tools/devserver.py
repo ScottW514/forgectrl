@@ -334,59 +334,225 @@ MOCK_SVG = (
     "font-size='14' text-anchor='middle'>%s</text></svg>"
 )
 
+# The settings keys forgectrl serves, in the order of its setting_defs
+# table (src/main.c). GET /settings reports a secret key as "<key>_set"
+# (a boolean) and never its value; POST accepts it under its own name.
+# tests/test_devserver_mock.py holds both tuples to the C table.
+SETTINGS_KEYS = (
+    'controller_mode', 'homing_mode',
+    'gfcloud_home_x', 'gfcloud_home_y', 'gfcloud_home_z',
+    'gfcloud_home_timeout_s', 'gf_serial', 'gf_password', 'ui_units',
+    'wifi_country',
+    'cool_flow_rise', 'cool_flow_heater_pct', 'cool_flow_check_s',
+    'cool_recheck_s', 'cool_confirm_max_s', 'cool_laser_heat_cw',
+    'cool_laser_heat_density', 'cool_aa_offset_counts',
+    'cool_temp_max', 'cool_temp_resume', 'cool_temp_critical_c',
+    'cool_temp_min', 'cool_temp_start', 'cool_tec_present',
+    'cool_tec_on_c', 'cool_tec_off_c',
+    'cool_fire_q1_alert', 'cool_fire_q1_critical',
+    'cool_fire_q2_alert', 'cool_fire_q2_critical',
+    'cool_accel_x_alert', 'cool_accel_y_alert', 'cool_accel_abort',
+    'cool_cooldown_s', 'cool_cooldown_max_s',
+    'cool_tach_exhaust_min_rpm', 'cool_tach_intake_min_rpm',
+    'cool_tach_air_assist_min_rpm', 'cool_purge_min_current',
+    'cool_fan_grace_s',
+    'laser_button_timeout_s', 'laser_disarm_s', 'laser_floor_density',
+    'laser_dose_curve', 'laser_corner_gamma', 'laser_pulse_ticks',
+    'laser_pulse_min_ticks', 'rail_settle_s', 'lid_lamp_idle',
+    'cloud_pause_backtrack_ticks', 'cloud_resume_lead_ticks',
+    'cloud_hold_max_s', 'pulse_warn_threshold_bytes',
+    'pulse_reject_threshold_bytes', 'lid_policy',
+    'log_forgectrl_disk', 'log_forgectrl_remote',
+    'log_grblhal_disk', 'log_grblhal_remote',
+    'log_gfcloud_disk', 'log_gfcloud_remote',
+    'log_gfhome_disk', 'log_gfhome_remote',
+    'log_kernel_disk', 'log_kernel_remote',
+    'log_system_disk', 'log_system_remote',
+    'syslog_server', 'syslog_port', 'syslog_proto',
+)
+SECRET_KEYS = ('gf_password',)
+# The enumerated keys the daemon's validators accept (the numeric keys
+# outside the gate table are not range-checked here).
+SETTING_CHOICES = {
+    'controller_mode': ('grbl', 'cloud'),
+    'homing_mode': ('none', 'gfcloud', 'switches'),
+    'ui_units': ('metric', 'imperial'),
+    'cool_tec_present': ('0', '1'),
+    'lid_policy': ('cancel', 'hold'),
+    'syslog_proto': ('udp', 'tcp'),
+}
+LOGGERS = ('forgectrl', 'grblhal', 'gfcloud', 'gfhome', 'kernel', 'system')
+LOG_LEVELS = ('off', 'error', 'warning', 'notice', 'info', 'debug')
+LOGS_ROOT = '/data/log/forgefirm'
+FAN_NAMES = ('exhaust', 'intake_1', 'intake_2', 'air_assist', 'purge')
+FIRE_GATES = ('cool_fire_q1_alert', 'cool_fire_q1_critical',
+              'cool_fire_q2_alert', 'cool_fire_q2_critical')
+DIAG_TOOLS = ('flow-verify', 'flow-calibrate', 'aa-offset-calibrate')
+SLOT_TARGETS = {'sd': '/dev/mmcblk1p1', 'a': '/dev/mmcblk2p1',
+                'b': '/dev/mmcblk2p2', 'legacy': '/dev/mmcblk2p4'}
+MOCK_VERSION = '20260101000000 (mock)'
+MOCK_RELEASE = '0.0.2'          # what /update/check offers
+JOB_S = 8                       # seconds a mock update job runs
+CURVE_WAIT_S, CURVE_RECORD_S = 3, 12
+# A mock update job walks its kind's phases (the daemon's own strings)
+# evenly over JOB_S seconds.
+JOB_PHASES = {
+    'download': ('downloading', 'verifying signature'),
+    'apply': ('taking update lock', 'verifying archive',
+              'unmounting target', 'writing slot', 'verifying written slot'),
+    'restore': ('taking update lock', 'verifying archive checksum',
+                'unmounting target', 'writing factory image',
+                'verifying written slot'),
+}
+
+# A mock diagnostic walks these phases (the daemon's own phase strings)
+# by elapsed second, then ends with the canned result for its tool.
+DIAG_PLANS = {
+    'flow-verify': (
+        (3, 'stopping the motion controller'),
+        (10, 'settling before trial 1/1 (pump on)'),
+        (20, 'trial 1/1: heater 40% for 50 s (pump on)'),
+        (27, 'settling before trial 1/1 (pump off)'),
+        (37, 'trial 1/1: heater 40% for 50 s (pump off)'),
+        (40, 'standing down'),
+    ),
+    'flow-calibrate': (
+        (3, 'stopping the motion controller'),
+        (8, 'settling before trial 1/3 (pump on)'),
+        (14, 'trial 1/3: heater 40% for 50 s (pump on)'),
+        (20, 'trial 1/3: heater 40% for 50 s (pump off)'),
+        (26, 'trial 2/3: heater 40% for 50 s (pump on)'),
+        (32, 'trial 2/3: heater 40% for 50 s (pump off)'),
+        (38, 'trial 3/3: heater 40% for 50 s (pump on)'),
+        (44, 'trial 3/3: heater 40% for 50 s (pump off)'),
+        (47, 'standing down'),
+    ),
+    'aa-offset-calibrate': (
+        (3, 'stopping the motion controller'),
+        (10, 'settling with the fans idle'),
+        (16, 'cycle 1/3: air assist to run'),
+        (22, 'cycle 1/3: air assist to idle'),
+        (28, 'cycle 2/3: air assist to run'),
+        (34, 'cycle 2/3: air assist to idle'),
+        (40, 'cycle 3/3: air assist to run'),
+        (46, 'cycle 3/3: air assist to idle'),
+        (49, 'standing down'),
+    ),
+}
+DIAG_RESULTS = {
+    'flow-verify': {'pass': True, 'threshold': 14.4, 'flow_rise': 11.8,
+                    'flow_dt': 2.1, 'noflow_rise': 17.6, 'noflow_dt': 7.9,
+                    'margin_flow': 2.6, 'margin_noflow': 3.2,
+                    'thin_margin': False},
+    'flow-calibrate': {'flow_rises': [11.6, 12.0, 12.0],
+                       'noflow_rises': [17.6, 17.7, 18.1],
+                       'flow_max': 12.0, 'noflow_min': 17.6, 'gap': 5.6,
+                       'recommend': 14.8},
+    'aa-offset-calibrate': {'steps': [[-19.5, -20.1], [20.3, 19.8],
+                                      [-19.9, -20.4], [20.0, 19.6],
+                                      [-20.2, -19.7], [19.8, 20.3]],
+                            'offset_counts': 19.9, 'spread_counts': 0.8,
+                            'recommend': 19.9},
+}
+
+
+def num(x):
+    """A float as the daemon's %g prints it: 33 stays 33, 14.4 stays
+    14.4 (JSON reads both as numbers; the text just matches)."""
+    return int(x) if float(x) == int(x) else x
+
 
 class Mock:
-    """In-memory stand-in for the daemon: enough of every endpoint the
-    panel touches for the JavaScript to run end to end. State-changing
-    calls are token-checked like the real thing so a missing fx() shows
-    up as the same 403 it would on the machine."""
+    """In-memory stand-in for the daemon: every endpoint it registers,
+    in the JSON shape it serves, so the JavaScript runs end to end.
+    State-changing calls are token-checked like the real thing, so a
+    missing fx() shows up as the same 403 it would on the machine, and
+    refusals come back the way the daemon sends them: text/plain from
+    the handlers in main.c, {"error":...} from the update module and
+    the token check.
+
+    GF_MOCK_BUTTON=1 in the environment holds the machine button down
+    (the fuse-identity viewer needs an operator at the machine)."""
+
+    # The gate settings, one row per line of the table in src/gates.c:
+    # key, the gate name /status reports (None for a key that tunes a
+    # gate without being one), default, legal range, recommended band,
+    # and which end of the range turns the gate off.
+    # tests/test_devserver_mock.py holds this to the C table.
+    GATES = (
+        ('cool_temp_max', 'coolant_max', 33.0, 5.0, 60.0, 25.0, 38.0, 'high'),
+        ('cool_temp_resume', None, 31.0, 5.0, 59.0, 20.0, 36.0, 'none'),
+        ('cool_temp_critical_c', 'coolant_critical', 38.0, 6.0, 70.0, 36.0, 45.0, 'high'),
+        ('cool_temp_min', 'coolant_min', 5.0, 0.0, 40.0, 3.0, 8.0, 'low'),
+        ('cool_temp_start', 'warm_up', 16.0, 0.0, 40.0, 12.0, 20.0, 'low'),
+        ('cool_tec_on_c', None, 20.0, 6.0, 32.0, 18.0, 24.0, 'none'),
+        ('cool_tec_off_c', None, 18.0, 5.0, 31.0, 16.0, 22.0, 'none'),
+        ('cool_fire_q1_alert', 'flame_q1_alert', 275.0, 0.0, 1023.0, 250.0, 450.0, 'low'),
+        ('cool_fire_q1_critical', 'flame_q1_critical', 688.0, 0.0, 1023.0, 500.0, 1023.0, 'low'),
+        ('cool_fire_q2_alert', 'flame_q2_alert', 374.0, 0.0, 1023.0, 300.0, 500.0, 'low'),
+        ('cool_fire_q2_critical', 'flame_q2_critical', 1022.0, 0.0, 1023.0, 500.0, 1023.0, 'low'),
+        ('cool_accel_x_alert', 'crash_x_alert', 132.0, 0.0, 255.0, 100.0, 170.0, 'low'),
+        ('cool_accel_y_alert', 'crash_y_alert', 112.0, 0.0, 255.0, 85.0, 145.0, 'low'),
+        ('cool_accel_abort', 'crash_abort', 133.0, 0.0, 255.0, 100.0, 170.0, 'low'),
+        ('cool_flow_check_s', 'flow', 50.0, 0.0, 300.0, 30.0, 120.0, 'low'),
+        ('cool_recheck_s', 'recheck', 150.0, 0.0, 3600.0, 60.0, 600.0, 'low'),
+        ('cool_flow_rise', None, 14.4, 1.0, 40.0, 8.0, 16.0, 'none'),
+        ('cool_tach_exhaust_min_rpm', 'exhaust', 6400.0, 0.0, 20000.0, 5800.0, 7000.0, 'low'),
+        ('cool_tach_intake_min_rpm', 'intake', 2290.0, 0.0, 20000.0, 2100.0, 2500.0, 'low'),
+        ('cool_tach_air_assist_min_rpm', 'air_assist', 6000.0, 0.0, 30000.0, 5500.0, 6600.0, 'low'),
+        ('cool_purge_min_current', 'purge', 300.0, 0.0, 1023.0, 150.0, 500.0, 'low'),
+        ('cool_fan_grace_s', None, 15.0, 0.0, 120.0, 5.0, 30.0, 'none'),
+    )
 
     def __init__(self, token):
         self.token = token
         self.lock = threading.Lock()
         self.t0 = time.time()
-        self.settings = {
-            'controller_mode': 'grbl', 'homing_mode': 'gfcloud',
-            'gfcloud_home_x': '', 'gfcloud_home_y': '', 'gfcloud_home_z': '',
-            'gfcloud_home_timeout_s': '', 'gf_serial': '',
-            'gf_password_set': False, 'ui_units': '', 'wifi_country': '',
-            'cool_flow_rise': '', 'cool_flow_heater_pct': '',
-            'cool_flow_check_s': '', 'cool_recheck_s': '',
-            'cool_confirm_max_s': '', 'cool_temp_max': '',
-            'cool_temp_resume': '', 'cool_temp_critical_c': '', 'cool_cooldown_s': '',
-            'cool_cooldown_max_s': '',
-            'cool_tach_exhaust_min_rpm': '', 'cool_tach_intake_min_rpm': '',
-            'cool_tach_air_assist_min_rpm': '', 'cool_purge_min_current': '',
-            'cool_fan_grace_s': '', 'laser_button_timeout_s': '',
-            'laser_disarm_s': '', 'laser_floor_density': '',
-            'laser_dose_curve': '', 'laser_corner_gamma': '',
-            'laser_pulse_ticks': '', 'laser_pulse_min_ticks': '',
-            'rail_settle_s': '', 'lid_lamp_idle': '',
-            'cloud_pause_backtrack_ticks': '', 'cloud_resume_lead_ticks': '', 'lid_policy': '',
-            'syslog_server': '', 'syslog_port': '', 'syslog_proto': '',
-            'version': '20260101000000 (mock)', 'machine_id': 'ABC-123',
-        }
-        for lg in ('forgectrl', 'grblhal', 'gfcloud', 'gfhome', 'kernel',
-                   'system'):
-            self.settings['log_%s_disk' % lg] = ''
-            self.settings['log_%s_remote' % lg] = ''
+        self.version = MOCK_VERSION
+        self.machine_id = 'ABC-123'
+        self.settings = dict.fromkeys(SETTINGS_KEYS, '')
+        self.settings.update({'controller_mode': 'grbl',
+                              'homing_mode': 'gfcloud'})
+        # The supervisor (GET /mode): the selected mode, the controller
+        # process state, its pid and the motion-liveness probe.
         self.mode = 'grbl'
+        self.controller = 'running'
+        self.pid = 412
+        self.motion = 'verified'
+        self.report_at = self.t0
+        self.rep_armed = False
+        self.button = os.environ.get('GF_MOCK_BUTTON') == '1'
+        # GET /status, in the daemon's key order; diag, grbl and
+        # gates_off are filled in per request.
         self.status = {
             'state': 'idle', 'homed': True, 'diag': False,
-            'temps': {'chassis_c': 29.0, 'supply_raw': 589, 'soc_c': 42.8, 'soc_throttle': 0},
-            'sys': {'cpu_pct': 7.4, 'mem_pct': 38.2},
             'pos': {'x': 12.34, 'y': -5.6, 'z': 0.0},
             'laser_locked': True,
-            'laser': {'emission_samples': 0, 'pgood_samples': 0},
+            'laser': {'emission_samples': 0, 'pgood_samples': 255},
             'faults': 0, 'hv_current_raw': 0, 'lid_ir': [2, 2, 3, 2],
             'fans': {'air_assist': 1990, 'exhaust': 0, 'intake_1': 720,
                      'intake_2': 730},
             'coolant': {'down_c': 22.4, 'up_c': 22.3, 'pump': True,
                         'tec': False},
+            'temps': {'chassis_c': 29.0, 'supply_raw': 589, 'soc_c': 42.8,
+                      'soc_throttle': 0},
+            'sys': {'cpu_pct': 7.4, 'mem_pct': 38.2},
             'gfsvc': {'latest': '2.6.0', 'tested': '2.6.0'},
-            'gates_off': [],
             'switches': {'lid': True, 'button': False, 'interlock_ok': True,
-                         'head': False, 'hv_enable': False},
+                         'head': True, 'hv_enable': False},
+        }
+        # The controller's grbl.state report, embedded verbatim by the
+        # daemon while the GRBL controller runs (ts_mono is stamped per
+        # request).
+        self.grbl_report = {
+            'state': 'Idle', 'alarm': 0,
+            'sender': {'connected': False, 'generation': 3, 'for_s': 0,
+                       'peer': ''},
+            'laser': {'armed': False, 'arming': False, 'model': 'density',
+                      'floor_pct': 10, 'curve': 'off'},
+            'modals': '[GC:G0 G54 G17 G21 G91 G94 M5 M9 T0 F600 S500.]',
+            'overrides': {'feed': 100, 'rapid': 100},
+            'driver': '260809',
         }
         self.diag = {
             'running': False, 'tool': 'flow-calibrate', 'phase': 'done',
@@ -394,23 +560,23 @@ class Mock:
             'log': ['  0:00  start: duty 40%, window 50 s, '
                     'threshold 14.4 C',
                     '  8:44  bands: flow <= 12.0, no-flow >= 17.6 '
-                    '(gap 5.7)'],
-            'result': {'flow_rises': [11.6, 12.0, 12.0],
-                       'noflow_rises': [17.6, 17.7, 18.1],
-                       'flow_max': 12.0, 'noflow_min': 17.6, 'gap': 5.7,
-                       'recommend': 14.8},
+                    '(gap 5.6)',
+                    '  8:47  done'],
+            'result': DIAG_RESULTS['flow-calibrate'],
         }
+        self.diag_t0 = 0.0
         self.slots = {
-            'booted': 'a',
-            'env': {'ffboot_slot': 'a'},
+            'booted': SLOT_TARGETS['a'],
+            'env': {'mmcdev': '2', 'mmchwpart': '0', 'mmcpart': '1',
+                    'mmcroot': SLOT_TARGETS['a']},
             'slots': {
-                'a': {'device': '/dev/mmcblk0p2', 'present': 'yes',
+                'a': {'device': SLOT_TARGETS['a'], 'present': 'yes',
                       'state': 'ok', 'type': 'forgefirm',
-                      'version': '20260101000000 (mock)',
-                      'kernel': '6.12.0', 'booted': True, 'next': True},
-                'b': {'device': '/dev/mmcblk0p3', 'present': 'yes',
-                      'state': 'ok', 'type': 'factory', 'version': '2.6.0',
-                      'kernel': '4.14', 'booted': False, 'next': False},
+                      'version': MOCK_VERSION, 'kernel': 'yes',
+                      'booted': True, 'next': True},
+                'b': {'device': SLOT_TARGETS['b'], 'present': 'yes',
+                      'state': 'ok', 'type': 'factory', 'version': 'v2.6.0',
+                      'kernel': 'yes', 'booted': False, 'next': False},
             },
             'archives': [{'file': 'factory-rootfs-20260101000000.img.gz',
                           'bytes': 210000000, 'version': '2.6.0',
@@ -422,28 +588,174 @@ class Mock:
         }
         self.update = {'running': False, 'kind': '', 'phase': '',
                        'elapsed': 0, 'progress_bytes': -1, 'result': None}
-        self.logtext = {lg: '' for lg in ('forgectrl', 'grblhal', 'gfcloud',
-                                          'gfhome', 'kernel', 'system')}
+        self.job_t0 = 0.0
+        self.job_args = {}
+        self.curve = {'state': 'idle', 'reason': '', 'elapsed_s': 0,
+                      'samples': 0, 'curve': '', 'points': []}
+        self.curve_t0 = 0.0
+        self.logtext = {lg: '' for lg in LOGGERS}
         self.logtext['forgectrl'] = (
             'Jan  1 00:00:01 forgectrl: auth: generated a new panel token\n'
             'Jan  1 00:00:01 forgectrl: super: grbl controller started '
             'pid 412\n'
             'Jan  1 00:00:02 forgectrl: cool: engine up, pump on\n')
 
-    # -- helpers
+    # -- gates (the table above, read the way gates.c reads it)
+    def gate_row(self, key):
+        for row in self.GATES:
+            if row[0] == key:
+                return row
+        return None
+
+    def gate_value(self, row):
+        """The stored value inside its legal range, else the default
+        (gate_parse: an empty or out-of-range value is no value)."""
+        try:
+            v = float(self.settings.get(row[0]) or '')
+        except ValueError:
+            return row[2]
+        return v if row[3] <= v <= row[4] else row[2]
+
+    def gate(self, key):
+        return self.gate_value(self.gate_row(key))
+
+    @staticmethod
+    def gate_state(row, v):
+        """gate_state in gates.c: off wins over warn."""
+        lo, hi, blo, bhi, off = row[3:]
+        if (off == 'low' and v <= lo) or (off == 'high' and v >= hi):
+            return 'off'
+        if v < blo or v > bhi:
+            return 'warn'
+        return 'ok'
+
+    def gates_json(self):
+        out = {}
+        for row in self.GATES:
+            key, gate, default, lo, hi, blo, bhi, off = row
+            v = self.gate_value(row)
+            out[key] = {'gate': gate, 'def': num(default), 'lo': num(lo),
+                        'hi': num(hi), 'band': [num(blo), num(bhi)],
+                        'off': off, 'value': num(v),
+                        'state': self.gate_state(row, v)}
+        return out
+
+    def gates_off(self):
+        return [row[1] for row in self.GATES
+                if row[1] and self.gate_state(row, self.gate_value(row))
+                == 'off']
+
+    # -- documents
+    def settings_reply(self):
+        out = {}
+        for k in SETTINGS_KEYS:
+            if k in SECRET_KEYS:
+                out[k + '_set'] = bool(self.settings[k])
+            else:
+                out[k] = self.settings[k]
+        out['gates'] = self.gates_json()
+        out['version'] = self.version
+        out['machine_id'] = self.machine_id
+        return out
+
+    def setting_valid(self, key, v):
+        """The daemon's validators, as far as the mock mirrors them: the
+        gate table's legal ranges, the enumerated keys and the log
+        levels. The other numeric keys pass unchecked."""
+        row = self.gate_row(key)
+        if row:
+            try:
+                f = float(v)
+            except ValueError:
+                return False
+            return row[3] <= f <= row[4]
+        if key in SETTING_CHOICES:
+            return v in SETTING_CHOICES[key]
+        if key.startswith('log_'):
+            return v in LOG_LEVELS
+        return True
+
+    def idle(self):
+        return self.status['state'] == 'idle'
+
+    def mode_reply(self):
+        return {'mode': self.mode, 'controller': self.controller,
+                'pid': self.pid, 'motion': self.motion}
+
+    def status_reply(self):
+        self.status['diag'] = self.diag['running']
+        self.status['switches']['button'] = self.button
+        grbl = None
+        if self.mode == 'grbl' and self.controller == 'running':
+            report = {'ts_mono': round(time.monotonic() - 1.2, 3)}
+            report.update(self.grbl_report)
+            grbl = {'age_s': 1.2, 'report': report}
+        out = {}
+        for k, v in self.status.items():
+            if k == 'temps' and grbl:
+                out['grbl'] = grbl
+            if k == 'switches':
+                out['gates_off'] = self.gates_off()
+            out[k] = v
+        return out
+
+    def cool_reply(self):
+        fans = self.status['fans']
+        readings = dict(fans, purge=627)
+        floors = {'exhaust': self.gate('cool_tach_exhaust_min_rpm'),
+                  'intake_1': self.gate('cool_tach_intake_min_rpm'),
+                  'intake_2': self.gate('cool_tach_intake_min_rpm'),
+                  'air_assist': self.gate('cool_tach_air_assist_min_rpm'),
+                  'purge': self.gate('cool_purge_min_current')}
+        fan_gates = {}
+        for n in FAN_NAMES:
+            fan_gates[n] = {'reading': readings[n], 'floor': num(floors[n]),
+                            'state': 'off' if floors[n] <= 0 else 'idle'}
+        age = -1 if self.report_at is None else \
+            round(time.time() - self.report_at, 1)
+        watching = any(self.gate(k) > 0 for k in FIRE_GATES)
+        c = self.status['coolant']
+        return {
+            'phase': 'idle', 'verdict': 'OK', 'fire_ok': True,
+            'hold': False, 'resume_ok': True, 'reason': '',
+            'down_c': c['down_c'], 'up_c': c['up_c'],
+            'report_age_s': age, 'armed': self.rep_armed,
+            'fire_watch': 'armed' if watching else 'watch',
+            'accel_watch': 'watch',
+            'gates_off': self.gates_off(),
+            'limits': {
+                'coolant_max_c': self.gate('cool_temp_max'),
+                'coolant_resume_c': self.gate('cool_temp_resume'),
+                'coolant_critical_c': self.gate('cool_temp_critical_c'),
+                'coolant_source': 'local',
+                'coolant_min_c': self.gate('cool_temp_min'),
+                'exhaust_min_rpm': num(floors['exhaust']),
+                'intake_min_rpm': num(floors['intake_1']),
+                'air_assist_min_rpm': num(floors['air_assist'])},
+            'fan_gates': fan_gates}
+
+    def cam_reply(self):
+        return {'running': False, 'cam': 'lid', 'clients': 0, 'frames': 0,
+                'fps': 0.0, 'fps_cap': 15.0, 'hw_fps_skip': False,
+                'encoder': 'vpu', 'convert': 'gpu', 'buffers': 'cached',
+                'sensor': 'OV5648',
+                'stream': {'width': 1296, 'height': 972},
+                'snapshot': {'width': 2592, 'height': 1944},
+                'h264': {'active': False, 'clients': 0},
+                'health': {'captured': 0, 'corrupt': 0, 'restarts': 0},
+                'capture_allowed': self.status['switches']['lid'],
+                'stopped_by_lid': False}
+
     def _logs_json(self):
         loggers = []
-        for lg in ('forgectrl', 'grblhal', 'gfcloud', 'gfhome', 'kernel',
-                   'system'):
+        for lg in LOGGERS:
             d = self.settings.get('log_%s_disk' % lg) or 'info'
             r = self.settings.get('log_%s_remote' % lg) or 'off'
             loggers.append({'name': lg, 'disk': d, 'remote': r,
                             'effective_disk': d, 'effective_remote': r,
                             'bytes': len(self.logtext[lg]),
                             'files': 1 if self.logtext[lg] else 0})
-        return {'root': '/data/log/forgefirm',
-                'levels': ['off', 'error', 'warning', 'notice', 'info',
-                           'debug'],
+        return {'root': LOGS_ROOT, 'levels': list(LOG_LEVELS),
                 'loggers': loggers,
                 'syslog_server': self.settings['syslog_server'],
                 'syslog_port': self.settings['syslog_port'] or '514',
@@ -455,7 +767,7 @@ class Mock:
         name = q.get('name', 'forgectrl')
         text = self.logtext.get(name)
         if text is None:
-            return 404, {'error': 'unknown logger'}
+            return None
         try:
             lines = max(1, int(q.get('lines', '200')))
         except ValueError:
@@ -464,6 +776,9 @@ class Mock:
             frm = int(q.get('from', '-1'))
         except ValueError:
             frm = -1
+        if not text:
+            return {'name': name, 'size': 0, 'offset': 0, 'text': '',
+                    'truncated': False, 'exists': False}
         if frm >= 0:
             chunk = text[frm:]
             off = frm
@@ -471,9 +786,8 @@ class Mock:
             parts = text.splitlines(True)[-lines:]
             chunk = ''.join(parts)
             off = len(text) - len(chunk)
-        return 200, {'name': name, 'size': len(text), 'offset': off,
-                     'text': chunk, 'truncated': False,
-                     'exists': bool(text)}
+        return {'name': name, 'size': len(text), 'offset': off,
+                'text': chunk, 'truncated': False, 'exists': True}
 
     def _export_targz(self):
         buf = io.BytesIO()
@@ -494,127 +808,189 @@ class Mock:
         self.logtext['forgectrl'] += 'Jan  1 %s forgectrl: %s\n' % (
             time.strftime('%H:%M:%S'), line)
 
-    # The gate settings as forgectrl's gates.c publishes them (a mirror of
-    # its table): legal range, recommended band, off end, and the state of
-    # the stored value. The panel renders its warnings from this.
-    GATES = (
-        ('cool_temp_max', 'coolant_max', 33.0, 5.0, 60.0, 25.0, 38.0, 'high'),
-        ('cool_temp_resume', None, 31.0, 5.0, 59.0, 20.0, 36.0, 'none'),
-        ('cool_temp_critical_c', 'coolant_critical', 38.0, 6.0, 70.0, 36.0, 45.0, 'high'),
-        ('cool_flow_check_s', 'flow', 50.0, 0.0, 300.0, 30.0, 120.0, 'low'),
-        ('cool_flow_rise', None, 14.4, 1.0, 40.0, 8.0, 16.0, 'none'),
-        ('cool_tach_exhaust_min_rpm', 'exhaust', 6400.0, 0.0, 20000.0, 5800.0, 7000.0, 'low'),
-        ('cool_tach_intake_min_rpm', 'intake', 2290.0, 0.0, 20000.0, 2100.0, 2500.0, 'low'),
-        ('cool_tach_air_assist_min_rpm', 'air_assist', 6000.0, 0.0, 30000.0, 5500.0, 6600.0, 'low'),
-        ('cool_purge_min_current', 'purge', 300.0, 0.0, 1023.0, 150.0, 500.0, 'low'),
-        ('cool_fan_grace_s', None, 15.0, 0.0, 120.0, 5.0, 30.0, 'none'),
-    )
+    # -- the clock: mock jobs advance by wall time on every request
+    def _diag_log(self, el, line):
+        self.diag['log'].append('%3d:%02d  %s' % (el // 60, el % 60, line))
 
-    def settings_reply(self):
-        out = dict(self.settings)
-        gates = {}
-        for key, gate, default, lo, hi, blo, bhi, off in self.GATES:
-            try:
-                v = float(self.settings.get(key) or default)
-            except ValueError:
-                v = default
-            if (off == 'low' and v <= lo) or (off == 'high' and v >= hi):
-                state = 'off'
-            elif v < blo or v > bhi:
-                state = 'warn'
-            else:
-                state = 'ok'
-            gates[key] = {'gate': gate, 'def': default, 'lo': lo, 'hi': hi,
-                          'band': [blo, bhi], 'off': off, 'value': v,
-                          'state': state}
-        out['gates'] = gates
-        self.status['gates_off'] = [g['gate'] for g in gates.values()
-                                    if g['gate'] and g['state'] == 'off']
-        return out
+    def _diag_end(self, el, result):
+        self._diag_log(el, 'done')
+        self.diag.update({'running': False, 'phase': 'done',
+                          'elapsed_s': 0, 'result': result})
+        self.controller = 'running'
+        self.pid += 1
+        self._log('diag: %s done' % self.diag['tool'])
+
+    def _tick(self):
+        now = time.time()
+        d = self.diag
+        if d['running']:
+            el = int(now - self.diag_t0)
+            d['elapsed_s'] = el
+            phase = None
+            for t_end, name in DIAG_PLANS[d['tool']]:
+                if el < t_end:
+                    phase = name
+                    break
+            if phase is None:
+                self._diag_end(el, DIAG_RESULTS[d['tool']])
+            elif phase != d['phase']:
+                d['phase'] = phase
+                self._diag_log(el, phase)
+        u = self.update
+        if u['running']:
+            el = int(now - self.job_t0)
+            u['elapsed'] = el
+            phases = JOB_PHASES[u['kind']]
+            u['phase'] = phases[min(el * len(phases) // JOB_S,
+                                    len(phases) - 1)]
+            if u['kind'] != 'download':
+                u['progress_bytes'] = min(el, JOB_S) * 25000000
+            if el >= JOB_S:
+                self._job_end()
+        c = self.curve
+        if c['state'] in ('waiting', 'recording'):
+            el = int(now - self.curve_t0)
+            c['elapsed_s'] = el
+            if c['state'] == 'waiting' and el >= CURVE_WAIT_S:
+                c['state'] = 'recording'
+            if c['state'] == 'recording':
+                c['samples'] = (el - CURVE_WAIT_S) * 8
+                if el >= CURVE_WAIT_S + CURVE_RECORD_S:
+                    c.update({'state': 'done', 'elapsed_s': 0,
+                              'curve': '10:0.5,20:3,40:18,60:44,80:72,100:100',
+                              'points': [{'density': 10, 'light': 0.5},
+                                         {'density': 20, 'light': 3.0},
+                                         {'density': 40, 'light': 18.0},
+                                         {'density': 60, 'light': 44.0},
+                                         {'density': 80, 'light': 72.0},
+                                         {'density': 100, 'light': 100.0}]})
+
+    def _job_end(self):
+        u, a = self.update, self.job_args
+        slots = self.slots['slots']
+        if u['kind'] == 'download':
+            self.slots['staged']['download'] = {
+                'present': True, 'bytes': 87654321, 'version': MOCK_RELEASE}
+            result = {'ok': True, 'file': 'download',
+                      'version': MOCK_RELEASE, 'bytes': 87654321}
+        elif u['kind'] == 'apply':
+            ver = self.slots['staged'][a['file']]['version']
+            slots[a['slot']].update({'type': 'forgefirm', 'version': ver,
+                                     'state': 'ok', 'kernel': 'yes'})
+            result = {'ok': True, 'slot': a['slot'], 'version': ver,
+                      'signed': True}
+        else:
+            ver = a['archive']['version']
+            slots[a['slot']].update({'type': 'factory', 'version': 'v' + ver,
+                                     'state': 'ok', 'kernel': 'yes'})
+            result = {'ok': True, 'slot': a['slot'], 'factory_version': ver}
+        u.update({'running': False, 'phase': '', 'elapsed': 0,
+                  'progress_bytes': -1, 'result': result})
+        self._log('update: %s done' % u['kind'])
+
+    def _job_start(self, kind, args, J):
+        if self.update['running']:
+            return J(409, {'error': 'an update job is already running'})
+        if not self.idle():
+            return J(409, {'error': 'machine is not idle'})
+        if self.diag['running']:
+            return J(409, {'error': 'a diagnostic is running'})
+        self.update.update({'running': True, 'kind': kind,
+                            'phase': JOB_PHASES[kind][0], 'elapsed': 0,
+                            'progress_bytes': -1, 'result': None})
+        self.job_t0 = time.time()
+        self.job_args = args
+        self._log('update: %s started' % kind)
+        return J(202, {'started': True})
+
+    def _slot_target(self, form, J):
+        """The a/b slot an apply or restore writes, or the daemon's
+        refusal (the booted slot and the next-boot slot are never
+        written)."""
+        slot = form.get('slot', '')
+        s = self.slots['slots'].get(slot)
+        if slot not in ('a', 'b') or not s:
+            return None, J(400, {'error': 'slot must be a or b'})
+        if s['booted']:
+            return None, J(409, {'error':
+                                 'refusing to write the booted root slot'})
+        if s['next']:
+            return None, J(409, {'error':
+                                 'refusing to write the slot selected for '
+                                 'the next boot - point the next boot back '
+                                 'at the running slot first'})
+        return slot, None
 
     # -- dispatch: returns (status, headers dict, body bytes)
     def handle(self, method, path, q, headers, body):
         with self.lock:
+            self._tick()
             return self._handle(method, path, q, headers, body)
 
     def _handle(self, method, path, q, headers, body):
         J = lambda code, obj: (code, {'Content-Type': 'application/json'},
                                json.dumps(obj).encode())
+        T = lambda code, msg: (code, {'Content-Type': 'text/plain'},
+                               msg.encode())
         if method == 'GET':
             if path == '/settings':
                 return J(200, self.settings_reply())
             if path == '/status':
-                s = dict(self.status)
-                s['diag'] = self.diag['running']
-                if self.mode == 'grbl':
-                    s['grbl'] = {'age_s': 1.2, 'report': {
-                        'state': 'Idle', 'alarm': 0,
-                        'sender': {'connected': True, 'generation': 3,
-                                   'for_s': 754, 'peer': '192.0.2.20'},
-                        'laser': {'armed': False, 'arming': False,
-                                  'model': 'density', 'floor_pct': 10},
-                        'modals': '[GC:G0 G54 G17 G21 G91 G94 M5 M9 T0 F600 S500.]',
-                        'overrides': {'feed': 100, 'rapid': 100},
-                        'driver': '260809'}}
-                return J(200, s)
+                return J(200, self.status_reply())
             if path == '/mode':
-                return J(200, {'mode': self.mode, 'controller': 'running',
-                               'pid': 412, 'motion': 'verified'})
+                return J(200, self.mode_reply())
             if path == '/cam/status':
-                return J(200, {'running': False, 'cam': 'lid', 'clients': 0,
-                               'frames': 0, 'fps': 0, 'fps_cap': 0,
-                               'encoder': 'vpu', 'buffers': 'cached'})
+                return J(200, self.cam_reply())
             if path in ('/cam/snapshot', '/cam/stream') or (
                     path == '/' and q.get('action') in ('snapshot',
                                                         'stream')):
                 svg = MOCK_SVG % time.strftime('%H:%M:%S')
                 return 200, {'Content-Type': 'image/svg+xml'}, svg.encode()
+            if path == '/cam/h264':
+                return T(503, 'H.264 stream unavailable (the MJPEG stream '
+                              'still works)')
+            if path == '/grbl/settings':
+                if not (self.mode == 'grbl' and self.controller == 'running'):
+                    return T(404, 'no grbl controller')
+                return T(200, '$0=10\n$1=255\n$32=1\n$35=10\n')
             if path == '/curve/status':
-                return J(200, {'state': 'idle', 'reason': '', 'elapsed_s': 0,
-                               'samples': 0, 'curve': '', 'points': []})
+                return J(200, self.curve)
             if path == '/curve/ladder.gcode':
-                return 200, {'Content-Type': 'text/plain'}, b'; mock ladder\nM3\nS1000\nM5\n'
+                return 200, {'Content-Type': 'text/plain',
+                             'Content-Disposition':
+                             'attachment; filename="dose-ladder.gcode"'
+                             }, b'; mock ladder\nG21\nM3\nS1000\nM5\n'
             if path == '/diag/status':
-                d = dict(self.diag)
-                if d['running']:
-                    d['elapsed_s'] = int(time.time() - self._diag_t0)
-                    d['phase'] = 'heating' if d['elapsed_s'] < 20 else \
-                        'measuring'
-                return J(200, d)
+                return J(200, self.diag)
             if path == '/cool/status':
-                return J(200, {'state': 'idle', 'pump': True, 'tec': False,
-                               'down_c': 22.4, 'up_c': 22.3,
-                               'gates_off': self.status.get('gates_off', []),
-                               'limits': {'coolant_max_c': 33.0, 'coolant_resume_c': 31.0,
-                                          'coolant_critical_c': 38.0,
-                                          'coolant_source': 'local', 'coolant_min_c': 0,
-                                          'exhaust_min_rpm': 6400, 'intake_min_rpm': 2290,
-                                          'air_assist_min_rpm': 6000},
-                               'fan_gates': {
-                                   'exhaust': {'reading': 0, 'floor': 6400, 'state': 'idle'},
-                                   'intake_1': {'reading': 746, 'floor': 2290, 'state': 'idle'},
-                                   'intake_2': {'reading': 742, 'floor': 2290, 'state': 'idle'},
-                                   'air_assist': {'reading': 1902, 'floor': 6000, 'state': 'idle'},
-                                   'purge': {'reading': 627, 'floor': 300, 'state': 'idle'}}})
+                return J(200, self.cool_reply())
             if path == '/slots':
                 return J(200, self.slots)
             if path == '/update/status':
                 return J(200, self.update)
+            # Token-gated reads: log content and the fuse identity.
+            if path in ('/logs', '/logs/tail', '/fuse-identity'):
+                if not self._authorized(headers, q):
+                    return J(403, {'error': 'authentication required'})
             if path == '/logs':
                 return J(200, self._logs_json())
             if path == '/logs/tail':
-                return J(*self._tail_json(q))
+                if 'name' not in q:
+                    return T(400, 'name required')
+                tail = self._tail_json(q)
+                if tail is None:
+                    return T(404, 'unknown logger')
+                return J(200, tail)
             if path == '/fuse-identity':
-                if not self._authorized(headers, q):
-                    return J(403, {'error': 'authentication required'})
+                if not self.button:
+                    return T(403, 'hold the machine button to reveal the '
+                                  'fuse identity')
                 return J(200, {'serial': '123456789', 'hostname': 'ABC-123',
                                'password': '0123456789abcdef' * 4})
             return J(404, {'error': 'mock: no such endpoint'})
 
         if method != 'POST':
             return J(405, {'error': 'method not allowed'})
-        if not self._authorized(headers, q):
-            return J(403, {'error': 'authentication required'})
 
         form = dict(q)
         ctype = headers.get('Content-Type', '')
@@ -623,61 +999,189 @@ class Mock:
                                   keep_blank_values=True))
         form.pop('token', None)
 
+        # The controller's job-state report: loopback-only on the
+        # machine, no token.
+        if path == '/cool/state':
+            mode = form.get('mode')
+            if mode is None:
+                return T(400, 'mode is required')
+            if mode not in ('idle', 'run', 'cooldown'):
+                return T(400, 'mode must be idle, run or cooldown')
+            self.report_at = time.time()
+            self.rep_armed = form.get('armed', '0') not in ('', '0')
+            return J(200, {'ok': True})
+
+        if not self._authorized(headers, q):
+            return J(403, {'error': 'authentication required'})
+
         if path == '/settings':
             print('mock: POST /settings %s' % json.dumps(form), flush=True)
-            for k, v in form.items():
-                if k in self.settings and not k.endswith('_set'):
-                    self.settings[k] = v
-                elif k == 'gf_password':
-                    self.settings['gf_password_set'] = bool(v)
+            if self.diag['running']:
+                return T(409, 'a diagnostic is running - settings are '
+                              'locked')
+            if not self.idle():
+                return T(409, 'machine is not idle - settings are locked')
+            known = [k for k in SETTINGS_KEYS if k in form]
+            if not known:
+                return T(400, 'no known setting in request')
+            for k in known:
+                if form[k] and not self.setting_valid(k, form[k]):
+                    return T(400, 'invalid value for %s' % k)
+            for k in known:
+                self.settings[k] = form[k]
+                self._log('%s %s' % (k, 'cleared' if not form[k] else
+                                     'set' if k in SECRET_KEYS else form[k]))
             return J(200, self.settings_reply())
         if path == '/mode':
-            m = form.get('controller', '')
-            if m not in ('grbl', 'gfcloud', 'none'):
-                return J(400, {'error': 'controller must be grbl, gfcloud '
-                                        'or none'})
+            m = form.get('controller')
+            if m is None:
+                return T(400, 'controller is required')
+            if m not in ('grbl', 'cloud'):
+                return T(400, 'mode must be grbl or cloud')
+            if self.diag['running']:
+                return T(409, 'a diagnostic is running')
+            if self.update['running']:
+                return T(409, 'an update job is running')
+            if not self.idle():
+                return T(409, 'machine is not idle')
             self.mode = m
             self.settings['controller_mode'] = m
+            self.controller = 'running'
+            self.pid += 1
+            self.motion = 'unverified'
             self._log('super: mode -> %s' % m)
-            return J(200, {'mode': self.mode, 'controller': 'running',
-                           'pid': 413, 'motion': 'unverified'})
-        if path in ('/diag/flow-verify', '/diag/flow-calibrate'):
+            return J(200, self.mode_reply())
+        if path == '/controller/stop':
+            self.controller = 'standby'
+            self.pid = 0
+            self.report_at = None
+            self._log('super: controller stopped')
+            return J(200, {'stopped': True})
+        if path == '/controller/start':
             if self.diag['running']:
-                return J(409, {'error': 'a diagnostic is already running'})
-            self.diag.update({'running': True, 'tool': path[6:],
-                              'phase': 'starting', 'elapsed_s': 0,
-                              'log': ['  0:00  start (mock)'],
-                              'result': None})
-            self._diag_t0 = time.time()
-            self._log('diag: %s started' % path[6:])
-            return J(200, {'ok': True})
+                return T(409, 'a diagnostic owns the hardware')
+            self.controller = 'running'
+            self.pid += 1
+            self.report_at = time.time()
+            self._log('super: controller started pid %d' % self.pid)
+            return J(200, {'started': True})
+        if path.startswith('/diag/') and path != '/diag/abort':
+            tool = path[6:]
+            if self.update['running']:
+                return T(409, 'an update job is running')
+            if tool not in DIAG_TOOLS:
+                return T(400, 'unknown diagnostic')
+            if self.diag['running']:
+                return T(409, 'a diagnostic is already running')
+            if not self.idle():
+                return T(409, 'machine is not idle')
+            self.diag.update({'running': True, 'tool': tool, 'phase': '',
+                              'elapsed_s': 0, 'log': [], 'result': None})
+            self.diag_t0 = time.time()
+            self.controller = 'standby'
+            self.pid = 0
+            self._log('diag: %s started' % tool)
+            return J(202, {'started': True})
         if path == '/diag/abort':
-            self.diag.update({'running': False, 'phase': 'aborted'})
-            return J(200, {'ok': True})
+            if self.diag['running']:
+                self._diag_end(self.diag['elapsed_s'],
+                               {'error': 'aborted by operator'})
+            return J(200, {'aborting': True})
+        if path == '/curve/record':
+            if self.curve['state'] in ('waiting', 'recording'):
+                return T(409, 'a recording is already running')
+            if self.grbl_report['sender']['connected']:
+                return T(409, 'a sender is connected to the machine - close '
+                              'it before recording')
+            self.curve.update({'state': 'waiting', 'reason': '',
+                               'elapsed_s': 0, 'samples': 0, 'curve': '',
+                               'points': []})
+            self.curve_t0 = time.time()
+            return J(200, self.curve)
+        if path == '/curve/stop':
+            if self.curve['state'] == 'waiting':
+                self.curve.update({'state': 'failed', 'elapsed_s': 0,
+                                   'reason': 'stopped before the ladder '
+                                             'fired'})
+            elif self.curve['state'] == 'recording':
+                self.curve_t0 -= CURVE_RECORD_S
+                self._tick()
+            return J(200, self.curve)
         if path == '/boot':
-            slot = form.get('slot', '')
-            if slot not in ('a', 'b'):
-                return J(400, {'error': 'slot must be a or b'})
+            if self.diag['running']:
+                return J(409, {'error': 'a diagnostic is running'})
+            if not self.idle():
+                return J(409, {'error': 'machine is not idle'})
+            if self.update['running']:
+                return J(409, {'error': 'an update job is running'})
+            t = form.get('target', '')
+            if t not in SLOT_TARGETS:
+                return J(400, {'error': 'target must be sd, a, b, or legacy'})
+            if t not in self.slots['slots']:
+                return J(409, {'error': 'boot selection failed',
+                               'detail': '%s is not present' % t})
             for k, s in self.slots['slots'].items():
-                s['next'] = (k == slot)
-            self.slots['env']['ffboot_slot'] = slot
-            return J(200, {'ok': True, 'next': slot})
+                s['next'] = (k == t)
+            self.slots['env']['mmcroot'] = SLOT_TARGETS[t]
+            return J(200, {'ok': True, 'target': t,
+                           'detail': 'next boot: %s' % SLOT_TARGETS[t]})
+        if path == '/system/reboot':
+            if self.diag['running']:
+                return J(409, {'error': 'a diagnostic is running'})
+            if not self.idle():
+                return J(409, {'error': 'machine is not idle'})
+            if self.update['running']:
+                return J(409, {'error': 'an update job is running'})
+            if form.get('confirm') != '1':
+                return J(400, {'error': 'confirm=1 required'})
+            self._log('system: reboot requested (mock, no-op)')
+            return J(200, {'rebooting': True})
+        if path == '/update/check':
+            return J(200, {'available': True, 'version': MOCK_RELEASE,
+                           'current': self.version, 'new': True})
+        if path == '/update/download':
+            return self._job_start('download', {}, J)
+        if path == '/update/apply':
+            slot, err = self._slot_target(form, J)
+            if err:
+                return err
+            f = form.get('file', '')
+            if f not in ('download', 'upload'):
+                return J(400, {'error': 'file must be download or upload'})
+            if not self.slots['staged'][f]['present']:
+                return J(404, {'error': 'staged archive not found'})
+            return self._job_start('apply', {'slot': slot, 'file': f}, J)
+        if path == '/update/upload':
+            if self.update['running']:
+                return J(409, {'error': 'an update job is running'})
+            self.slots['staged']['upload'] = {
+                'present': True, 'bytes': len(body), 'version': MOCK_RELEASE}
+            return J(200, {'ok': True, 'file': 'upload', 'bytes': len(body),
+                           'version': MOCK_RELEASE, 'signature': 'forgefirm'})
+        if path == '/restore/factory':
+            slot, err = self._slot_target(form, J)
+            if err:
+                return err
+            f = form.get('file', '')
+            if not f.startswith('factory-rootfs-'):
+                return J(400, {'error': 'file must be a factory-rootfs '
+                                        'archive name'})
+            arch = [a for a in self.slots['archives'] if a['file'] == f]
+            if not arch:
+                return J(404, {'error': 'archive not found'})
+            return self._job_start('restore',
+                                   {'slot': slot, 'archive': arch[0]}, J)
         if path == '/logs/export':
-            data = self._export_targz()
+            if not self.idle():
+                return T(409, 'the machine is busy; export logs when it is '
+                              'idle')
+            full = form.get('sanitize', '1') in ('0', 'false', 'no')
+            name = 'forgefirm-logs-%s%s.tar.gz' % (
+                time.strftime('%Y%m%d-%H%M%S'), '-full' if full else '')
             return 200, {'Content-Type': 'application/gzip',
                          'Content-Disposition':
-                         'attachment; filename="forgefirm-logs.tar.gz"'
-                         }, data
-        if path.startswith('/update/') or path == '/restore/factory':
-            self.update.update({'running': False, 'kind': path[1:],
-                                'phase': 'done', 'elapsed': 0,
-                                'progress_bytes': -1,
-                                'result': {'ok': True, 'mock': True}})
-            return J(200, {'ok': True, 'mock': True})
-        if path in ('/system/reboot', '/controller/stop',
-                    '/controller/start', '/cool/state'):
-            self._log('%s (mock, no-op)' % path)
-            return J(200, {'ok': True})
+                         'attachment; filename="%s"' % name,
+                         }, self._export_targz()
         return J(404, {'error': 'mock: no such endpoint'})
 
 
